@@ -1,0 +1,21 @@
+{
+  "active_provider_id": "minimax",
+  "per_agent_enabled": false,
+  "agent_providers": {
+    "plot_planner": "minimax",
+    "part_writer": "minimax",
+    "style_optimizer": "minimax",
+    "emotion_review": "minimax",
+    "logic_review": "minimax",
+    "consistency_review": "minimax"
+  },
+  "global_temperature": 0.7,
+  "agent_temperatures": {
+    "plot_planner": 0.3,
+    "part_writer": 0.8,
+    "style_optimizer": 0.5,
+    "emotion_review": 0.3,
+    "logic_review": 0.3,
+    "consistency_review": 0.3
+  }
+}

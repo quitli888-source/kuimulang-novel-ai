@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 50" width="160" height="50">
+  <defs>
+    <!-- 艺术渐变：水墨晕染效果 -->
+    <linearGradient id="inkWash" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e;stop-opacity:1" />
+      <stop offset="30%" style="stop-color:#16213e;stop-opacity:1" />
+      <stop offset="70%" style="stop-color:#0f3460;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1a1a2e;stop-opacity:1" />
+    </linearGradient>
+    
+    <!-- 科技光效渐变 -->
+    <linearGradient id="techGlow" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#00D4FF;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#7C3AED;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#00D4FF;stop-opacity:1" />
+    </linearGradient>
+    
+    <!-- 金色点缀 -->
+    <linearGradient id="goldAccent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#F59E0B;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#FBBF24;stop-opacity:1" />
+    </linearGradient>
+    
+    <!-- 发光滤镜 -->
+    <filter id="softGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="1.5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    
+    <!-- 柔和阴影 -->
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+  
+  <!-- 装饰性背景框 - 艺术化边框 -->
+  <rect x="2" y="2" width="156" height="46" rx="6" 
+        fill="none" 
+        stroke="url(#techGlow)" 
+        stroke-width="0.8" 
+        opacity="0.4"/>
+  
+  <!-- 左上角装饰 -->
+  <path d="M8 12 L2 12 L2 6" stroke="url(#goldAccent)" stroke-width="1.5" fill="none" stroke-linecap="round" opacity="0.7"/>
+  
+  <!-- 右下角装饰 -->
+  <path d="M152 38 L158 38 L158 44" stroke="url(#goldAccent)" stroke-width="1.5" fill="none" stroke-linecap="round" opacity="0.7"/>
+  
+  <!-- 主文字：奎木狼 - 书法风格 -->
+  <g transform="translate(12, 36)" filter="url(#softShadow)">
+    <!-- 笔画底层阴影增强立体感 -->
+    <text x="0" y="0" 
+          font-family="'KaiTi', 'STKaiti', 'FangSong', 'STFangsong', serif" 
+          font-size="28" 
+          font-weight="400" 
+          fill="#0c1929"
+          opacity="0.5"
+          letter-spacing="3">奎木狼</text>
+    
+    <!-- 主文字层 - 深色书法 -->
+    <text x="0" y="0" 
+          font-family="'KaiTi', 'STKaiti', 'FangSong', 'STFangsong', serif" 
+          font-size="28" 
+          font-weight="400" 
+          fill="url(#inkWash)"
+          letter-spacing="3">奎木狼</text>
+  </g>
+  
+  <!-- 文字上的科技光效叠加 -->
+  <text x="12" y="36" 
+        font-family="'KaiTi', 'STKaiti', 'FangSong', 'STFangsong', serif" 
+        font-size="28" 
+        font-weight="400" 
+        fill="none"
+        stroke="url(#techGlow)" 
+        stroke-width="0.6"
+        opacity="0.5"
+        letter-spacing="3">奎木狼</text>
+  
+  <!-- AI标识 - 精致胶囊标签 -->
+  <g transform="translate(118, 12)">
+    <rect x="0" y="0" width="32" height="16" rx="8" 
+          fill="url(#techGlow)" 
+          opacity="0.15"/>
+    <rect x="0" y="0" width="32" height="16" rx="8" 
+          fill="none" 
+          stroke="url(#techGlow)" 
+          stroke-width="1"/>
+    <text x="16" y="11" 
+          font-family="'SF Pro Display', -apple-system, 'PingFang SC', sans-serif" 
+          font-size="9" 
+          font-weight="600" 
+          fill="url(#techGlow)"
+          text-anchor="middle"
+          letter-spacing="1">AI</text>
+  </g>
+  
+  <!-- 小装饰点 -->
+  <circle cx="112" cy="20" r="1.5" fill="url(#goldAccent)" opacity="0.8"/>
+  
+  <!-- 底部装饰线 - 艺术化短横 -->
+  <line x1="14" y1="43" x2="100" y2="43" 
+        stroke="url(#techGlow)" 
+        stroke-width="0.8" 
+        stroke-linecap="round"
+        opacity="0.6"/>
+  
+  <!-- 光效点缀 -->
+  <circle cx="100" cy="43" r="2" fill="url(#techGlow)" opacity="0.8" filter="url(#softGlow)"/>
+</svg>

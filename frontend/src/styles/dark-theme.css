@@ -1,0 +1,568 @@
+/* ===========================================
+   Dark Theme - 深色模式覆盖样式
+   =========================================== */
+
+/* 全局文字颜色微调 */
+[data-theme="dark"] {
+  --color-textSecondary: #cbd5e1;
+  --color-textMuted: #cbd5e1;
+}
+
+/* 深色模式阴影系统 */
+[data-theme="dark"] {
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.5);
+  --shadow-glow: 0 0 20px rgba(96, 165, 250, 0.4);
+}
+
+/* ===== Naive UI 组件覆盖 ===== */
+
+/* Modal弹窗 */
+[data-theme="dark"] .n-modal {
+  background-color: #1e293b;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6);
+}
+
+[data-theme="dark"] .n-modal-mask {
+  background-color: rgba(0, 0, 0, 0.7);
+}
+
+/* Card卡片 */
+[data-theme="dark"] .n-card {
+  background-color: #1e293b;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 20px 40px -12px rgba(0, 0, 0, 0.4);
+}
+
+/* Message消息提示 */
+[data-theme="dark"] .n-message {
+  background-color: #1e293b;
+}
+
+[data-theme="dark"] .n-message__content {
+  color: #f1f5f9;
+}
+
+/* Dropdown下拉菜单 */
+[data-theme="dark"] .n-dropdown {
+  background-color: #1e293b;
+  border-color: #334155;
+}
+
+[data-theme="dark"] .n-dropdown-menu {
+  background-color: #1e293b;
+}
+
+[data-theme="dark"] .n-dropdown-item {
+  color: #f1f5f9;
+}
+
+[data-theme="dark"] .n-dropdown-item:hover {
+  background-color: #334155;
+}
+
+/* Tooltip提示 */
+[data-theme="dark"] .n-tooltip {
+  background-color: #334155;
+}
+
+[data-theme="dark"] .n-tooltip__content {
+  color: #f1f5f9;
+}
+
+/* Select选择器 */
+[data-theme="dark"] .n-base-selection {
+  background-color: #1e293b;
+  border-color: #334155;
+}
+
+[data-theme="dark"] .n-base-selection:hover {
+  border-color: #60a5fa;
+}
+
+[data-theme="dark"] .n-base-selection .n-base-selection-label {
+  color: #f1f5f9;
+}
+
+/* Checkbox & Radio */
+[data-theme="dark"] .n-checkbox-box {
+  background-color: #1e293b;
+  border-color: #334155;
+}
+
+[data-theme="dark"] .n-radio-box {
+  background-color: #1e293b;
+  border-color: #334155;
+}
+
+/* Slider滑动条 */
+[data-theme="dark"] .n-slider {
+  background-color: #334155;
+}
+
+[data-theme="dark"] .n-slider-handle {
+  background-color: #60a5fa;
+}
+
+/* Switch开关 */
+[data-theme="dark"] .n-switch {
+  background-color: #334155;
+  border-radius: 12px;
+}
+
+[data-theme="dark"] .n-switch .n-switch__rail {
+  border-radius: 12px;
+  background-color: #334155;
+}
+
+[data-theme="dark"] .n-switch--active {
+  background-color: #60a5fa;
+}
+
+[data-theme="dark"] .n-switch--active .n-switch__rail {
+  background-color: #60a5fa !important;
+}
+
+/* Tabs标签页 */
+[data-theme="dark"] .n-tabs {
+  background-color: transparent;
+}
+
+[data-theme="dark"] .n-tab {
+  color: #cbd5e1;
+}
+
+[data-theme="dark"] .n-tab--active {
+  color: #60a5fa;
+}
+
+[data-theme="dark"] .n-tabs-bar {
+  background-color: #60a5fa;
+}
+
+/* Steps步骤条 */
+[data-theme="dark"] .n-step {
+  color: #cbd5e1;
+}
+
+[data-theme="dark"] .n-step--finish {
+  color: #f1f5f9;
+}
+
+[data-theme="dark"] .n-step-indicator {
+  background-color: #334155;
+  border-color: #334155;
+}
+
+[data-theme="dark"] .n-step--finish .n-step-indicator {
+  background-color: #60a5fa;
+  border-color: #60a5fa;
+}
+
+/* Collapse折叠面板 */
+[data-theme="dark"] .n-collapse {
+  background-color: transparent;
+  border: none;
+}
+
+[data-theme="dark"] .n-collapse-item {
+  background-color: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  margin-bottom: 10px;
+  overflow: hidden;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+[data-theme="dark"] .n-collapse-item:hover {
+  border-color: #475569;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+[data-theme="dark"] .n-collapse-item:first-child {
+  border-radius: 10px;
+}
+
+[data-theme="dark"] .n-collapse-item:last-child {
+  border-radius: 10px;
+}
+
+[data-theme="dark"] .n-collapse-item__header {
+  color: #f1f5f9;
+  font-weight: 500;
+  padding: 12px 16px;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+}
+
+[data-theme="dark"] .n-collapse-item__header-main {
+  color: #f1f5f9;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-theme="dark"] .n-collapse-item__content {
+  background-color: #1e293b;
+}
+
+[data-theme="dark"] .n-collapse-item__content-inner {
+  padding: 16px;
+}
+
+[data-theme="dark"] .n-collapse-item__header-extra {
+  color: #94a3b8;
+}
+
+[data-theme="dark"] .n-collapse-arrow {
+  color: #94a3b8;
+}
+
+/* Table表格 */
+[data-theme="dark"] .n-table {
+  background-color: #1e293b;
+}
+
+[data-theme="dark"] .n-td {
+  background-color: #1e293b;
+  color: #f1f5f9;
+  border-color: #334155;
+}
+
+[data-theme="dark"] .n-th {
+  background-color: #0f172a;
+  color: #f1f5f9;
+  border-color: #334155;
+}
+
+/* Pagination分页 */
+[data-theme="dark"] .n-pagination {
+  background-color: transparent;
+}
+
+[data-theme="dark"] .n-pagination-item {
+  background-color: #1e293b;
+  border-color: #334155;
+  color: #f1f5f9;
+}
+
+[data-theme="dark"] .n-pagination-item--active {
+  background-color: #60a5fa;
+  border-color: #60a5fa;
+}
+
+/* Spin加载 */
+[data-theme="dark"] .n-spin {
+  color: #60a5fa;
+}
+
+/* Alert警告 */
+[data-theme="dark"] .n-alert {
+  background-color: #1e293b;
+  border-color: #334155;
+}
+
+[data-theme="dark"] .n-alert__content {
+  color: #f1f5f9;
+}
+
+/* Tag标签 */
+[data-theme="dark"] .n-tag {
+  background-color: #334155;
+  color: #f1f5f9;
+  border-color: #334155;
+}
+
+[data-theme="dark"] .n-tag--success-type {
+  background-color: rgba(74, 222, 128, 0.2);
+  color: #4ade80;
+}
+
+[data-theme="dark"] .n-tag--warning-type {
+  background-color: rgba(251, 191, 36, 0.2);
+  color: #fbbf24;
+}
+
+[data-theme="dark"] .n-tag--error-type {
+  background-color: rgba(248, 113, 113, 0.2);
+  color: #f87171;
+}
+
+[data-theme="dark"] .n-tag--info-type {
+  background-color: rgba(96, 165, 250, 0.2);
+  color: #60a5fa;
+}
+
+/* Badge徽章 */
+[data-theme="dark"] .n-badge {
+  color: #f1f5f9;
+}
+
+/* Progress进度条 */
+[data-theme="dark"] .n-progress {
+  color: #60a5fa;
+}
+
+[data-theme="dark"] .n-progress-line .n-progress-line-rail {
+  background-color: #334155;
+}
+
+/* Timeline时间线 */
+[data-theme="dark"] .n-timeline {
+  color: #f1f5f9;
+}
+
+[data-theme="dark"] .n-timeline-item-content {
+  color: #f1f5f9;
+}
+
+/* ===== 自定义组件覆盖 ===== */
+
+/* RewriteView和PreviewEdit页面 */
+[data-theme="dark"] .page-title,
+[data-theme="dark"] .section-title,
+[data-theme="dark"] .mode-name,
+[data-theme="dark"] .result-text,
+[data-theme="dark"] .original-content,
+[data-theme="dark"] .rewritten-content {
+  color: #f1f5f9 !important;
+}
+
+[data-theme="dark"] .mode-desc,
+[data-theme="dark"] .optional,
+[data-theme="dark"] .result-meta {
+  color: #cbd5e1 !important;
+}
+
+/* ConfigPanel模板选择 */
+[data-theme="dark"] .template-card {
+  background-color: #1e293b;
+  border-color: #334155;
+  color: #f1f5f9;
+}
+
+[data-theme="dark"] .template-card .tpl-name {
+  color: #f1f5f9;
+}
+
+[data-theme="dark"] .template-card .tpl-info {
+  color: #cbd5e1;
+}
+
+[data-theme="dark"] .template-card.active {
+  background: linear-gradient(135deg, #1e3a5f, #1e3a5f) !important;
+  border-color: #60a5fa !important;
+}
+
+/* Provider卡片 */
+[data-theme="dark"] .provider-card {
+  background-color: #1e293b;
+  border-color: #334155;
+  color: #f1f5f9;
+}
+
+[data-theme="dark"] .provider-card.active {
+  background: linear-gradient(135deg, #1e3a5f, #1e3a5f) !important;
+  border-color: #60a5fa !important;
+}
+
+[data-theme="dark"] .provider-card .p-name {
+  color: #f1f5f9;
+}
+
+/* WritingProgress创作界面 */
+[data-theme="dark"] .work-title {
+  color: #f1f5f9 !important;
+}
+
+[data-theme="dark"] .phase-label {
+  color: #cbd5e1 !important;
+}
+
+[data-theme="dark"] .part-theme {
+  color: #cbd5e1 !important;
+}
+
+[data-theme="dark"] .log-content {
+  background-color: #1e293b;
+}
+
+[data-theme="dark"] .log-panel {
+  background-color: #1e293b;
+  border-color: #334155;
+}
+
+[data-theme="dark"] .log-item {
+  color: #f1f5f9;
+}
+
+[data-theme="dark"] .phase-item {
+  background-color: #1e293b;
+  border-color: #334155;
+}
+
+[data-theme="dark"] .log-msg {
+  color: #f1f5f9 !important;
+}
+
+[data-theme="dark"] .log-title {
+  color: #f1f5f9 !important;
+}
+
+[data-theme="dark"] .parts-title {
+  color: #f1f5f9 !important;
+}
+
+/* PreviewEdit作品预览界面 */
+[data-theme="dark"] .selector-title {
+  color: #f1f5f9 !important;
+}
+
+[data-theme="dark"] .rewrite-title {
+  color: #f1f5f9 !important;
+}
+
+/* 章节选择器 */
+[data-theme="dark"] .part-tab {
+  color: #f1f5f9;
+  background-color: #1e293b;
+  border-color: #334155;
+}
+
+[data-theme="dark"] .part-tab:hover {
+  background-color: #334155;
+}
+
+[data-theme="dark"] .part-tab.active {
+  background-color: #1e3a5f;
+  border-color: #60a5fa;
+  color: #f1f5f9;
+}
+
+[data-theme="dark"] .part-selector {
+  background-color: #1e293b;
+}
+
+[data-theme="dark"] .current-template-info .n-card {
+  background-color: #1e293b !important;
+  border-color: #334155;
+}
+
+[data-theme="dark"] .current-template-info .info-label {
+  color: #94a3b8;
+}
+
+[data-theme="dark"] .current-template-info .info-value {
+  color: #f1f5f9;
+}
+
+/* 输入框占位符 */
+[data-theme="dark"] input::placeholder,
+[data-theme="dark"] textarea::placeholder,
+[data-theme="dark"] .n-input__placeholder,
+[data-theme="dark"] .n-input-wrapper__placeholder {
+  color: #cbd5e1 !important;
+}
+
+/* ===== 深色模式特殊效果 ===== */
+
+/* 光效元素 */
+[data-theme="dark"] .glow-orb {
+  opacity: 0.5;
+}
+
+[data-theme="dark"] .grid-bg {
+  background-image:
+    linear-gradient(rgba(14, 165, 233, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(14, 165, 233, 0.08) 1px, transparent 1px);
+}
+
+[data-theme="dark"] .particle {
+  background: var(--color-primary);
+  opacity: 0.5;
+}
+
+/* 玻璃态效果 */
+[data-theme="dark"] .glass-nav {
+  background: rgba(30, 41, 59, 0.8);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+[data-theme="dark"] .glass-card {
+  background: rgba(30, 41, 59, 0.8);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+/* 分隔线 */
+[data-theme="dark"] .divider {
+  background: linear-gradient(90deg, transparent, #334155, transparent);
+}
+
+/* 文字发光效果 */
+[data-theme="dark"] .glow-effect {
+  text-shadow: 0 0 20px var(--color-primary);
+}
+
+[data-theme="dark"] .card-glow {
+  box-shadow: 0 0 30px color-mix(in srgb, var(--color-primary) 30%, transparent);
+}
+
+/* 通用Collapse样式优化 */
+.n-collapse-item {
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 10px;
+  margin-bottom: 10px;
+  overflow: hidden;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.n-collapse-item:hover {
+  border-color: var(--color-primary, #0ea5e9);
+}
+
+.n-collapse-item__header {
+  padding: 12px 16px;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+}
+
+.n-collapse-item__header-main {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.n-collapse-item__content-inner {
+  padding: 16px;
+}
+
+/* Agent配置面板collapse优化 */
+.n-collapse-item .n-form {
+  padding: 0;
+}
+
+.n-collapse-item .n-form-item {
+  margin-bottom: 12px;
+}
+
+.n-collapse-item .n-form-item:last-child {
+  margin-bottom: 0;
+}
+
+[data-theme="dark"] .n-collapse-item__header .n-collapse-item__header-main {
+  text-align: left;
+  justify-content: flex-start;
+  white-space: nowrap;
+}
+
+[data-theme="dark"] .n-collapse-item__header {
+  min-height: 48px !important;
+  height: 48px;
+  box-sizing: border-box;
+}

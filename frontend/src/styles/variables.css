@@ -1,0 +1,85 @@
+/* ===========================================
+   CSS Variables - 主题变量定义
+   =========================================== */
+
+:root {
+  /* 主色调 */
+  --color-primary: #0ea5e9;
+  --color-primaryHover: #38bdf8;
+  --color-primaryPressed: #0284c7;
+  --color-secondary: #64748b;
+  --color-accent: #6366f1;
+
+  /* 背景色 */
+  --color-background: #f1f5f9;
+  --color-surface: #ffffff;
+  --color-border: #e2e8f0;
+
+  /* 文字色 */
+  --color-textPrimary: #0f172a;
+  --color-textSecondary: #64748b;
+  --color-textMuted: #94a3b8;
+
+  /* 状态色 */
+  --color-success: #22c55e;
+  --color-warning: #f59e0b;
+  --color-error: #ef4444;
+
+  /* 字体 */
+  --font-family: 'Inter', -apple-system, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif;
+  --font-size-xs: 11px;
+  --font-size-sm: 12px;
+  --font-size-base: 14px;
+  --font-size-lg: 16px;
+  --font-size-xl: 18px;
+  --font-size-2xl: 24px;
+  --line-height-tight: 1.25;
+  --line-height-normal: 1.5;
+  --line-height-relaxed: 1.75;
+
+  /* 间距 */
+  --spacing-1: 4px;
+  --spacing-2: 8px;
+  --spacing-3: 12px;
+  --spacing-4: 16px;
+  --spacing-5: 20px;
+  --spacing-6: 24px;
+  --spacing-8: 32px;
+  --spacing-10: 40px;
+
+  /* 圆角 */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+
+  /* 阴影 */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+  --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+  --shadow-glow: 0 0 20px rgba(14, 165, 233, 0.3);
+
+  /* 过渡动画 */
+  --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-normal: 250ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-slow: 350ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* 布局 */
+  --sidebar-width: 72px;
+  --topbar-height: 64px;
+
+  /* 背景层次 */
+  --bg-gradient-start: var(--color-background);
+  --bg-gradient-mid: color-mix(in srgb, var(--color-primary) 8%, var(--color-background));
+  --bg-gradient-end: color-mix(in srgb, var(--color-primary) 5%, var(--color-background));
+
+  /* 玻璃态效果 */
+  --glass-bg: rgba(255, 255, 255, 0.7);
+  --glass-border: rgba(255, 255, 255, 0.3);
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
+
+  /* 悬浮效果 */
+  --lift-shadow: 0 20px 40px -12px rgba(0, 0, 0, 0.15);
+  --lift-transform: translateY(-4px);
+}
