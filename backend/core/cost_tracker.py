@@ -2,8 +2,11 @@
 番茄小说AI创作系统 V4 - Token成本追踪器
 
 追踪每次LLM调用的token消耗，统计总成本。
+R3-P1-6: 增补 step-3.7-flash 定价（按 stepfun 公开市场参考价）；
+         暴露 should_prompt_for_cost(work_id, threshold) 用于熔断 SSE 推 CONFIRM。
 """
 import time
+from typing import Optional
 
 
 class CostTracker:
@@ -12,12 +15,20 @@ class CostTracker:
     # 估算单价（每百万token，人民币）
     # 可根据实际使用的模型调整
     MODEL_PRICING = {
+        "step-3.7-flash": {
+            "input": 0.15,
+            "output": 0.6,
+            "_note": "Step-3.7-Flash 市场参考价（按官方公开口径估算），待官方定价更新",
+        },                                                          # Step-3.7-Flash (默认模型)
         "deepseek-v3.2": {"input": 1.0, "output": 2.0},       # DeepSeek V3
         "MiniMax-Text-01": {"input": 1.0, "output": 4.0},     # MiniMax
         "gpt-4o-mini": {"input": 0.15, "output": 0.6},       # GPT-4o-mini
         "gpt-4o": {"input": 2.5, "output": 10.0},            # GPT-4o
         "default": {"input": 1.0, "output": 2.0},
     }
+
+    # R3-P1-6: 默认成本熔断阈值（元）。可在调用 should_prompt_for_cost 时覆盖。
+    DEFAULT_COST_THRESHOLD_RMB = 50.0
 
     def __init__(self):
         self.calls = []  # [{timestamp, model, agent, is_json, prompt_tokens, completion_tokens, total_tokens, duration_ms}]
@@ -94,6 +105,25 @@ class CostTracker:
             "estimated_cost_rmb": round(cost, 4),
         }
 
+    def should_prompt_for_cost(self, work_id: Optional[str] = None, threshold: Optional[float] = None) -> bool:
+        """R3-P1-6: 熔断判定 — 当前累计预估成本是否超过阈值。
+
+        Args:
+            work_id: 作品 ID（占位参数；当前 CostTracker 是进程级单例，
+                     未来如需按 work_id 隔离可在此处过滤 self.calls）。
+            threshold: 阈值（元），默认 DEFAULT_COST_THRESHOLD_RMB (¥50)。
+
+        Returns:
+            bool: 当前成本 >= 阈值返回 True，调用方应 SSE 推 CONFIRM 让用户决策。
+        """
+        if threshold is None:
+            threshold = self.DEFAULT_COST_THRESHOLD_RMB
+        try:
+            summary = self.get_summary()
+            return float(summary.get("estimated_cost_rmb", 0.0)) >= float(threshold)
+        except Exception:
+            return False
+
     def reset(self):
         """重置追踪器"""
         self.calls = []
@@ -116,3 +146,9 @@ def reset_tracker():
     """重置全局成本追踪器"""
     global _tracker
     _tracker = CostTracker()
+
+
+# ---- R3-P1-6: 模块级便捷函数 ----
+def should_prompt_for_cost(work_id: Optional[str] = None, threshold: Optional[float] = None) -> bool:
+    """模块级便捷函数：调用全局 tracker 的 should_prompt_for_cost。"""
+    return get_tracker().should_prompt_for_cost(work_id=work_id, threshold=threshold)

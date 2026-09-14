@@ -1,6 +1,18 @@
 import { defineStore } from 'pinia'
 import api from '@/api'
 
+// =====================================================================
+// R3-P0-2 审计结论（2026-09-14）：
+//   grep -rn "useWritingStore" frontend/src/ 唯一命中是本文件定义处 (line 52)。
+//   全前端 0 个 import。本文件 343 行（initSSE / closeSSE / handleSSEEvent /
+//   addLog / persistState / loadWorkStatus / showConfirmDialog / reset 等）
+//   100% 死代码。
+//   处置策略（本轮授权仅"加注释"，删除合并到 R4-B.3 SSE 二合一重构时统一处理）：
+//     1. 本文件保留（避免破坏未来切换路径）；
+//     2. 顶部加本注释说明；
+//     3. R4 时由 SSE 二合一任务决定"删 store 改用 view 内联"或"view 切换为 store"。
+// =====================================================================
+
 // SSE连接状态枚举
 export const SSE_STATUS = {
   CONNECTING: 'connecting',

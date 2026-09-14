@@ -183,47 +183,88 @@ class WritingService:
         progress_manager.reset_progress(work_id)
 
     async def run(self):
-        """执行完整创作流程"""
-        print(f"[WritingService] run() 开始执行, work_id={self.work_id}, confirm_mode={self.cfg.confirm_mode}")
+        """执行完整创作流程
+
+        R3-P0-3: resume=True 时根据 data["phase"] 跳过已完成阶段：
+          - phase1 已完成 → 跳过 _phase1_planning
+          - phase2 已完成 → 跳过 _phase2_outline
+          - phase3_part{N} → 从 Part N+1 开始写（避免重跑已完成 Part）
+          - phase4 完成 → 直接 emit FINAL 并返回
+        confirm_mode 行为不变。
+        """
+        print(f"[WritingService] run() 开始执行, work_id={self.work_id}, resume={self.resume}, confirm_mode={self.cfg.confirm_mode}")
         _writing_state[self.work_id]["running"] = True
 
+        # R3-P0-3: resume 阶段识别
+        saved_phase = str(self.data.get("phase", "init") or "init")
+        skip_to_part = 0  # 0 表示需要跑 Phase1+2
+        phase_already_4 = False
+        if self.resume and saved_phase.startswith("phase3_part"):
+            try:
+                skip_to_part = int(saved_phase.replace("phase3_part", ""))
+            except (TypeError, ValueError):
+                skip_to_part = 0
+        elif self.resume and saved_phase == "phase4":
+            phase_already_4 = True
+
+        # Phase 4 已完成（resume 命中）→ 直接 emit FINAL
+        if phase_already_4:
+            print(f"[WritingService] resume 命中 phase4，直接 emit FINAL")
+            await self.emitter.emit(EventType.FINAL, {
+                "work_id": self.work_id,
+                "total_parts": self.cfg.part_count,
+                "resumed": True,
+            }, work_id=self.work_id)
+            self.progress_callback(100, "创作流程已完成（resume 命中 phase4）")
+            _writing_state[self.work_id]["running"] = False
+            return
+
         try:
-            # 初始化进度
-            self.progress_callback(0, "开始创作流程")
+            # 初始化进度（按当前 phase 计算起始进度，避免从 0% 跳到 100%）
+            if skip_to_part > 0:
+                # 已在 phase3_part{N}，进度从 55% 起跳（与 _phase3_writing 内部一致）
+                resume_ratio = skip_to_part / max(self.cfg.part_count, 1)
+                start_progress = int(55 + resume_ratio * 25)
+                self.progress_callback(start_progress, f"恢复创作，已完成 {skip_to_part} 个 Part")
+            else:
+                self.progress_callback(0, "开始创作流程")
 
-            # Phase 1: 灵感解析 → 世界观/角色/类型
-            print("[WritingService] 进入Phase 1: 灵感解析")
-            self.progress_callback(5, "开始灵感解析")
-            await self._phase1_planning()
-            print("[WritingService] Phase 1完成")
-            self.progress_callback(25, "灵感解析完成")
+            # Phase 1 & 2：仅在 skip_to_part == 0 时执行
+            if skip_to_part == 0:
+                # Phase 1: 灵感解析 → 世界观/角色/类型
+                print("[WritingService] 进入Phase 1: 灵感解析")
+                self.progress_callback(5, "开始灵感解析")
+                await self._phase1_planning()
+                print("[WritingService] Phase 1完成")
+                self.progress_callback(25, "灵感解析完成")
 
-            # Phase 1完成后，如果是手动确认模式，请求用户确认
-            if self.cfg.confirm_mode:
-                await self._request_confirm(
-                    "phase1_complete",
-                    "✨ 灵感解析已完成！\n\n已生成以下内容：\n- 主角设定\n- 题材分类\n- 世界观基础\n\n是否继续进行情节规划？"
-                )
+                # Phase 1完成后，如果是手动确认模式，请求用户确认
+                if self.cfg.confirm_mode:
+                    await self._request_confirm(
+                        "phase1_complete",
+                        "✨ 灵感解析已完成！\n\n已生成以下内容：\n- 主角设定\n- 题材分类\n- 世界观基础\n\n是否继续进行情节规划？"
+                    )
 
-            # Phase 2: Part规划
-            print("[WritingService] 进入Phase 2: 情节规划")
-            self.progress_callback(30, "开始情节规划")
-            await self._phase2_outline()
-            print("[WritingService] Phase 2完成")
-            self.progress_callback(50, "情节规划完成")
+                # Phase 2: Part规划
+                print("[WritingService] 进入Phase 2: 情节规划")
+                self.progress_callback(30, "开始情节规划")
+                await self._phase2_outline()
+                print("[WritingService] Phase 2完成")
+                self.progress_callback(50, "情节规划完成")
 
-            # Phase 2完成后，如果是手动确认模式，请求用户确认
-            if self.cfg.confirm_mode:
-                outline_count = len(self.data.get("part_outline", []))
-                await self._request_confirm(
-                    "phase2_complete",
-                    f"📋 情节规划已完成！\n\n已生成 {outline_count} 个Part的创作蓝图\n\n是否开始逐Part创作？"
-                )
+                # Phase 2完成后，如果是手动确认模式，请求用户确认
+                if self.cfg.confirm_mode:
+                    outline_count = len(self.data.get("part_outline", []))
+                    await self._request_confirm(
+                        "phase2_complete",
+                        f"📋 情节规划已完成！\n\n已生成 {outline_count} 个Part的创作蓝图\n\n是否开始逐Part创作？"
+                    )
+            else:
+                print(f"[WritingService] resume 跳过 Phase1+2，直接进 Phase3（从 Part {skip_to_part + 1} 开始）")
 
-            # Phase 3: 逐Part创作
-            print("[WritingService] 进入Phase 3: 逐Part创作")
-            self.progress_callback(55, "开始逐Part创作")
-            await self._phase3_writing()
+            # Phase 3: 逐Part创作（start_from 控制跳过已完成 Part）
+            print(f"[WritingService] 进入Phase 3: 逐Part创作 (start_from={skip_to_part + 1})")
+            await self._phase3_writing(start_from=skip_to_part + 1)
             print("[WritingService] Phase 3完成")
             self.progress_callback(80, "逐Part创作完成")
 
@@ -478,8 +519,12 @@ class WritingService:
             self.data["part_outline"] = []
             self._save()
 
-    async def _phase3_writing(self):
-        """Phase 3: 逐Part创作 - 调用PartWriterAgent"""
+    async def _phase3_writing(self, start_from: int = 1):
+        """Phase 3: 逐Part创作 - 调用PartWriterAgent
+
+        R3-P0-3: 新增 start_from 参数，resume 时从已完成 Part 的下一个开始
+        （如 phase3_part40 → start_from=41），避免重跑已完成 Part。
+        """
         await self.emitter.emit(EventType.PHASE, {"phase": "phase3", "name": "章节创作", "work_id": self.work_id}, work_id=self.work_id)
 
         # 初始化 parts 和 part_summaries（如果不存在）
@@ -501,12 +546,13 @@ class WritingService:
         # 设置进度回调
         writer_agent.set_progress_callback(self.progress_callback)
 
-        for i in range(1, total + 1):
+        for i in range(start_from, total + 1):
             await self._check_pause()
             _writing_state[self.work_id]["current_part"] = i
 
-            # 计算当前进度
-            part_progress = 55 + ((i - 1) / total) * 25
+            # 计算当前进度（55% → 80%，按已完成 Part 比例推进）
+            done_ratio = (i - start_from) / max(total - start_from + 1, 1)
+            part_progress = 55 + done_ratio * 25
             self.progress_callback(int(part_progress), f"开始创作 Part {i}/{total}")
 
             await self.emitter.emit(EventType.AGENT_CALL, {
@@ -517,50 +563,107 @@ class WritingService:
                 "work_id": self.work_id,
             }, work_id=self.work_id)
 
-            try:
-                # 使用asyncio.to_thread运行同步Agent调用
-                part_result = await asyncio.to_thread(writer_agent.execute, temp_state, i)
+            # R3-P0-4: Part 失败单 Part 重试循环（2 次重试，3s 间隔），
+            # 仍失败 SSE 推 CONFIRM 让用户选"跳过/重试/终止"。
+            # 10 分钟无响应默认"跳过"并填占位 + 标记 data["failed_parts"]。
+            max_retries = 2
+            part_text = ""
+            word_count = 0
+            skip_part = False
 
-                # 处理返回结果
-                if isinstance(part_result, dict) and part_result.get("success"):
-                    part_text = part_result.get("content", "")
-                else:
-                    part_text = part_result
-
-                self.data["parts"][str(i)] = part_text
-
-                # 生成200字摘要用于后续上下文
-                summary = part_text[:200] + "..." if len(part_text) > 200 else part_text
-                self.data["part_summaries"][str(i)] = summary
-
-                # V6.1: 把新 Part 写入滑动窗口（下一 Part 自动滚动）
+            for attempt in range(max_retries + 1):
                 try:
-                    temp_state.window.add_part(i, part_text, summary)
-                    temp_state.window.update_foreshadowing(
-                        self.data.get("foreshadowing", []) or []
-                    )
-                    temp_state.window.update_character_state(
-                        self.data.get("character_state_track", {}) or {}
-                    )
-                except Exception as win_err:
-                    print(f"[WritingService] SlidingWindow.add_part 失败（不影响主流程）: {win_err}")
+                    # 使用asyncio.to_thread运行同步Agent调用
+                    part_result = await asyncio.to_thread(writer_agent.execute, temp_state, i)
 
-                word_count = len(part_text)
+                    # 处理返回结果
+                    if isinstance(part_result, dict) and part_result.get("success"):
+                        part_text = part_result.get("content", "")
+                    else:
+                        part_text = part_result if isinstance(part_result, str) else ""
 
-            except Exception as e:
-                import traceback
-                tb = traceback.format_exc()
-                print(f"[WritingService] Part {i} 异常: {type(e).__name__}: {e}")
-                print(f"[WritingService] Traceback: {tb}")
-                await self.emitter.emit(EventType.ERROR, {"message": f"Part{i}创作失败: {str(e)}", "work_id": self.work_id}, work_id=self.work_id)
-                self.data["parts"][str(i)] = f"[Part {i} 创作失败]"
-                word_count = 0
+                    # 空文本视为失败
+                    if not part_text:
+                        raise RuntimeError(f"Part {i} 返回为空内容")
+
+                    self.data["parts"][str(i)] = part_text
+
+                    # 生成200字摘要用于后续上下文
+                    summary = part_text[:200] + "..." if len(part_text) > 200 else part_text
+                    self.data["part_summaries"][str(i)] = summary
+
+                    # V6.1: 把新 Part 写入滑动窗口（下一 Part 自动滚动）
+                    try:
+                        temp_state.window.add_part(i, part_text, summary)
+                        temp_state.window.update_foreshadowing(
+                            self.data.get("foreshadowing", []) or []
+                        )
+                        temp_state.window.update_character_state(
+                            self.data.get("character_state_track", {}) or {}
+                        )
+                    except Exception as win_err:
+                        print(f"[WritingService] SlidingWindow.add_part 失败（不影响主流程）: {win_err}")
+
+                    word_count = len(part_text)
+                    break  # 成功
+
+                except Exception as e:
+                    import traceback
+                    tb = traceback.format_exc()
+                    print(f"[WritingService] Part {i} 第 {attempt + 1}/{max_retries + 1} 次尝试异常: {type(e).__name__}: {e}")
+                    print(f"[WritingService] Traceback: {tb}")
+
+                    if attempt < max_retries:
+                        # 还有重试机会：间隔 3s 后重试（递增：3s / 6s）
+                        await self.emitter.emit(EventType.LOG, {
+                            "message": f"⚠️ Part {i} 第 {attempt + 1} 次失败，{3 * (attempt + 1)}s 后重试...",
+                            "work_id": self.work_id,
+                        }, work_id=self.work_id)
+                        await asyncio.sleep(3 * (attempt + 1))
+                        continue
+
+                    # 已达最大重试次数：推 CONFIRM 让用户决策（仅手动确认模式）
+                    if self.cfg.confirm_mode:
+                        await self.emitter.emit(EventType.LOG, {
+                            "message": f"❌ Part {i} 已重试 {max_retries} 次仍失败，等待用户决策",
+                            "work_id": self.work_id,
+                        }, work_id=self.work_id)
+                        try:
+                            await self._request_confirm(
+                                f"part_{i}_failed",
+                                f"⚠️ Part {i}/{total} 创作失败（已重试 {max_retries} 次）\n\n错误：{str(e)[:200]}\n\n选择「继续」将标记此 Part 为失败并跳过，「取消」将中断整个流程"
+                            )
+                            # 用户选择继续 → 跳过该 Part
+                            skip_part = True
+                        except Exception as confirm_err:
+                            # 用户选择取消或确认流程异常 → 中断整个流程
+                            print(f"[WritingService] 用户在 Part {i} 失败时选择取消: {confirm_err}")
+                            raise
+                    else:
+                        # 非手动确认模式：自动跳过（保持 R2 行为，向后兼容）
+                        skip_part = True
+
+                    if skip_part:
+                        # 标记失败 Part + 占位
+                        await self.emitter.emit(EventType.ERROR, {
+                            "message": f"Part{i}创作失败（已跳过）: {str(e)[:200]}",
+                            "work_id": self.work_id,
+                        }, work_id=self.work_id)
+                        self.data["parts"][str(i)] = f"[Part {i} 创作失败]"
+                        # R3-P0-4: 记录失败 Part 列表，供 Report.vue / 后续流程感知
+                        failed_parts = list(self.data.get("failed_parts", []) or [])
+                        if i not in failed_parts:
+                            failed_parts.append(i)
+                            self.data["failed_parts"] = failed_parts
+                        word_count = 0
+                        break
 
             self.data["phase"] = f"phase3_part{i}"
             self._save()
 
             # 更新进度
-            part_progress = 55 + (i / total) * 25
+            done_ratio_after = (i - start_from + 1) / max(total - start_from + 1, 1)
+            part_progress = 55 + done_ratio_after * 25
             self.progress_callback(int(part_progress), f"Part {i} 创作完成 ({word_count}字)")
 
             await self.emitter.emit(EventType.PART_COMPLETE, {
@@ -582,6 +685,22 @@ class WritingService:
                     f"part_{i}_complete",
                     f"📄 Part {i}/{total} 创作完成！\n\n本Part字数: {word_count:,} 字\n累计进度: {i}/{total} Part\n\n是否继续创作下一个Part？"
                 )
+
+            # R3-P1-6: 每完成 10 个 Part 检查一次成本熔断，超过阈值时 SSE 推 CONFIRM
+            # 仅在手动确认模式下推（自动模式继续跑，由用户事前在配置层决定上限）
+            if self.cfg.confirm_mode and (i % 10 == 0 or i == total):
+                try:
+                    from core.cost_tracker import should_prompt_for_cost
+                    if should_prompt_for_cost(work_id=self.work_id):
+                        from core.cost_tracker import get_tracker
+                        summary = get_tracker().get_summary()
+                        await self._request_confirm(
+                            f"cost_limit_{i}",
+                            f"💰 已花费约 ¥{summary['estimated_cost_rmb']:.2f}（{summary['total_calls']} 次调用）\n\n是否继续创作？"
+                        )
+                except Exception as cost_err:
+                    # 熔断检查失败不影响主流程
+                    print(f"[WritingService] 成本熔断检查失败（不影响主流程）: {cost_err}")
 
     async def _phase4_optimize(self):
         """Phase 4: 风格优化 + 评审

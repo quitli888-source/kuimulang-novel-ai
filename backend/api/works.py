@@ -106,6 +106,18 @@ def get_work(work_id: str):
     if not path.exists():
         raise HTTPException(404, "作品不存在")
     data = json.loads(path.read_text(encoding="utf-8"))
+    # R3-P0-1: 把 in-memory cost_tracker 摘要注入响应，供 Report.vue 渲染
+    # 成本 / 调用次数卡（costData 永远空 修复）
+    try:
+        from core.cost_tracker import get_tracker
+        data["cost_summary"] = get_tracker().get_summary()
+    except Exception:
+        # tracker 不可用时给空 summary，前端兜底为 0
+        data["cost_summary"] = {
+            "total_calls": 0,
+            "total_tokens": 0,
+            "estimated_cost_rmb": 0.0,
+        }
     return data
 
 

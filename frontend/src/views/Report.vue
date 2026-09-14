@@ -27,12 +27,18 @@
           <!-- 成本 -->
           <div class="stat-card">
             <div class="stat-label">预估成本</div>
-            <div class="stat-value">¥{{ costData.estimated_cost_rmb || 0 }}</div>
+            <div class="stat-value">
+              <template v-if="costData && costData.total_calls > 0">¥{{ costData.estimated_cost_rmb || 0 }}</template>
+              <template v-else><span class="muted">成本数据未记录</span></template>
+            </div>
           </div>
           <!-- 调用次数 -->
           <div class="stat-card">
             <div class="stat-label">LLM调用</div>
-            <div class="stat-value">{{ costData.total_calls || 0 }}次</div>
+            <div class="stat-value">
+              <template v-if="costData && costData.total_calls > 0">{{ costData.total_calls || 0 }}次</template>
+              <template v-else><span class="muted">-</span></template>
+            </div>
           </div>
           <!-- 评分 -->
           <div class="stat-card">
@@ -136,6 +142,8 @@ const issues = computed(() => {
 
 onMounted(async () => {
   workData.value = (await api.get(`/works/${workId}`)).data
+  // R3-P0-1: 把后端注入的 cost_summary 同步到 costData（成本卡数据通路修复）
+  costData.value = workData.value.cost_summary || {}
 })
 </script>
 
@@ -197,6 +205,7 @@ onMounted(async () => {
 .stat-label { font-size: 12px; color: var(--color-text-secondary, #888); margin-bottom: 8px; font-weight: 500; }
 .stat-value { font-size: 28px; font-weight: 700; color: var(--color-text-primary, #333); }
 .stat-value.score { color: var(--color-primary, #2563eb); }
+.muted { color: var(--color-text-secondary, #aaa); font-size: 14px; font-weight: 500; }
 
 .chart-card, .issues-card { 
   background: var(--color-surface, #fff); 
