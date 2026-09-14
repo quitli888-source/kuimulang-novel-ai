@@ -157,15 +157,31 @@ class WritingState:
 class WritingService:
     """创作服务 - 协调所有Agent完成创作流程"""
 
-    def __init__(self, work_id: str, emitter: SSEEmitter, resume: bool = False):
+    def __init__(self, work_id: str, emitter: SSEEmitter, resume: bool = False, restart: bool = False):
         self.work_id = work_id
         self.emitter = emitter
         self.resume = resume
+        self.restart = restart
         self.work_path = get_work_file(work_id)
         self.cfg = get_app_config()
 
         # 加载作品数据
         self.data = json.loads(self.work_path.read_text(encoding="utf-8"))
+
+        # R5-P0-1: restart=True 时把 phase 重置为 init，并清空 parts/part_summaries
+        # （用户从断点恢复弹窗选"重新开始"时走这条路径）
+        if self.restart:
+            print(f"[WritingService] restart=True，重置 phase / parts / part_summaries")
+            self.data["phase"] = "init"
+            self.data["parts"] = {}
+            self.data["part_summaries"] = {}
+            # 保留 inspiration / title 等元数据
+            self.data.pop("failed_parts", None)
+            self.data.pop("final_draft", None)
+            self.data.pop("review_report", None)
+            self.data.pop("character_state_track", None)
+            # 立即落盘，避免 Phase1 失败时还残留 phase3_part{N}
+            self._save_initial_state()
 
         # 全局状态
         _writing_state[work_id] = {
@@ -182,10 +198,18 @@ class WritingService:
         self.progress_callback = progress_manager.get_progress_callback(work_id, "WritingService")
         progress_manager.reset_progress(work_id)
 
-        # R4-P1-7: 把 cost_tracker 绑定到当前 work，每次 record() 增量落盘
+        # R5-P0-3: 把 cost_tracker 绑定到当前 work + 还原持久化 history（双轨合并）
         try:
             from core.cost_tracker import get_tracker
-            get_tracker().attach_work(self.work_id, self.work_path.parent)
+            tracker = get_tracker()
+            # 注意：若 writing_service 在 restart 路径下已 _save_initial_state 清空过 data，
+            # 此时 data["cost_summary"] 已被新初始值覆盖（_save_initial_state 不写 cost_summary），
+            # 但 attach_work 的去重逻辑保证安全。
+            tracker.attach_work(
+                self.work_id,
+                self.data.get("cost_summary"),
+                self.work_path.parent,
+            )
         except Exception as attach_err:
             print(f"[WritingService] cost_tracker.attach_work 失败（不影响主流程）: {attach_err}")
 
@@ -650,6 +674,69 @@ class WritingService:
                             }, work_id=self.work_id)
                         except Exception as roll_err:
                             print(f"[WritingService] 二级滚动摘要生成失败（不影响主流程）: {roll_err}")
+
+                    # R5-P0-2: 三级里程碑摘要生成（每 20 个 Part 一次）——
+                    # 把 20 个 Part 的 1 级摘要 + 关键角色状态 + 伏笔 + 世界观 压缩为 2000 字全局脉络段。
+                    # 注意：add_milestone 第一参数是 milestone_num（i // 20），不是 part_num。
+                    if temp_state.window.should_create_milestone(i):
+                        try:
+                            from core.llm_client import call_llm
+                            recent_keys = sorted(
+                                [p for p in temp_state.window.summaries.keys() if p < i]
+                            )[-temp_state.window.MILESTONE_EVERY:]
+                            recent_text = "\n".join(
+                                f"Part {p}: {temp_state.window.summaries[p]}"
+                                for p in recent_keys
+                                if p in temp_state.window.summaries
+                            )
+                            char_state_lines = []
+                            try:
+                                for name, st in (temp_state.window.character_state or {}).items():
+                                    char_state_lines.append(f"- {name}: {st}")
+                            except Exception:
+                                pass
+                            foreshadow_lines = []
+                            try:
+                                for f_item in (temp_state.window.foreshadowing or []):
+                                    foreshadow_lines.append(
+                                        f"- {f_item.get('id', '')}: {f_item.get('content', '')}"
+                                    )
+                            except Exception:
+                                pass
+                            milestone_input = (
+                                (recent_text or "(无最近摘要)") +
+                                ("\n【世界观】" + (temp_state.world_setting or "") if getattr(temp_state, 'world_setting', '') else "") +
+                                ("\n【角色状态】\n" + "\n".join(char_state_lines) if char_state_lines else "") +
+                                ("\n【伏笔】\n" + "\n".join(foreshadow_lines) if foreshadow_lines else "")
+                            )
+                            milestone = call_llm(
+                                system_prompt=(
+                                    "你是长篇小说剧情压缩助手。"
+                                    "将下面 20 个 Part 的剧情概要压缩为 2000 字以内的全局脉络段，"
+                                    "涵盖主线、支线、关键转折、角色弧光，输出纯叙事文本，不要分点。"
+                                ),
+                                user_prompt=milestone_input,
+                                temperature=0.3,
+                                max_tokens=2500,
+                                agent="milestone_summary",
+                            )
+                            milestone_text = (milestone or "")[:2000]
+                            if not milestone_text.strip():
+                                # Fallback: 拼接 20 个一级摘要前 100 字
+                                milestone_text = "\n".join(
+                                    f"Part {p}: {temp_state.window.summaries[p][:100]}"
+                                    for p in recent_keys
+                                    if p in temp_state.window.summaries
+                                )[:2000]
+                            # 注意签名差异：add_milestone(milestone_num, ...) 第一参是 milestone_num
+                            milestone_num = i // temp_state.window.MILESTONE_EVERY
+                            temp_state.window.add_milestone(milestone_num, milestone_text)
+                            await self.emitter.emit(EventType.LOG, {
+                                "message": f"🏔️ 里程碑 #{milestone_num} 摘要已生成（{len(milestone_text)} 字）",
+                                "work_id": self.work_id,
+                            }, work_id=self.work_id)
+                        except Exception as m_err:
+                            print(f"[WritingService] 三级里程碑摘要生成失败（不影响主流程）: {m_err}")
 
                     word_count = len(part_text)
                     break  # 成功
@@ -1165,13 +1252,23 @@ class WritingService:
             await self.emitter.emit(EventType.PART_COMPLETE, {"part": part_num, "words": 0, "work_id": self.work_id}, work_id=self.work_id)
 
     def _save(self):
-        """保存作品数据（R4-P1-7: 同时把 cost_tracker 当前 summary 写回 data）"""
+        """保存作品数据（R5-P0-3: cost_tracker 当前 summary 含 calls 列表写回 data）"""
         try:
             from core.cost_tracker import get_tracker
-            # 同步当前进程的 cost_tracker 累计到 data，便于 uvicorn 重启后
-            # works.py get_work 能 merge history（in-memory 视为最新源）
+            # 同步当前进程的 cost_tracker 累计（含 calls 列表）到 data，便于 uvicorn 重启后
+            # works.py get_work 能 attach_work() 还原历史（双轨持久化合并 source of truth）。
             self.data["cost_summary"] = get_tracker().get_summary()
         except Exception:
             # tracker 不可用时保留已有值
             pass
         self.work_path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _save_initial_state(self):
+        """R5-P0-1: 仅在 restart 路径下使用 —— 不经过 cost_tracker 的简易落盘。"""
+        try:
+            self.work_path.write_text(
+                json.dumps(self.data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            print(f"[WritingService] restart 重置落盘失败（不影响主流程）: {e}")

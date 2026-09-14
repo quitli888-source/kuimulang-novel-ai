@@ -120,13 +120,17 @@ class ActiveLLMConfig:
     global_temperature: float = 0.7
 
     # 每个Agent独立温度（当per_agent_enabled=True时使用）
+    # R5-P1-2.3: part_writer 0.8 → 0.65（更稳的推理模型风格）
+    # R5-P0-2: 新增 rolling_summary / milestone_summary 摘要 Agent 温度（与 plot_planner 对齐 0.3）
     agent_temperatures: dict = field(default_factory=lambda: {
         "plot_planner": 0.3,
-        "part_writer": 0.8,
+        "part_writer": 0.65,
         "style_optimizer": 0.5,
         "emotion_review": 0.3,
         "logic_review": 0.3,
         "consistency_review": 0.3,
+        "rolling_summary": 0.3,
+        "milestone_summary": 0.3,
     })
 
     def to_dict(self) -> dict:

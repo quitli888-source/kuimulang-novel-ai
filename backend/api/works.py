@@ -110,9 +110,12 @@ def get_work(work_id: str):
     data = json.loads(path.read_text(encoding="utf-8"))
     # R3-P0-1: 把 in-memory cost_tracker 摘要注入响应，供 Report.vue 渲染
     # 成本 / 调用次数卡（costData 永远空 修复）
+    # R5-P0-3: 先 attach_work(work_id, data.get('cost_summary')) 把 work JSON 里的
+    # 历史 calls 叠加到 tracker.calls，再 get_summary() —— 双轨合并避免重启清零。
     try:
         from core.cost_tracker import get_tracker
         tracker = get_tracker()
+        tracker.attach_work(work_id, data.get("cost_summary"))
         data["cost_summary"] = tracker.get_summary()
         # R4-P1-4: 按 Part 成本明细供 Report.vue 成本曲线渲染
         try:
@@ -137,6 +140,7 @@ def get_work(work_id: str):
             "total_calls": 0,
             "total_tokens": 0,
             "estimated_cost_rmb": 0.0,
+            "calls": [],
         }
         data["cost_per_part"] = []
     return data

@@ -7,6 +7,10 @@ R3-P1-6: 增补 step-3.7-flash 定价（按 stepfun 公开市场参考价）；
 R4-P1-7: 增补 attach_work(work_id, persist_dir) —— 把 cost_tracker 绑定到作品，
          每次 record() 后把累计 calls 增量写回 work_id.cost.json；进程级单例
          跨重启清零可接受（落盘 history 是 source of truth）。
+R5-P0-3: attach_work 新签名 (work_id, work_cost_summary) —— 反序列化 work JSON 中的
+         cost_summary.calls 叠加到 self.calls（重启后 history 恢复）；
+         _persist_path 改为 WORKS_DIR（与 works.py:{work_id}.json 同侧）。
+         get_summary() 返回值增加 'calls' 字段（用于 restart 合并 source of truth）。
 """
 import json
 import time
@@ -41,20 +45,84 @@ class CostTracker:
         # R4-P1-7: 当前绑定的 work_id + 持久化文件路径
         self._persist_work_id: Optional[str] = None
         self._persist_path: Optional[Path] = None
+        # R5-P0-3: work JSON 中持久化的 cost_summary 聚合字段（不含 calls），
+        # 用于 works.py:get_work 合并（重启瞬间 in-memory=0 时 history 不丢）
+        self._persisted_summary: dict = {}
 
-    def attach_work(self, work_id: str, persist_dir: Path) -> None:
-        """R4-P1-7: 把 cost_tracker 绑定到 work_id，每次 record() 后增量落盘到
-        {persist_dir}/{work_id}.cost.json。重启后 _persist_path 在新进程里
-        attach_work 才挂载，重启前 1s 内写丢失可接受。
+    def attach_work(
+        self,
+        work_id: str,
+        work_cost_summary: Optional[dict] = None,
+        persist_dir: Optional[Path] = None,
+    ) -> None:
+        """R5-P0-3: 把 cost_tracker 绑定到 work_id，同时从 work JSON 的 cost_summary
+        反序列化历史 calls 叠加到 self.calls（重启恢复 + 跨进程合并）。
+
+        Args:
+            work_id: 作品 ID。
+            work_cost_summary: 作品 JSON 中 data["cost_summary"] 字典，含 'calls' 列表
+                （R4-P1-7 时 _save 注入；R5 起 get_summary() 也内嵌 'calls'）。
+                传 None 时只挂路径、不合并历史（兼容旧调用）。
+            persist_dir: 持久化目录，None 时取 WORKS_DIR（与 works.py 同侧）。
+
+        行为：
+            1. _persist_path → {persist_dir}/{work_id}.cost.json
+            2. 若 work_cost_summary 含有 'calls' 列表 → 反序列化叠加到 self.calls
+               （去重按 timestamp+model+agent，避免重复叠加）
+            3. record() 后 _flush_to_disk() 自动把 self.calls 写盘（增量 source of truth）
         """
         self._persist_work_id = work_id
         try:
-            target_dir = Path(persist_dir)
+            if persist_dir is None:
+                from core.config import WORKS_DIR
+                target_dir = Path(WORKS_DIR)
+            else:
+                target_dir = Path(persist_dir)
             target_dir.mkdir(parents=True, exist_ok=True)
             self._persist_path = target_dir / f"{work_id}.cost.json"
         except Exception as e:
-            print(f"[cost_tracker] attach_work 失败: {e}")
+            print(f"[cost_tracker] attach_work 路径设置失败: {e}")
             self._persist_path = None
+
+        # R5-P0-3: 从 work_cost_summary 叠加历史 calls（重启合并 / 双轨持久化合并）
+        if isinstance(work_cost_summary, dict):
+            calls = work_cost_summary.get("calls")
+            if isinstance(calls, list) and calls:
+                # 去重：以 (timestamp, model, agent, prompt_tokens, completion_tokens)
+                # 五元组作为签名，避免重复叠加同一调用
+                existing_keys = {
+                    (
+                        c.get("timestamp"),
+                        c.get("model"),
+                        c.get("agent"),
+                        c.get("prompt_tokens"),
+                        c.get("completion_tokens"),
+                    )
+                    for c in self.calls
+                }
+                added = 0
+                for c in calls:
+                    if not isinstance(c, dict):
+                        continue
+                    sig = (
+                        c.get("timestamp"),
+                        c.get("model"),
+                        c.get("agent"),
+                        c.get("prompt_tokens"),
+                        c.get("completion_tokens"),
+                    )
+                    if sig in existing_keys:
+                        continue
+                    self.calls.append(c)
+                    existing_keys.add(sig)
+                    added += 1
+                if added:
+                    print(f"[cost_tracker] attach_work 从 work_cost_summary 恢复 {added} 条历史")
+            # 同时把 work_cost_summary 里的 summary 字段视为"已持久化基线"，
+            # 用于 works.py:get_work 时合并（避免重启瞬间 in-memory=0 覆盖 history）
+            self._persisted_summary = {
+                k: v for k, v in work_cost_summary.items() if k != "calls"
+            }
 
     def record(self, model: str, agent: str, is_json: bool,
                prompt_tokens: int, completion_tokens: int,
@@ -88,12 +156,17 @@ class CostTracker:
             pass
 
     def get_summary(self) -> dict:
-        """获取统计摘要"""
+        """获取统计摘要
+
+        R5-P0-3: 返回值增加 'calls' 字段（self.calls 拷贝），
+        供 _save() / works.py:get_work 在持久化层合并使用。
+        """
         if not self.calls:
             return {
                 "total_calls": 0, "total_tokens": 0,
                 "prompt_tokens": 0, "completion_tokens": 0,
                 "estimated_cost_rmb": 0.0, "total_duration_ms": 0,
+                "calls": [],
             }
 
         total_prompt = sum(c["prompt_tokens"] for c in self.calls)
@@ -120,6 +193,7 @@ class CostTracker:
             "estimated_cost_rmb": round(total_cost, 4),
             "total_duration_ms": round(total_duration, 0),
             "model_breakdown": {m: round(c, 4) for m, c in model_costs.items()},
+            "calls": list(self.calls),
         }
 
     def get_per_part_summary(self, part_num: int) -> dict:

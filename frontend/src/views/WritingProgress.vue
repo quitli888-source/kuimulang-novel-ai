@@ -101,8 +101,8 @@
         <div v-else class="resume-sub">所有 Part 已完成，可前往报告页查看。</div>
       </div>
       <template #footer>
-        <n-button @click="handleResume('restart')" v-if="lastPart < totalParts">从头开始</n-button>
-        <n-button v-if="lastPart < totalParts" @click="showResumeDialog = false">稍后再说</n-button>
+        <n-button @click="handleResume('restart')" v-if="lastPart < totalParts">重新开始</n-button>
+        <n-button v-if="lastPart < totalParts" @click="handleResume('cancel')">取消</n-button>
         <n-button type="primary" @click="handleResume('continue')" v-if="lastPart < totalParts">
           从 Part {{ lastPart + 1 }} 继续
         </n-button>
@@ -134,6 +134,8 @@ const writingStatus = ref({ running: false, paused: false, phase: '', current_pa
 const showResumeDialog = ref(false)
 const lastPart = ref(0)
 const totalParts = ref(0)
+// R5-P0-1: 弹出弹窗时记录 nextPart = N + 1（用于 handleResume('continue') 调 /writing/resume）
+const resumeFromPart = ref(0)
 
 const phases = [
   { id: 'phase1', name: '灵感解析' },
@@ -235,6 +237,8 @@ onMounted(async () => {
   if (phaseMatch) {
     const n = parseInt(phaseMatch[1], 10)
     lastPart.value = n
+    // R5-P0-1: 记录 nextPart = N + 1，供 handleResume('continue') 使用
+    resumeFromPart.value = n + 1
     // 估算总 Part 数：来自 part_outline 或 cfg 默认 50
     totalParts.value = (workData.value.part_outline && workData.value.part_outline.length) || 50
     // 同步初始 currentPhase / currentPart 到 store
@@ -343,15 +347,42 @@ async function confirmAction(choice) {
 }
 
 // R4-P1-6: 断点恢复处理
+// R5-P0-1: continue 必须调 /writing/resume/{work_id} 让后端 resume=True 短路；
+//          restart 调 /writing/start 带 restart=true；cancel 仅关闭弹窗
 function handleResume(action) {
   showResumeDialog.value = false
   if (action === 'continue') {
-    // 从 Part lastPart+1 继续，调 startWriting 让后端 resume 短路
-    startWriting()
+    // 从 Part lastPart+1 继续，调 resumeWritingFromPart 让后端 resume 短路
+    resumeWritingFromPart()
   } else if (action === 'restart') {
-    // 从头开始（清空 phase 让后端跑完整流程）
+    // 从头开始（后端 start 支持 restart=true，会重置 phase / parts / part_summaries）
     store.addLog({ msg: '用户选择从头开始', type: 'info' })
-    startWriting()
+    restartWriting()
+  }
+  // 'cancel'：仅关闭弹窗，不做任何操作
+}
+
+async function resumeWritingFromPart() {
+  console.log(`[Frontend] 从 Part ${lastPart.value + 1} 继续，调 /writing/resume/${workId}`)
+  try {
+    const res = await api.post(`/writing/resume/${workId}`)
+    console.log('[Frontend] resume API调用成功:', res.data)
+    writingStatus.value.running = true
+  } catch (err) {
+    console.error('[Frontend] resume API调用失败:', err)
+    store.setError(`恢复创作失败: ${err.message}`)
+  }
+}
+
+async function restartWriting() {
+  console.log(`[Frontend] 重新开始创作，调 /writing/start (restart=true)`)
+  try {
+    const res = await api.post('/writing/start', { work_id: workId, restart: true })
+    console.log('[Frontend] restart API调用成功:', res.data)
+    writingStatus.value.running = true
+  } catch (err) {
+    console.error('[Frontend] restart API调用失败:', err)
+    store.setError(`重新开始创作失败: ${err.message}`)
   }
 }
 

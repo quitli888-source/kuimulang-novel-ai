@@ -16,17 +16,23 @@ router = APIRouter()
 
 class StartWritingRequest(BaseModel):
     work_id: str
+    # R5-P0-1: 重启开关 —— True 时把 phase 重置为 init（用户从弹窗选"重新开始"）
+    restart: bool = False
 
 
 @router.post("/start")
 async def start_writing(req: StartWritingRequest, background_tasks: BackgroundTasks):
-    """启动创作流程（异步）"""
-    print(f"[API] /writing/start 被调用, work_id={req.work_id}")
+    """启动创作流程（异步）
+
+    R5-P0-1: 增加可选 restart 字段。当 restart=True 时，把 phase 强制重置为
+    'init' 并清空 parts/part_summaries，让 WritingService 从 Phase1 起跑。
+    """
+    print(f"[API] /writing/start 被调用, work_id={req.work_id}, restart={req.restart}")
     work_path = get_work_file(req.work_id)
     if not work_path.exists():
         print(f"[API] 作品不存在: {work_path}")
         raise HTTPException(404, "作品不存在")
-    
+
     print(f"[API] 作品存在，准备启动创作服务")
 
     emitter = get_emitter()
@@ -34,7 +40,7 @@ async def start_writing(req: StartWritingRequest, background_tasks: BackgroundTa
     # 后台运行创作
     async def run():
         print(f"[BackgroundTask] 创作任务开始执行")
-        service = WritingService(req.work_id, emitter)
+        service = WritingService(req.work_id, emitter, restart=req.restart)
         try:
             await service.run()
             print(f"[BackgroundTask] 创作任务完成")
@@ -45,7 +51,7 @@ async def start_writing(req: StartWritingRequest, background_tasks: BackgroundTa
     background_tasks.add_task(run)
     print(f"[API] 创作任务已添加到background_tasks")
 
-    return {"status": "started", "work_id": req.work_id}
+    return {"status": "started", "work_id": req.work_id, "restart": req.restart}
 
 
 class PauseRequest(BaseModel):
@@ -64,7 +70,11 @@ def pause_writing(req: PauseRequest):
 
 @router.post("/resume/{work_id}")
 async def resume_writing(work_id: str, background_tasks: BackgroundTasks):
-    """恢复创作"""
+    """恢复创作
+
+    R5-P0-1: 该端点用于断点恢复 —— WritingService(resume=True) 读 phase 自动短路
+    Phase1+2，从上次 phase3_part{N} 之后继续。前端 handleResume('continue') 必须调本端点。
+    """
     work_path = get_work_file(work_id)
     if not work_path.exists():
         raise HTTPException(404, "作品不存在")

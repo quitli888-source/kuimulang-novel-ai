@@ -34,7 +34,14 @@
               <n-button size="small" type="primary" @click="showRewriteMenu = true">AI改写</n-button>
               <n-button size="small" type="warning" @click="reOptimize">重新优化</n-button>
             </div>
-            <div class="editor-content" contenteditable="true" ref="editorRef" @mouseup="handleSelection">
+            <div
+              class="editor-content"
+              contenteditable="true"
+              ref="editorRef"
+              @mouseup="handleSelection"
+              @compositionstart="isComposing = true"
+              @compositionend="isComposing = false"
+            >
               {{ currentText || '暂无内容' }}
             </div>
           </div>
@@ -76,6 +83,8 @@ const showRewriteMenu = ref(false)
 const selectedText = ref('')
 const showReport = ref(false)
 const editorRef = ref(null)
+// R5-P1-2.2: contenteditable IME 守护 —— 中文输入法期间不触发 selection / rewrite
+const isComposing = ref(false)
 
 const currentText = computed(() => workData.value.parts?.[String(selectedPart.value)] || '')
 
@@ -93,6 +102,8 @@ function selectPart(n) {
 }
 
 function handleSelection() {
+  // R5-P1-2.2: 中文 IME 期间不触发选择记录（避免输入法弹出时误触改写弹窗）
+  if (isComposing.value) return
   const sel = window.getSelection()
   if (sel && sel.toString().trim()) {
     selectedText.value = sel.toString()
@@ -101,6 +112,8 @@ function handleSelection() {
 }
 
 async function doRewrite(mode) {
+  // R5-P1-2.2: IME 期间按了改写按钮应被丢弃
+  if (isComposing.value) return
   showRewriteMenu.value = false
   if (!selectedText.value) return
 

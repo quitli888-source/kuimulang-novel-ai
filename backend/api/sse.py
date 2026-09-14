@@ -243,12 +243,13 @@ async def sse_stream(request: Request, work_id: str = ""):
             print(f"[SSE] 补发 Last-Event-ID={last_event_id} 失败（不影响主流程）: {replay_err}")
 
         # 发送心跳保持连接
+        # R5-P1-2.4: 心跳 25s → 15s（缩短浏览器 6s 默认断线检测与心跳之间的虚假重连窗口）
         last_heartbeat = time.time()
         try:
             while True:
                 try:
                     # 等待事件或心跳超时
-                    payload = await asyncio.wait_for(queue.get(), timeout=25)
+                    payload = await asyncio.wait_for(queue.get(), timeout=15)
                     yield f"data: {payload}\n\n"
                     last_heartbeat = time.time()
                 except asyncio.TimeoutError:

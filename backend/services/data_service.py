@@ -1,11 +1,15 @@
 """
 奎木狼AI小说创作系统 V6 - 数据服务层
 V6改动：使用SQLite替代JSON文件存储作品数据，提升性能和可靠性
+R5-P1-2.1: 改为模块级 / 实例级长连接 + threading.RLock 保护，
+          避免每次 CRUD 都 sqlite3.connect/close（50 Part 任务约省 2-3s）。
+          注意：单 worker only；多 worker 部署需每 worker 独立 _conn。
 """
 import json
 import sqlite3
 import threading
 import uuid
+import atexit
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -39,12 +43,27 @@ class DataService:
             return
         self._initialized = True
         self._db_path = DATA_DIR / "works.db"
+        # R5-P1-2.1: 单连接长连接 + RLock 保护
+        # check_same_thread=False 让 FastAPI 默认 ThreadPoolExecutor 可安全复用
+        self._conn_lock = threading.RLock()
+        self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
         self._init_db()
+        # 进程退出时关闭连接（best-effort）
+        atexit.register(self._close)
+
+    def _close(self):
+        """R5-P1-2.1: 进程退出时关闭 SQLite 连接。"""
+        try:
+            if getattr(self, "_conn", None) is not None:
+                self._conn.close()
+        except Exception:
+            pass
 
     def _init_db(self):
         """初始化数据库表结构"""
-        with self._get_conn() as conn:
-            cursor = conn.cursor()
+        with self._conn_lock:
+            cursor = self._conn.cursor()
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS works (
                     id TEXT PRIMARY KEY,
@@ -61,17 +80,17 @@ class DataService:
                 CREATE INDEX IF NOT EXISTS idx_works_updated
                 ON works(updated_at DESC)
             """)
-            conn.commit()
+            self._conn.commit()
 
     @contextmanager
     def _get_conn(self):
-        """获取数据库连接的上下文管理器"""
-        conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        try:
-            yield conn
-        finally:
-            conn.close()
+        """R5-P1-2.1: 复用长连接，不再每次 connect/close。
+
+        使用 _conn_lock 保护多线程并发（check_same_thread=False + RLock 安全）。
+        事务结束不显式 commit，由调用方决定。
+        """
+        with self._conn_lock:
+            yield self._conn
 
     # ---- 作品CRUD操作 ----
 
