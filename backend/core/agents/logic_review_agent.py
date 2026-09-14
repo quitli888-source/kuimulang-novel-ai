@@ -80,6 +80,17 @@ class LogicReviewAgent(BaseAgent):
     name = "逻辑校验Agent"
     description = "检查情节逻辑和前文一致性"
 
+    @staticmethod
+    def _sorted_part_nums(state) -> list:
+        """R7-P0-2: 把 state.part_summaries.keys() 统一转 int 排序。"""
+        keys = []
+        for k in (state.part_summaries or {}).keys():
+            try:
+                keys.append(int(k))
+            except (TypeError, ValueError):
+                continue
+        return sorted(keys)
+
     def execute(self, state, part_num: int, part_text: str) -> dict:
         self.log_start()
 
@@ -91,13 +102,13 @@ class LogicReviewAgent(BaseAgent):
                 for c in state.characters
             )
 
-        # 构建前文信息
+        # R7-P0-2: 用 int keys 比较
         prev_context = ""
         if part_num > 1 and state.part_summaries:
             prev_context = "【前文摘要】\n"
-            for p_num in sorted(state.part_summaries.keys()):
+            for p_num in self._sorted_part_nums(state):
                 if p_num < part_num:
-                    prev_context += f"Part {p_num}: {state.part_summaries[p_num]}\n"
+                    prev_context += f"Part {p_num}: {state.part_summaries[str(p_num)]}\n"
 
         if part_num > 1 and part_num - 1 in state.parts:
             prev_tail = state.parts[part_num - 1][-500:]

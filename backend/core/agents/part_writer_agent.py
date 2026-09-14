@@ -288,6 +288,13 @@ class PartWriterAgent(BaseAgent):
                 f"累计 {len(accumulated)}/{target_words}字)"
             )
 
+            # R7-P1-5: 每完成一个 chunk 触发 checkpoint（崩溃可恢复）
+            if self.checkpoint_callback is not None:
+                try:
+                    self.checkpoint_callback(part_num, chunk_idx, accumulated)
+                except Exception as cp_err:
+                    print(f"[PartWriterAgent] checkpoint_callback 失败（不影响主流程）: {cp_err}")
+
             # 7) 提前退出条件：模型认为本章写完（结尾是完整段落 + 已达到最小字数）
             if len(accumulated) >= PART_WORD_MIN:
                 tail_stripped = accumulated.rstrip()

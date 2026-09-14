@@ -108,6 +108,9 @@ class SlidingWindow:
         world_setting: Optional[str] = None,
         outline: Optional[dict] = None,
         extra_context_provider=None,
+        vector_store=None,
+        vector_query: Optional[str] = None,
+        vector_top_k: int = 3,
     ) -> str:
         """
         组装 PartWriter 所需的完整 prompt 上下文。
@@ -119,6 +122,9 @@ class SlidingWindow:
             outline: 当前 Part 的规划（可选，目前保留位）
             extra_context_provider: 可调用对象，返回旧版"角色状态快照 + 关键事实"
                 字符串，用于无缝融合旧实现的输出（保持向后兼容）。
+            vector_store: R7-P0-4 可选 VectorStore 实例；为 None 或 disabled 时整段跳过。
+            vector_query: R7-P0-4 用作语义检索 query 的文本（一般是 outline 的 core_event / emotion_target）。
+            vector_top_k: 检索 Top-K 数。
 
         返回: 多段拼装的 prompt 上下文文本。
         """
@@ -213,6 +219,27 @@ class SlidingWindow:
             except Exception:
                 # 旧实现失败不影响主流程
                 pass
+
+        # 10. R7-P0-4: 向量检索双轨（可选；vector_store 未启用或无 query 时整段跳过）
+        if vector_store is not None and vector_query:
+            try:
+                hits = vector_store.query(
+                    vector_query, top_k=vector_top_k, exclude_part_num=part_num
+                )
+                if hits:
+                    sections.append("【相关前文片段（向量检索 Top-K）】")
+                    for hit_part_num, sim in hits:
+                        text = vector_store.get_text(hit_part_num)
+                        if not text:
+                            continue
+                        excerpt = text[-600:] if len(text) > 600 else text
+                        sections.append(
+                            f"--- Part {hit_part_num}（相似度 {sim:.2f}）---\n{excerpt}"
+                        )
+                    sections.append("")
+            except Exception as vs_err:
+                # 向量检索失败永远 silent-fallback，不影响主流程
+                print(f"[SlidingWindow] vector_store 查询失败（已跳过）: {vs_err}")
 
         return "\n".join(sections)
 

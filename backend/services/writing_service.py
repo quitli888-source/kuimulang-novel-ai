@@ -22,7 +22,7 @@ from core.sliding_window import SlidingWindow
 class TempStoryState:
     """临时故事状态类，用于构建 PartWriterAgent 所需的上下文"""
 
-    def __init__(self, data, memory=None):
+    def __init__(self, data, memory=None, vector_store=None):
         self.inspiration = data.get("inspiration", "")
         self.core_elements = data.get("core_elements", {})
         self.market_positioning = data.get("market_positioning", {})
@@ -37,6 +37,8 @@ class TempStoryState:
         self.memory = memory
         # V6.1: 真正的滑动窗口（最近 3 个 Part 原文 + 远端三级摘要）
         self.window = SlidingWindow(window_size=3)
+        # R7-P0-4: 可选向量检索；writing_service 在构造时注入
+        self.vector_store = vector_store
 
     def get_part_context(self, part_num):
         """获取指定部分的上下文信息（V6.1：委托给 SlidingWindow，失败回退旧实现）"""
@@ -53,11 +55,24 @@ class TempStoryState:
                     sections.append("")
                 return "\n".join(sections)
 
+            # R7-P0-4: 构造向量检索 query（用当前 Part 的 core_event + emotion_target）
+            vector_query = None
+            if self.vector_store is not None and self.vector_store.enabled:
+                outline = (self.part_outline or [])[part_num - 1] if part_num - 1 < len(self.part_outline or []) else None
+                if isinstance(outline, dict):
+                    core_event = outline.get("core_event", "")
+                    emotion_target = outline.get("emotion_target", "")
+                    vector_query = " ".join(
+                        s for s in (core_event, emotion_target) if s
+                    ) or None
+
             return self.window.build(
                 part_num,
                 characters=self.characters,
                 world_setting=self.world_setting,
                 extra_context_provider=_legacy_extras,
+                vector_store=self.vector_store,
+                vector_query=vector_query,
             )
         except Exception:
             return self._legacy_get_part_context(part_num)
@@ -212,6 +227,25 @@ class WritingService:
             )
         except Exception as attach_err:
             print(f"[WritingService] cost_tracker.attach_work 失败（不影响主流程）: {attach_err}")
+
+        # R7-P0-4: 向量检索实例（默认 enabled=False；ENABLE_VECTOR_RAG=1 才启用）
+        self.vector_store = None
+        try:
+            from core.vector_store import VectorStore
+            self.vector_store = VectorStore(
+                persist_dir=self.work_path.parent / "vectors",
+                embedding_provider="none",
+            )
+            # 用 data.parts 重建索引（resume 场景）
+            if self.vector_store.enabled:
+                for p_key, p_text in (self.data.get("parts", {}) or {}).items():
+                    try:
+                        self.vector_store.add(int(p_key), p_text)
+                    except Exception:
+                        continue
+        except Exception as vs_err:
+            print(f"[WritingService] VectorStore 初始化失败（不影响主流程）: {vs_err}")
+            self.vector_store = None
 
     async def run(self):
         """执行完整创作流程
@@ -571,11 +605,46 @@ class WritingService:
         part_outline = self.data.get("part_outline", [])
 
         # 使用模块级 TempStoryState 类构建上下文
-        temp_state = TempStoryState(self.data, memory_content)
+        temp_state = TempStoryState(self.data, memory_content, vector_store=self.vector_store)
         writer_agent = PartWriterAgent()
 
         # 设置进度回调
         writer_agent.set_progress_callback(self.progress_callback)
+
+        # R7-P1-5: chunk 级 checkpoint 回调——每个 chunk 完成后写一次盘
+        # （崩溃可恢复；不阻塞主流程，_save 是 best-effort 同步 IO）
+        def _on_chunk_complete(part_num: int, chunk_idx: int, accumulated_text: str) -> None:
+            try:
+                self.data["parts"][str(part_num)] = accumulated_text
+                # 同步 part_summaries（供 review agent 用）
+                summary = accumulated_text[:200] + "..." if len(accumulated_text) > 200 else accumulated_text
+                self.data["part_summaries"][str(part_num)] = summary
+                # 落盘（best-effort：失败也不抛）
+                self._save()
+                # R7-P1-6: 推送 checkpoint_saved 进度事件（前端可显示）
+                try:
+                    # 这里只能同步发（callback 在非异步上下文）
+                    from core.progress_manager import progress_manager as _pm
+                    from api.sse import EventType as _Evt
+                    _pm.emitter.emit_sync(
+                        _Evt.LOG,
+                        {
+                            "level": "info",
+                            "message": f"💾 Part {part_num} chunk {chunk_idx} checkpoint 已保存 ({len(accumulated_text)}字)",
+                            "event_type": "checkpoint_saved",
+                            "part": part_num,
+                            "chunk": chunk_idx,
+                            "words": len(accumulated_text),
+                            "work_id": self.work_id,
+                        },
+                        work_id=self.work_id,
+                    )
+                except Exception:
+                    pass
+            except Exception as cp_err:
+                print(f"[WritingService] chunk checkpoint 失败（不影响主流程）: {cp_err}")
+
+        writer_agent.set_checkpoint_callback(_on_chunk_complete)
 
         for i in range(start_from, total + 1):
             await self._check_pause()
@@ -634,6 +703,13 @@ class WritingService:
                         )
                     except Exception as win_err:
                         print(f"[WritingService] SlidingWindow.add_part 失败（不影响主流程）: {win_err}")
+
+                    # R7-P0-4: 向量检索索引同步（仅在 enabled 时生效）
+                    try:
+                        if self.vector_store is not None and self.vector_store.enabled:
+                            self.vector_store.add(i, part_text)
+                    except Exception as vs_err:
+                        print(f"[WritingService] vector_store.add 失败（不影响主流程）: {vs_err}")
 
                     # R4-P0-2: 二级滚动摘要生成（每 5 个 Part 一次）
                     if temp_state.window.should_create_rolling_summary(i):

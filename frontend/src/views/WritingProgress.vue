@@ -257,12 +257,49 @@ onUnmounted(() => {
 })
 
 // R4-P0-1: handleEvent 直接调 store action（不再维护视图内 ref）
+// R7-P1-6: 新增 event_type 渲染（log / progress 事件携带 event_type 字段）
+const EVENT_TYPE_ICONS = {
+  phase_change: '🔄',
+  agent_start: '🤖',
+  agent_end: '✅',
+  part_start: '📖',
+  chunk_start: '✍️',
+  chunk_end: '📝',
+  part_end: '🎉',
+  error: '❌',
+  cost_update: '💰',
+  checkpoint_saved: '💾',
+  progress: '⏳',
+}
+const EVENT_TYPE_LABELS = {
+  phase_change: '阶段切换',
+  agent_start: 'Agent 启动',
+  agent_end: 'Agent 完成',
+  part_start: 'Part 开始',
+  chunk_start: '片段开始',
+  chunk_end: '片段完成',
+  part_end: 'Part 完成',
+  error: '错误',
+  cost_update: '成本更新',
+  checkpoint_saved: 'Checkpoint 已保存',
+  progress: '进度更新',
+}
+
 function handleEvent(ev) {
   switch (ev.type) {
-    case 'log':
-      store.addLog(ev.data.message || ev.data.msg || '')
+    case 'log': {
+      // R7-P1-6: 若 log 携带 event_type，使用对应图标 + 文案
+      const et = ev.data.event_type
+      if (et && et !== 'progress') {
+        const icon = EVENT_TYPE_ICONS[et] || '📌'
+        const label = EVENT_TYPE_LABELS[et] || et
+        store.addLog({ msg: `${icon} [${label}] ${ev.data.message || ev.data.msg || ''}`, type: et === 'error' ? 'error' : 'info' })
+      } else {
+        store.addLog(ev.data.message || ev.data.msg || '')
+      }
       nextTick(() => scrollLog())
       break
+    }
     case 'phase':
       store.setPhase(ev.data.phase)
       break
@@ -291,6 +328,14 @@ function handleEvent(ev) {
       break
     case 'progress':
       store.setProgress(ev.data.progress, ev.data.message)
+      // R7-P1-6: progress 事件附带 event_type，单独打一条结构化日志
+      const et = ev.data.event_type
+      if (et && et !== 'progress') {
+        const icon = EVENT_TYPE_ICONS[et] || '⏳'
+        const label = EVENT_TYPE_LABELS[et] || et
+        store.addLog({ msg: `${icon} [${label}] ${ev.data.message || ''}`, type: 'info' })
+        nextTick(() => scrollLog())
+      }
       break
     default:
       // 心跳 / 未知事件忽略

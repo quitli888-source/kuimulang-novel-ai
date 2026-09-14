@@ -16,6 +16,9 @@ class BaseAgent(ABC):
     def __init__(self):
         self.system_prompt = ""
         self.progress_callback: Optional[Callable[[int, str], None]] = None
+        # R7-P1-5: chunk 级 checkpoint 回调（PartWriterAgent 每完成一个 chunk 触发）
+        # 签名：callable(part_num: int, chunk_idx: int, accumulated_text: str) -> None
+        self.checkpoint_callback: Optional[Callable[[int, int, str], None]] = None
 
     @abstractmethod
     def execute(self, state, **kwargs) -> Dict[str, Any]:
@@ -36,6 +39,13 @@ class BaseAgent(ABC):
             callback: 进度回调函数，参数为(progress: int, message: str)
         """
         self.progress_callback = callback
+
+    def set_checkpoint_callback(self, callback: Callable[[int, int, str], None]):
+        """R7-P1-5: 设置 chunk 级 checkpoint 回调。
+        Args:
+            callback: 签名 (part_num, chunk_idx, accumulated_text) -> None
+        """
+        self.checkpoint_callback = callback
 
     def update_progress(self, progress: int, message: str):
         """

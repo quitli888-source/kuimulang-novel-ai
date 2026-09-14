@@ -110,6 +110,8 @@ class CostTracker:
                         c.get("agent"),
                         c.get("prompt_tokens"),
                         c.get("completion_tokens"),
+                        # R7-P0-3: estimated 字段不参与去重（保持向后兼容：旧 json 无此字段）
+                        # 仅在 estimated=True 且字段已存在时区分（防止双 attach 重复叠加）
                     )
                     if sig in existing_keys:
                         continue
@@ -126,8 +128,9 @@ class CostTracker:
 
     def record(self, model: str, agent: str, is_json: bool,
                prompt_tokens: int, completion_tokens: int,
-               total_tokens: int, duration_ms: float):
-        """记录一次LLM调用"""
+               total_tokens: int, duration_ms: float,
+               estimated: bool = False):
+        """记录一次LLM调用。R7-P0-3: estimated=True 表示 token 数是基于文本长度估算（非 provider 上报）。"""
         self.calls.append({
             "timestamp": round(time.time() - self._start_time, 1),
             "model": model,
@@ -137,6 +140,7 @@ class CostTracker:
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
             "duration_ms": round(duration_ms, 0),
+            "estimated": bool(estimated),
         })
         # R4-P1-7: 增量落盘（best-effort，失败不影响主流程）
         self._flush_to_disk()
@@ -264,3 +268,45 @@ def reset_tracker():
 def should_prompt_for_cost(work_id: Optional[str] = None, threshold: Optional[float] = None) -> bool:
     """模块级便捷函数：调用全局 tracker 的 should_prompt_for_cost。"""
     return get_tracker().should_prompt_for_cost(work_id=work_id, threshold=threshold)
+
+
+# ---- R7-P0-3: 流式调用 usage 兜底估算 ----
+# 中文 1 字 ≈ 1.5 tokens（实测 BPE 平均），英文 1 字符 ≈ 0.77 token（BPE 平均）。
+# 没有 tiktoken 时保守取 CJK 1.5 字/token + ASCII 1.3 字/token。
+_CJK_RATIO = 1.5
+_ASCII_RATIO = 1.3
+
+
+def estimate_tokens_from_text(text: str) -> int:
+    """R7-P0-3: 流式调用 usage 为 None 时用文本长度估算 token 数。
+
+    规则：
+      - 中文字符（CJK Unified Ideographs 等基本块）按 1 / 1.5 ≈ 0.67 token/字 折算
+      - 其它字符（ASCII 拉丁 + 数字 + 符号）按 1 / 1.3 ≈ 0.77 token/字 折算
+    返回估算的 token 数（int，至少 1）。
+    """
+    if not text:
+        return 1
+    try:
+        cjk_count = 0
+        other_count = 0
+        for ch in text:
+            cp = ord(ch)
+            # 基本汉字 + 扩展 A-F
+            if (
+                0x4E00 <= cp <= 0x9FFF
+                or 0x3400 <= cp <= 0x4DBF
+                or 0x20000 <= cp <= 0x2A6DF
+                or 0x2A700 <= cp <= 0x2B73F
+                or 0x2B740 <= cp <= 0x2B81F
+                or 0x2B820 <= cp <= 0x2CEAF
+            ):
+                cjk_count += 1
+            else:
+                other_count += 1
+        cjk_tokens = cjk_count / _CJK_RATIO
+        other_tokens = other_count / _ASCII_RATIO
+        return max(1, int(round(cjk_tokens + other_tokens)))
+    except Exception:
+        # 极端异常下退化为字符数 / 2
+        return max(1, len(text) // 2)

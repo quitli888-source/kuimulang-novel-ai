@@ -78,18 +78,29 @@ class EmotionReviewAgent(BaseAgent):
     name = "情感评估Agent"
     description = "评估Part情感共鸣和情绪曲线"
 
+    @staticmethod
+    def _sorted_part_nums(state) -> list:
+        """R7-P0-2: 把 state.part_summaries.keys() 统一转 int 排序。"""
+        keys = []
+        for k in (state.part_summaries or {}).keys():
+            try:
+                keys.append(int(k))
+            except (TypeError, ValueError):
+                continue
+        return sorted(keys)
+
     def execute(self, state, part_num: int, part_text: str) -> dict:
         self.log_start()
 
         outline = state.part_outline[part_num - 1] if state.part_outline else {}
 
-        # 构建前文信息
+        # R7-P0-2: 用 int keys 比较
         prev_context = ""
         if part_num > 1 and state.part_summaries:
             prev_context = "【前文情感脉络】\n"
-            for p_num in sorted(state.part_summaries.keys()):
+            for p_num in self._sorted_part_nums(state):
                 if p_num < part_num:
-                    prev_context += f"Part {p_num}: {state.part_summaries[p_num]}\n"
+                    prev_context += f"Part {p_num}: {state.part_summaries[str(p_num)]}\n"
 
         user_prompt = f"""请评估Part {part_num}的情感效果。
 

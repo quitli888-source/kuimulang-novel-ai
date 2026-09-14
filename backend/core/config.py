@@ -330,17 +330,119 @@ from .llm_providers import (
 # 全局激活的供应商配置（持久化到data/llm_config.json）
 _llm_config: ActiveLLMConfig = None
 _LLM_CONFIG_FILE = DATA_DIR / "llm_config.json"
+# R7-P0-1: 启动时 migrate 一次性 flag，避免每次启动重复迁移
+_LLM_CONFIG_MIGRATION_FLAG = DATA_DIR / ".llm_config_migrated"
+
+
+def _dataclass_defaults() -> dict:
+    """获取 ActiveLLMConfig 的所有 dataclass 默认值（含 default_factory）。
+    R7-P0-1: 过滤掉 dataclasses._MISSING_TYPE 标记（不可 JSON 序列化）。
+    """
+    import dataclasses
+    MISSING = dataclasses.MISSING
+    defaults = {}
+    for f_name, f_obj in ActiveLLMConfig.__dataclass_fields__.items():
+        try:
+            if f_obj.default is not MISSING and not isinstance(f_obj.default, type(MISSING)):
+                defaults[f_name] = f_obj.default
+                continue
+        except Exception:
+            pass
+        if f_obj.default_factory is not MISSING and f_obj.default_factory is not None:
+            try:
+                defaults[f_name] = f_obj.default_factory()
+            except Exception:
+                defaults[f_name] = None
+    return defaults
+
+
+def migrate_llm_config() -> bool:
+    """R7-P0-1: 启动时 migrate data/llm_config.json。
+
+    策略：
+      - 用 dataclass 默认值兜底补齐缺失字段（避免运行时 fallback 丢用户意图）
+      - 检测旧值 "minimax" 等已知遗留 provider，且没有用户自定义 base_url
+        → 自动迁移到 dataclass 默认（目前为 "step"），并打 log
+      - 写回 json（保留用户自定义的 agent_providers / agent_temperatures 等）
+      - 写 .llm_config_migrated flag，下次启动不再重复迁移（除非 json 又被改回旧值）
+
+    Returns:
+        bool: 是否发生了迁移（写盘 + 改 active_provider_id）。
+    """
+    if not _LLM_CONFIG_FILE.exists():
+        return False
+
+    try:
+        raw = _LLM_CONFIG_FILE.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except Exception as e:
+        print(f"[Config] migrate_llm_config: 解析 json 失败，跳过迁移: {e}")
+        return False
+
+    if not isinstance(data, dict):
+        return False
+
+    defaults = _dataclass_defaults()
+    merged = {**defaults, **data}
+    # 再次过滤到 dataclass 已知字段（保留用户键值，但去掉无关字段）
+    merged = {k: v for k, v in merged.items() if k in ActiveLLMConfig.__dataclass_fields__}
+
+    migrated = False
+    legacy_providers = {"minimax", "MiniMax"}
+    active_provider = merged.get("active_provider_id", "")
+    if active_provider in legacy_providers:
+        # R7-P0-1 fix: 仅看 raw data 中用户显式给出的 agent_providers（避免 defaults 兜底误判）
+        raw_ap = data.get("agent_providers") or {}
+        user_customized = False
+        if isinstance(raw_ap, dict) and raw_ap:
+            user_customized = any(v not in legacy_providers for v in raw_ap.values())
+        if not user_customized:
+            old = active_provider
+            merged["active_provider_id"] = defaults.get("active_provider_id", "step")
+            print(f"[Config] migrated active_provider_id: {old} -> {merged['active_provider_id']}")
+            migrated = True
+
+    # 写回（仅在确实发生迁移时落盘，避免无意义 IO）
+    if migrated:
+        try:
+            _LLM_CONFIG_FILE.write_text(
+                json.dumps(merged, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            # 写一次性 flag（即使后面删 json，下次启动仍走默认）
+            try:
+                _LLM_CONFIG_MIGRATION_FLAG.touch()
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"[Config] migrate_llm_config: 写盘失败（不影响主流程）: {e}")
+            return False
+
+    # 同步 in-memory 单例（如果用户已经调用过 load_llm_config，需要 invalidate）
+    global _llm_config
+    _llm_config = ActiveLLMConfig.from_dict(merged)
+    return migrated
 
 
 def load_llm_config() -> ActiveLLMConfig:
-    """从磁盘加载LLM供应商配置"""
+    """从磁盘加载LLM供应商配置（R7-P0-1: 顶部先调 migrate 兜底旧 json）"""
     global _llm_config
     if _llm_config is not None:
         return _llm_config
+    # R7-P0-1: 启动时 migrate（仅一次；flag 文件防重复）
+    if _LLM_CONFIG_FILE.exists() and not _LLM_CONFIG_MIGRATION_FLAG.exists():
+        try:
+            migrate_llm_config()
+        except Exception as e:
+            print(f"[Config] migrate_llm_config 异常（不影响主流程）: {e}")
     if _LLM_CONFIG_FILE.exists():
         try:
             data = json.loads(_LLM_CONFIG_FILE.read_text(encoding="utf-8"))
-            _llm_config = ActiveLLMConfig.from_dict(data)
+            # dataclass 默认 + json 覆盖（双轨：确保缺字段也能 fallback 到当前默认）
+            defaults = _dataclass_defaults()
+            merged = {**defaults, **data}
+            merged = {k: v for k, v in merged.items() if k in ActiveLLMConfig.__dataclass_fields__}
+            _llm_config = ActiveLLMConfig.from_dict(merged)
         except Exception:
             _llm_config = ActiveLLMConfig()
     else:

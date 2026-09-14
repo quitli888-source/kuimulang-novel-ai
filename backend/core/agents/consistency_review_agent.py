@@ -68,6 +68,19 @@ class ConsistencyReviewAgent(BaseAgent):
     name = "角色一致性检查Agent"
     description = "检查角色在多个Part之间的一致性"
 
+    @staticmethod
+    def _sorted_part_nums(state) -> list:
+        """R7-P0-2: 把 state.part_summaries.keys() 统一转 int 排序，
+        避免与 int(part_num) 比较时抛 TypeError。
+        """
+        keys = []
+        for k in (state.part_summaries or {}).keys():
+            try:
+                keys.append(int(k))
+            except (TypeError, ValueError):
+                continue
+        return sorted(keys)
+
     def execute(self, state, part_num: int, part_text: str) -> dict:
         """
         检查当前Part的角色一致性。
@@ -99,17 +112,17 @@ class ConsistencyReviewAgent(BaseAgent):
                 for c in state.characters
             )
 
-        # 构建前文摘要
+        # R7-P0-2: 用 int keys 排序后比较
         prev_summaries = ""
-        for p_num in sorted(state.part_summaries.keys()):
+        for p_num in self._sorted_part_nums(state):
             if p_num < part_num:
-                prev_summaries += f"Part {p_num}: {state.part_summaries[p_num]}\n"
+                prev_summaries += f"Part {p_num}: {state.part_summaries[str(p_num)]}\n"
 
         # 前文结尾
         prev_tail = ""
-        if part_num - 1 in self._get_final_draft(state):
-            prev_draft = self._get_final_draft(state)
-            prev_text = prev_draft[part_num - 1]
+        final_draft = self._get_final_draft(state) or {}
+        if (part_num - 1) in final_draft:
+            prev_text = final_draft[part_num - 1]
             prev_tail = prev_text[-800:]
 
         user_prompt = f"""请检查Part {part_num}的角色一致性。

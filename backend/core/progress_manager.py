@@ -23,14 +23,21 @@ class ProgressManager:
         }
         self.session_progress: Dict[str, Dict[str, Any]] = {}
 
-    def update_progress(self, session_id: str, progress: int, message: str, agent: str = ""):
+    def update_progress(self, session_id: str, progress: int, message: str, agent: str = "",
+                       event_type: str = "progress"):
         """
-        更新进度
+        更新进度（R7-P1-6: 新增 event_type 参数，使前端能区分不同进度事件类型）
+
         Args:
             session_id: 会话ID
             progress: 进度百分比 (0-100)
             message: 进度消息
             agent: Agent名称
+            event_type: R7-P1-6 结构化事件类型
+                - "phase_change" / "agent_start" / "agent_end"
+                - "part_start" / "chunk_start" / "chunk_end" / "part_end"
+                - "error" / "cost_update" / "checkpoint_saved"
+                - "progress"（默认，纯百分比推进）
         """
         # 更新全局进度
         self.current_progress = {
@@ -39,6 +46,7 @@ class ProgressManager:
             "phase": "writing",
             "agent": agent,
             "message": message,
+            "event_type": event_type,
             "timestamp": time.time()
         }
 
@@ -50,6 +58,7 @@ class ProgressManager:
                 "phase": "init",
                 "agent": "",
                 "message": "准备开始",
+                "event_type": "progress",
                 "timestamp": time.time()
             }
 
@@ -59,6 +68,7 @@ class ProgressManager:
             "phase": "writing",
             "agent": agent,
             "message": message,
+            "event_type": event_type,
             "timestamp": time.time()
         }
 
@@ -68,6 +78,7 @@ class ProgressManager:
             "message": message,
             "agent": agent,
             "progress": progress,
+            "event_type": event_type,
             "work_id": session_id,
         }, work_id=session_id)
 
@@ -78,6 +89,7 @@ class ProgressManager:
                 "progress": progress,
                 "message": message,
                 "agent": agent,
+                "event_type": event_type,
                 "timestamp": time.time(),
                 "work_id": session_id,
             }, work_id=session_id)

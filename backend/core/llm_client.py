@@ -262,14 +262,17 @@ def call_llm(
                     max_tokens=max_tokens,
                     stream=True,
                 )
-                
+
                 content = ""
+                # R7-P0-3: 保留最后一个 chunk 以获取 usage（部分 provider 在末尾 chunk 带 usage）
+                last_chunk = None
                 for chunk in response:
                     if chunk.choices[0].delta.content:
                         chunk_content = chunk.choices[0].delta.content
                         content += chunk_content
                         stream_callback(chunk_content)
-                
+                    last_chunk = chunk
+
                 content = content.strip()
             else:
                 # 非流式调用
@@ -280,20 +283,29 @@ def call_llm(
                     max_tokens=max_tokens,
                 )
                 content = response.choices[0].message.content.strip()
-            
+                # 兼容 stream=False 但又想取 last_chunk 的场景（不进入）
+                last_chunk = None
+
             content = _strip_think_tags(content)
             call_duration = (time.time() - call_start) * 1000
             print(f"    [LLM] API调用成功，耗时: {call_duration:.2f}ms")
-            
+
             content_preview = content[:100] + "..." if len(content) > 100 else content
             print(f"    [LLM] 返回内容长度: {len(content)} 字符, 预览: {content_preview}")
 
-            # 记录Token消耗
+            # R7-P0-3: 流式调用结束后，从 last_chunk 取 usage；取不到则基于内容长度估算。
             try:
-                from core.cost_tracker import get_tracker
+                from core.cost_tracker import get_tracker, estimate_tokens_from_text
                 tracker = get_tracker()
-                usage = response.usage if not stream else None
-                if usage:
+
+                # 优先：响应自带 usage（流式末尾 chunk 或非流式 response.usage）
+                usage = None
+                if not stream:
+                    usage = getattr(response, "usage", None)
+                elif last_chunk is not None and getattr(last_chunk, "usage", None) is not None:
+                    usage = last_chunk.usage
+
+                if usage is not None:
                     print(f"    [LLM] Token使用: prompt={usage.prompt_tokens}, completion={usage.completion_tokens}, total={usage.total_tokens}")
                     tracker.record(
                         model=model_name, agent=agent, is_json=False,
@@ -303,7 +315,30 @@ def call_llm(
                         duration_ms=call_duration,
                     )
                 else:
-                    print(f"    [LLM] 警告: usage为None，无法记录Token消耗")
+                    # R7-P0-3: 兜底——流式 usage=None 时基于 prompt / completion 文本长度估算
+                    try:
+                        sys_prompt_text = system_prompt or ""
+                        user_prompt_text = user_prompt or ""
+                        completion_text = content or ""
+                        prompt_chars = len(sys_prompt_text) + len(user_prompt_text)
+                        prompt_tokens = estimate_tokens_from_text(sys_prompt_text + "\n" + user_prompt_text)
+                        completion_tokens = estimate_tokens_from_text(completion_text)
+                        total_tokens = prompt_tokens + completion_tokens
+                        print(
+                            f"    [LLM] R7-P0-3 兜底估算: prompt_chars={prompt_chars} "
+                            f"prompt_tokens={prompt_tokens} completion_tokens={completion_tokens} "
+                            f"total={total_tokens}"
+                        )
+                        tracker.record(
+                            model=model_name, agent=agent, is_json=False,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            total_tokens=total_tokens,
+                            duration_ms=call_duration,
+                            estimated=True,
+                        )
+                    except Exception as est_err:
+                        print(f"    [LLM] R7-P0-3 兜底估算失败（不影响主流程）: {est_err}")
             except Exception as usage_err:
                 print(f"    [LLM] 成本追踪失败: {usage_err}")
                 pass  # 成本追踪失败不影响主流程
