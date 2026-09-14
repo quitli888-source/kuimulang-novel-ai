@@ -584,7 +584,23 @@ class WritingService:
                 )
 
     async def _phase4_optimize(self):
-        """Phase 4: 风格优化 - 调用StyleOptimizerAgent进行逻辑校验、情感评估、一致性检查"""
+        """Phase 4: 风格优化 + 评审
+
+        R2 改造：对每个 Part 串行调用三个 Review Agent（Logic / Emotion / Consistency），
+        收集 per-Part 打分，再聚合成顶层 summary + parts 数组。
+
+        新 data 契约：
+            {
+                "logic":        {avg_score, pass, total_issues, top_issue},
+                "emotion":      {avg_score, pass, avg_resonance, ...},
+                "consistency":  {avg_score, pass, total_issues, ...},
+                "parts": [
+                    {"part": N, "logic_score": ..., "emotion_score": ..., "consistency_score": ...,
+                     "p0_issues": [...], "p1_issues": [...], "summary": "..."},
+                    ...
+                ]
+            }
+        """
         await self.emitter.emit(EventType.PHASE, {"phase": "phase4", "name": "风格优化", "work_id": self.work_id}, work_id=self.work_id)
         await self.emitter.emit(EventType.LOG, {"message": "开始风格优化...", "work_id": self.work_id}, work_id=self.work_id)
 
@@ -594,70 +610,117 @@ class WritingService:
         from core.agents.consistency_review_agent import ConsistencyReviewAgent
 
         try:
-            # 4.1 逻辑校验
-            await self.emitter.emit(EventType.AGENT_CALL, {
-                "agent": "logic_review_agent",
-                "status": "start",
-                "message": "执行逻辑校验...",
+            # 4.1 准备 state mock（三个 Review Agent 都需要 state.part_outline / part_summaries / characters / world_setting / foreshadowing / parts / final_draft）
+            state_mock = self._build_review_state_mock()
+
+            # 4.2 收集已写 Part 编号（字符串 key → int），仅审查有正文的 Part
+            part_nums = []
+            for k, v in (self.data.get("parts", {}) or {}).items():
+                if isinstance(v, str) and v.strip():
+                    try:
+                        part_nums.append(int(k))
+                    except (TypeError, ValueError):
+                        continue
+            part_nums = sorted(set(part_nums))
+
+            await self.emitter.emit(EventType.LOG, {
+                "message": f"评审阶段：共 {len(part_nums)} 个 Part 待审查",
                 "work_id": self.work_id,
             }, work_id=self.work_id)
 
+            # 4.3 串行调用三个 Review Agent（每 Part × 3 Agent）
             logic_agent = LogicReviewAgent()
-            logic_result = await asyncio.to_thread(
-                logic_agent.execute,
-                type('State', (), {'parts': self.data.get("parts", {}), 'characters': self.data.get("characters", [])})()
-            )
-
-            await self.emitter.emit(EventType.AGENT_CALL, {
-                "agent": "logic_review_agent",
-                "status": "end",
-                "message": f"逻辑校验完成",
-                "work_id": self.work_id,
-            }, work_id=self.work_id)
-
-            # 4.2 情感评估
-            await self.emitter.emit(EventType.AGENT_CALL, {
-                "agent": "emotion_review_agent",
-                "status": "start",
-                "message": "执行情感评估...",
-                "work_id": self.work_id,
-            }, work_id=self.work_id)
-
             emotion_agent = EmotionReviewAgent()
-            emotion_result = await asyncio.to_thread(
-                emotion_agent.execute,
-                type('State', (), {'parts': self.data.get("parts", {})})()
-            )
-
-            await self.emitter.emit(EventType.AGENT_CALL, {
-                "agent": "emotion_review_agent",
-                "status": "end",
-                "message": f"情感评估: {emotion_result.get('emotion_score', 'N/A')}",
-                "work_id": self.work_id,
-            }, work_id=self.work_id)
-
-            # 4.3 一致性检查
-            await self.emitter.emit(EventType.AGENT_CALL, {
-                "agent": "consistency_review_agent",
-                "status": "start",
-                "message": "执行一致性检查...",
-                "work_id": self.work_id,
-            }, work_id=self.work_id)
-
             consistency_agent = ConsistencyReviewAgent()
-            consistency_result = await asyncio.to_thread(
-                consistency_agent.execute,
-                type('State', (), {'parts': self.data.get("parts", {}), 'characters': self.data.get("characters", [])})()
-            )
 
-            await self.emitter.emit(EventType.AGENT_CALL, {
-                "agent": "consistency_review_agent",
-                "status": "end",
-                "message": f"一致性检查完成",
-                "work_id": self.work_id,
-            }, work_id=self.work_id)
+            per_part_results: list = []  # [{part, logic_result, emotion_result, consistency_result}, ...]
 
-            # 4.4 风格优化
+            for idx, part_num in enumerate(part_nums, start=1):
+                part_key = str(part_num)
+                part_text = self.data["parts"][part_key]
+
+                # ---- LogicReview ----
+                await self.emitter.emit(EventType.AGENT_CALL, {
+                    "agent": "logic_review_agent",
+                    "part": part_num,
+                    "status": "start",
+                    "message": f"审查 Part {part_num} 逻辑...",
+                    "work_id": self.work_id,
+                }, work_id=self.work_id)
+                try:
+                    logic_result = await asyncio.to_thread(
+                        logic_agent.execute, state_mock, part_num, part_text
+                    )
+                except Exception as e:
+                    print(f"[WritingService] LogicReview Part {part_num} 失败: {e}")
+                    logic_result = self._review_failure("logic", part_num, e)
+                await self.emitter.emit(EventType.AGENT_CALL, {
+                    "agent": "logic_review_agent",
+                    "part": part_num,
+                    "status": "end",
+                    "message": f"Part {part_num} 逻辑审查完成",
+                    "work_id": self.work_id,
+                }, work_id=self.work_id)
+
+                # ---- EmotionReview ----
+                await self.emitter.emit(EventType.AGENT_CALL, {
+                    "agent": "emotion_review_agent",
+                    "part": part_num,
+                    "status": "start",
+                    "message": f"评估 Part {part_num} 情感...",
+                    "work_id": self.work_id,
+                }, work_id=self.work_id)
+                try:
+                    emotion_result = await asyncio.to_thread(
+                        emotion_agent.execute, state_mock, part_num, part_text
+                    )
+                except Exception as e:
+                    print(f"[WritingService] EmotionReview Part {part_num} 失败: {e}")
+                    emotion_result = self._review_failure("emotion", part_num, e)
+                await self.emitter.emit(EventType.AGENT_CALL, {
+                    "agent": "emotion_review_agent",
+                    "part": part_num,
+                    "status": "end",
+                    "message": f"Part {part_num} 情感评估: {emotion_result.get('emotion_score', 'N/A')}",
+                    "work_id": self.work_id,
+                }, work_id=self.work_id)
+
+                # ---- ConsistencyReview ----
+                await self.emitter.emit(EventType.AGENT_CALL, {
+                    "agent": "consistency_review_agent",
+                    "part": part_num,
+                    "status": "start",
+                    "message": f"检查 Part {part_num} 一致性...",
+                    "work_id": self.work_id,
+                }, work_id=self.work_id)
+                try:
+                    consistency_result = await asyncio.to_thread(
+                        consistency_agent.execute, state_mock, part_num, part_text
+                    )
+                except Exception as e:
+                    print(f"[WritingService] ConsistencyReview Part {part_num} 失败: {e}")
+                    consistency_result = self._review_failure("consistency", part_num, e)
+                await self.emitter.emit(EventType.AGENT_CALL, {
+                    "agent": "consistency_review_agent",
+                    "part": part_num,
+                    "status": "end",
+                    "message": f"Part {part_num} 一致性检查完成",
+                    "work_id": self.work_id,
+                }, work_id=self.work_id)
+
+                per_part_results.append({
+                    "part": part_num,
+                    "logic_result": logic_result if isinstance(logic_result, dict) else {},
+                    "emotion_result": emotion_result if isinstance(emotion_result, dict) else {},
+                    "consistency_result": consistency_result if isinstance(consistency_result, dict) else {},
+                })
+
+                # 阶段进度（85% → 95% 区间，按 Part 线性推进）
+                if part_nums:
+                    part_progress = 85 + (idx / len(part_nums)) * 10
+                    self.progress_callback(int(part_progress), f"Part {part_num} 评审完成 ({idx}/{len(part_nums)})")
+
+            # 4.4 风格优化（保留原风格优化 Agent 调用，作为终稿润色）
             await self.emitter.emit(EventType.AGENT_CALL, {
                 "agent": "style_optimizer_agent",
                 "status": "start",
@@ -666,25 +729,21 @@ class WritingService:
             }, work_id=self.work_id)
 
             style_agent = StyleOptimizerAgent()
-            style_result = await asyncio.to_thread(
-                style_agent.execute,
-                type('State', (), {'parts': self.data.get("parts", {})})()
-            )
+            try:
+                style_result = await asyncio.to_thread(
+                    style_agent.execute,
+                    type('State', (), {'parts': self.data.get("parts", {})})()
+                )
+            except Exception as e:
+                print(f"[WritingService] StyleOptimizer 失败（不影响主流程）: {e}")
+                style_result = {}
 
-            # 保存终稿
+            # 4.5 写入终稿
             self.data["final_draft"] = self.data.get("parts", {})
-            # V6.1: review_report 同时输出两种形态——
-            #   1) 顶层 {logic, emotion, consistency} 摘要（向后兼容旧前端）
-            #   2) parts: [{part, logic_score, emotion_score, consistency_score, p0_issues, p1_issues}]
-            #      数组（新前端 Report.vue 期望的形态）
-            self.data["review_report"] = {
-                "logic": logic_result,
-                "emotion": emotion_result,
-                "consistency": consistency_result,
-                "parts": self._build_review_parts_list(
-                    logic_result, emotion_result, consistency_result
-                ),
-            }
+
+            # 4.6 聚合 review_report（新契约：logic/emotion/consistency 顶层聚合 + parts 数组）
+            self.data["review_report"] = self._aggregate_review_results(per_part_results)
+
             self.data["phase"] = "phase4"
 
             total_words = sum(len(t) for t in self.data["final_draft"].values())
@@ -699,11 +758,199 @@ class WritingService:
             await self.emitter.emit(EventType.LOG, {"message": "风格优化完成", "work_id": self.work_id}, work_id=self.work_id)
 
         except Exception as e:
+            import traceback
+            print(f"[WritingService] _phase4_optimize 出错: {e}")
+            traceback.print_exc()
             await self.emitter.emit(EventType.ERROR, {"message": f"Phase4错误: {str(e)}", "work_id": self.work_id}, work_id=self.work_id)
             # 优化失败时使用原始创作作为终稿
             self.data["final_draft"] = self.data.get("parts", {})
             self.data["phase"] = "phase4"
             self._save()
+
+    def _build_review_state_mock(self):
+        """构造一个轻量级 state mock 给 Review Agent 使用。
+
+        R2：三个 Review Agent 都依赖 state.part_outline / part_summaries /
+        characters / world_setting / foreshadowing / parts / final_draft。
+        """
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            inspiration=self.data.get("inspiration", ""),
+            core_elements=self.data.get("core_elements", {}),
+            market_positioning=self.data.get("market_positioning", {}),
+            world_setting=self.data.get("world_setting", ""),
+            characters=self.data.get("characters", []),
+            part_outline=self.data.get("part_outline", []),
+            foreshadowing=self.data.get("foreshadowing", []),
+            parts=dict(self.data.get("parts", {}) or {}),
+            part_summaries=dict(self.data.get("part_summaries", {}) or {}),
+            current_plot_state=self.data.get("current_plot_state", ""),
+            character_state_track=self.data.get("character_state_track", {}),
+            memory=None,
+            final_draft=dict(self.data.get("final_draft", {}) or self.data.get("parts", {}) or {}),
+        )
+
+    @staticmethod
+    def _review_failure(kind: str, part_num: int, err: Exception) -> dict:
+        """Review Agent 失败时的降级返回（保持 schema 一致，前端不会拿到空 dict）。"""
+        if kind == "logic":
+            return {
+                "pass": False, "overall_score": 3,
+                "issues": [{"level": "P0", "dimension": "自动审查",
+                            "location": f"Part {part_num}",
+                            "description": f"逻辑审查Agent执行失败: {err}",
+                            "suggestion": "需人工核查"}],
+                "continuity_check": {"character_states": "未检查", "timeline": "未检查", "established_facts": "未检查"},
+                "strengths": [], "verdict": f"审查失败（降级评分）: {err}",
+            }
+        if kind == "emotion":
+            return {
+                "pass": False, "emotion_score": 3, "resonance_score": 3, "immersion_score": 3,
+                "emotion_target_met": False,
+                "emotion_curve": {"start": "未知", "middle": "未知", "end": "未知"},
+                "highlights": [], "weaknesses": [f"情感评估Agent执行失败: {err}"],
+                "enhancement_suggestions": [],
+                "verdict": f"评估失败（降级评分）: {err}",
+            }
+        if kind == "consistency":
+            return {
+                "pass": False, "overall_score": 3,
+                "issues": [{"level": "P0", "dimension": "自动审查",
+                            "character": "全局",
+                            "location": f"Part {part_num}",
+                            "description": f"一致性检查Agent执行失败: {err}",
+                            "suggestion": "需人工核查"}],
+                "character_states": {}, "verdict": f"检查失败（降级评分）: {err}",
+            }
+        return {}
+
+    @staticmethod
+    def _aggregate_review_results(per_part_results: list) -> dict:
+        """把 per-Part 评审结果聚合成新契约结构。
+
+        输入：[{"part": N, "logic_result": {...}, "emotion_result": {...}, "consistency_result": {...}}, ...]
+        输出：{
+            "logic":       {avg_score, pass, total_issues, top_issue, parts_count},
+            "emotion":     {avg_score, pass, avg_resonance, avg_immersion, parts_count},
+            "consistency": {avg_score, pass, total_issues, top_issue, parts_count},
+            "parts": [
+                {"part": N, "logic_score": ..., "emotion_score": ..., "consistency_score": ...,
+                 "p0_issues": [...], "p1_issues": [...], "summary": "..."},
+                ...
+            ]
+        }
+        """
+        def _f(value, default: float = 0.0) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _issues_by_level(issues: list, level: str) -> list:
+            if not isinstance(issues, list):
+                return []
+            return [i for i in issues if isinstance(i, dict) and i.get("level") == level]
+
+        logic_scores: list = []
+        emotion_scores: list = []
+        consistency_scores: list = []
+        resonance_scores: list = []
+        immersion_scores: list = []
+        logic_pass: list = []
+        emotion_pass: list = []
+        consistency_pass: list = []
+        logic_p0: list = []
+        logic_p1: list = []
+        consistency_p0: list = []
+        consistency_p1: list = []
+
+        parts_out: list = []
+
+        for entry in per_part_results:
+            part_num = entry.get("part")
+            lr = entry.get("logic_result") or {}
+            er = entry.get("emotion_result") or {}
+            cr = entry.get("consistency_result") or {}
+
+            l_score = _f(lr.get("overall_score"), 0.0)
+            e_score = _f(er.get("emotion_score"), 0.0)
+            c_score = _f(cr.get("overall_score"), 0.0)
+
+            logic_scores.append(l_score)
+            emotion_scores.append(e_score)
+            consistency_scores.append(c_score)
+            resonance_scores.append(_f(er.get("resonance_score"), 0.0))
+            immersion_scores.append(_f(er.get("immersion_score"), 0.0))
+
+            logic_pass.append(bool(lr.get("pass", l_score >= 6)))
+            emotion_pass.append(bool(er.get("pass", e_score >= 6)))
+            consistency_pass.append(bool(cr.get("pass", c_score >= 6)))
+
+            l_p0 = _issues_by_level(lr.get("issues", []), "P0")
+            l_p1 = _issues_by_level(lr.get("issues", []), "P1")
+            c_p0 = _issues_by_level(cr.get("issues", []), "P0")
+            c_p1 = _issues_by_level(cr.get("issues", []), "P1")
+            # emotion agent 不分 P0/P1，但保留 weaknesses 作为可观察信息
+            e_p1 = er.get("weaknesses", []) if isinstance(er.get("weaknesses"), list) else []
+            e_p0 = er.get("enhancement_suggestions", []) if isinstance(er.get("enhancement_suggestions"), list) else []
+
+            logic_p0.extend(l_p0)
+            logic_p1.extend(l_p1)
+            consistency_p0.extend(c_p0)
+            consistency_p1.extend(c_p1)
+
+            parts_out.append({
+                "part": part_num,
+                "logic_score": l_score,
+                "emotion_score": e_score,
+                "consistency_score": c_score,
+                "p0_issues": list(l_p0) + list(c_p0) + list(e_p0),
+                "p1_issues": list(l_p1) + list(c_p1) + list(e_p1),
+                "summary": (
+                    f"逻辑{l_score}/10 "
+                    f"情感{e_score}/10 "
+                    f"一致{c_score}/10"
+                ),
+            })
+
+        def _avg(xs: list) -> float:
+            return round(sum(xs) / len(xs), 2) if xs else 0.0
+
+        def _first_issue(issues: list) -> str:
+            if not issues:
+                return ""
+            i0 = issues[0]
+            return (i0.get("description") or i0.get("suggestion") or "") if isinstance(i0, dict) else str(i0)
+
+        return {
+            "logic": {
+                "avg_score": _avg(logic_scores),
+                "pass": all(logic_pass) if logic_pass else False,
+                "total_issues": len(logic_p0) + len(logic_p1),
+                "p0_count": len(logic_p0),
+                "p1_count": len(logic_p1),
+                "top_issue": _first_issue(logic_p0) or _first_issue(logic_p1),
+                "parts_count": len(per_part_results),
+            },
+            "emotion": {
+                "avg_score": _avg(emotion_scores),
+                "pass": all(emotion_pass) if emotion_pass else False,
+                "avg_resonance": _avg(resonance_scores),
+                "avg_immersion": _avg(immersion_scores),
+                "parts_count": len(per_part_results),
+            },
+            "consistency": {
+                "avg_score": _avg(consistency_scores),
+                "pass": all(consistency_pass) if consistency_pass else False,
+                "total_issues": len(consistency_p0) + len(consistency_p1),
+                "p0_count": len(consistency_p0),
+                "p1_count": len(consistency_p1),
+                "top_issue": _first_issue(consistency_p0) or _first_issue(consistency_p1),
+                "parts_count": len(per_part_results),
+            },
+            "parts": parts_out,
+        }
 
     async def rewrite_part(self, part_num: int):
         """重写指定Part - 调用PartWriterAgent"""
@@ -720,7 +967,14 @@ class WritingService:
             writer_agent = PartWriterAgent()
 
             # 使用asyncio.to_thread运行同步Agent调用
-            part_text = await asyncio.to_thread(writer_agent.execute, temp_state, part_num)
+            part_result = await asyncio.to_thread(writer_agent.execute, temp_state, part_num)
+
+            # 处理返回结果（part_writer_agent R2 返回 dict 结构）
+            if isinstance(part_result, dict) and part_result.get("success"):
+                part_text = part_result.get("content", "")
+            else:
+                part_text = part_result if isinstance(part_result, str) else ""
+
             self.data["parts"][str(part_num)] = part_text
 
             # 更新摘要
@@ -728,6 +982,13 @@ class WritingService:
             self.data["part_summaries"][str(part_num)] = summary
 
             self._save()
+
+            # R2: 重写后同步滑动窗口（防止窗口与 self.data["parts"] 不一致）
+            try:
+                temp_state.window.add_part(part_num, part_text, summary)
+            except Exception as win_err:
+                print(f"[WritingService] rewrite_part 同步窗口失败（不影响主流程）: {win_err}")
+
             word_count = len(part_text)
             await self.emitter.emit(EventType.PART_COMPLETE, {"part": part_num, "words": word_count, "work_id": self.work_id}, work_id=self.work_id)
             await self.emitter.emit(EventType.LOG, {"message": f"Part {part_num} 重写完成 ({word_count}字)", "work_id": self.work_id}, work_id=self.work_id)
@@ -740,91 +1001,3 @@ class WritingService:
     def _save(self):
         """保存作品数据"""
         self.work_path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    @staticmethod
-    def _build_review_parts_list(logic_result, emotion_result, consistency_result) -> list:
-        """
-        把三类评审结果归一化为按 Part 排序的列表，供前端 Report.vue 使用。
-
-        输入：三个 review agent 返回的 dict（结构可能差异很大）
-        输出：[{"part": 1, "logic_score": 8.0, "emotion_score": 7.5,
-               "consistency_score": 9.0, "p0_issues": [...], "p1_issues": [...]}, ...]
-        """
-        def _extract_per_part(result: dict) -> dict:
-            """从单个 agent 的返回里挑出 per_part 字段（兼容多种命名）。"""
-            if not isinstance(result, dict):
-                return {}
-            for key in ("per_part", "parts", "part_results", "by_part"):
-                if key in result and isinstance(result[key], (list, dict)):
-                    return result[key]
-            return {}
-
-        def _coerce_score(value, default: float = 0.0) -> float:
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                return default
-
-        def _coerce_issues(value) -> list:
-            if isinstance(value, list):
-                return value
-            if isinstance(value, dict):
-                return [value]
-            return []
-
-        parts_indexed = {}
-
-        def _merge_part(entry, label: str) -> None:
-            if not isinstance(entry, dict):
-                return
-            # 提取 Part 编号（兼容 int / 字符串字段）
-            p_num = entry.get("part") or entry.get("part_num") or entry.get("index")
-            try:
-                p_num = int(p_num)
-            except (TypeError, ValueError):
-                return
-            slot = parts_indexed.setdefault(p_num, {
-                "part": p_num,
-                "logic_score": 0.0,
-                "emotion_score": 0.0,
-                "consistency_score": 0.0,
-                "p0_issues": [],
-                "p1_issues": [],
-            })
-            # 评分字段（多种命名）
-            score_keys_map = {
-                "logic": ("logic_score", "score", "logic"),
-                "emotion": ("emotion_score", "score", "emotion"),
-                "consistency": ("consistency_score", "score", "consistency"),
-            }
-            keys = score_keys_map.get(label, ("score",))
-            for k in keys:
-                if k in entry and entry[k] is not None:
-                    slot[f"{label}_score"] = _coerce_score(entry[k], slot[f"{label}_score"])
-                    break
-            # 问题列表
-            for issue_key in ("p0_issues", "p0", "critical_issues"):
-                if issue_key in entry and entry[issue_key]:
-                    slot["p0_issues"].extend(_coerce_issues(entry[issue_key]))
-                    break
-            for issue_key in ("p1_issues", "p1", "major_issues"):
-                if issue_key in entry and entry[issue_key]:
-                    slot["p1_issues"].extend(_coerce_issues(entry[issue_key]))
-                    break
-
-        for label, result in (
-            ("logic", logic_result),
-            ("emotion", emotion_result),
-            ("consistency", consistency_result),
-        ):
-            per_part = _extract_per_part(result)
-            if isinstance(per_part, list):
-                for entry in per_part:
-                    _merge_part(entry, label)
-            elif isinstance(per_part, dict):
-                # {part_num: entry} 形态
-                for entry in per_part.values():
-                    _merge_part(entry, label)
-
-        # 按 Part 编号排序
-        return [parts_indexed[k] for k in sorted(parts_indexed.keys())]

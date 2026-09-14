@@ -6,6 +6,11 @@ V4改动：
 - 支持进度跟踪
 - 改进错误处理
 - 实现标准化的Agent接口
+
+R2改动（生成器式分块生成）：
+- 单 Part 超过 3500 字时改为多片段循环续写
+- 后续片段仅注入"上一片段末尾 800 字 + 下一片段计划"
+- 解决 50 万字场景下 PART_WORD_MAX=10000 单次必爆 token 上限的问题
 """
 import time
 from typing import Dict, Any
@@ -61,10 +66,36 @@ SYSTEM_PROMPT = load_prompt("part_writer", """你是一位番茄小说平台的�
 直接从正文第一个字开始写。""")
 
 
+# R2: 生成器式分块生成常量
+CHUNK_WORDS = 3500        # 单片段目标字数（中文 ~5000 tokens，留余量给 prompt 上下文）
+CHUNK_OVERLAP = 800       # 片段间重叠字数（保证衔接自然）
+MAX_CHUNKS = 6            # 单 Part 最多片段数（3500 × 6 = 21000 字，足够 1 万字 Part）
+PROGRESS_START = 55       # Phase3 Part 写作的起始进度（在 writing_service 中会动态推进）
+
+
+PART_CHUNK_SYSTEM_PROMPT = """你是番茄小说平台顶级短篇作家，正在为一部连载小说续写某个 Part 的片段。
+
+## 核心约束（片段级）
+
+1. **只写这一片段，不要总结、不要预告、不要回顾**
+2. **如果提供了【已写片段末尾】，必须从该结尾自然续接**——上一句如果是动作/对白，下一句必须直接承接
+3. **如果提供了【下一片段计划】，本片段的结尾必须留出钩子或承接点**
+4. 番茄快节奏铁律、绝对禁止、上下文使用、一致性红线——与 PartWriter 主系统提示一致
+5. **字数硬约束**：本片段目标字数见下方【本片段目标】
+6. **结尾必须是完整段落**——不允许在对话中间、动作进行时戛然而止
+
+## 输出格式
+
+只输出本片段的正文（自然段）。
+不要输出"片段X/共Y""---"分隔线、不要输出任何标注或说明。
+不要重复【已写片段末尾】中的最后一句话。
+"""
+
+
 class PartWriterAgent(BaseAgent):
     name = "Part写作Agent"
-    description = "基于Part规划和全文上下文生成正文"
-    version = "4.0.0"
+    description = "基于Part规划和全文上下文生成正文（生成器式分块）"
+    version = "4.1.0"
 
     def execute(self, state, part_num: int, **kwargs) -> Dict[str, Any]:
         self.log_start()
@@ -96,10 +127,209 @@ class PartWriterAgent(BaseAgent):
             target_words = outline.get("word_count", (PART_WORD_MIN + PART_WORD_MAX) // 2)
             hard_max = PART_WORD_MAX + 200  # 允许200字弹性
 
-            self.update_progress(40, f"Part {part_num} 目标字数: {target_words}, 上限: {hard_max}")
-            self.update_progress(50, "准备调用LLM...")
+            self.update_progress(
+                40, f"Part {part_num} 目标字数: {target_words}, 上限: {hard_max}, "
+                    f"将按 {CHUNK_WORDS}字/片段 分块生成"
+            )
 
-            user_prompt = f"""请创作第{part_num}部分（Part {part_num}）的正文。
+            # R2: 生成器式分块生成
+            full_text, chunk_count, total_elapsed = self._write_part_chunked(
+                state=state,
+                part_num=part_num,
+                context=context,
+                outline=outline,
+                foreshadow_info=foreshadow_info,
+                target_words=target_words,
+                hard_max=hard_max,
+            )
+
+            word_count = len(full_text)
+            self.update_progress(80, f"Part {part_num} 累计字数: {word_count}, 共 {chunk_count} 片段, 耗时 {total_elapsed:.1f}s")
+
+            # 字数检查
+            if word_count < PART_WORD_MIN * 0.7:
+                self.update_progress(95, f"警告：Part {part_num}只有{word_count}字，严重不足")
+            elif word_count > hard_max:
+                self.update_progress(95, f"警告：Part {part_num}有{word_count}字，超出上限{hard_max}，将截断")
+                full_text = self._truncate_to_complete_paragraph(full_text, hard_max)
+                word_count = len(full_text)
+
+            summary = f"Part {part_num}「{outline.get('title', '')}」\n字数: {word_count}字 (目标: {target_words}, 片段数: {chunk_count})"
+            self.log_done(summary)
+
+            return {
+                "success": True,
+                "content": full_text,
+                "word_count": word_count,
+                "target_words": target_words,
+                "part_num": part_num,
+                "summary": summary,
+                "chunk_count": chunk_count,
+            }
+
+        except Exception as e:
+            error_msg = f"Part {part_num} 生成异常: {e}"
+            self.log_error(error_msg)
+            return {
+                "success": False,
+                "error": str(e),
+                "content": f"[Part {part_num}生成失败: {e}]"
+            }
+
+    def _write_part_chunked(
+        self,
+        state,
+        part_num: int,
+        context: str,
+        outline: dict,
+        foreshadow_info: str,
+        target_words: int,
+        hard_max: int,
+    ) -> tuple:
+        """生成器式分块生成 Part 全文。
+
+        Args:
+            state: StoryState
+            part_num: 当前 Part 编号
+            context: state.get_part_context(part_num) 输出的完整上下文
+            outline: 当前 Part 规划 dict
+            foreshadow_info: 伏笔任务字符串
+            target_words: 目标字数
+            hard_max: 上限字数
+
+        Returns:
+            (full_text, chunk_count, total_elapsed_seconds)
+        """
+        accumulated = ""
+        chunk_idx = 0
+        total_start = time.time()
+
+        while len(accumulated) < target_words and chunk_idx < MAX_CHUNKS:
+            chunk_idx += 1
+            remaining = target_words - len(accumulated)
+            is_last_target_chunk = (chunk_idx >= MAX_CHUNKS) or (remaining < CHUNK_WORDS)
+
+            # 1) 准备 prev_tail：仅取上一片段末尾 CHUNK_OVERLAP 字
+            prev_tail = accumulated[-CHUNK_OVERLAP:] if accumulated else ""
+
+            # 2) 准备 next_plan：本片段核心事件
+            if chunk_idx == 1:
+                # 第一片段直接拿完整 Part 规划
+                next_plan = (
+                    f"本章目标: {target_words}字\n"
+                    f"核心事件: {outline.get('core_event', '')}\n"
+                    f"情绪目标: {outline.get('emotion_target', '')}\n"
+                    f"关键对白: {outline.get('key_dialogue', '')}\n"
+                    f"结尾钩子: {outline.get('end_hook', '')}\n"
+                    f"节奏要求: {outline.get('pacing', '自然流畅')}\n"
+                    f"因果关系: {outline.get('causality', '')}"
+                )
+            else:
+                # 后续片段：按已写比例推进，让模型从 outline 推下一段
+                progress_ratio = len(accumulated) / target_words if target_words else 0
+                if progress_ratio < 0.4:
+                    stage_hint = "继续推进核心事件的关键转折"
+                elif progress_ratio < 0.75:
+                    stage_hint = "进入核心事件的高潮部分"
+                elif progress_ratio < 0.95:
+                    stage_hint = "向结尾钩子收束，铺垫情绪释放"
+                else:
+                    stage_hint = "完成结尾钩子，干净收尾"
+                next_plan = (
+                    f"本章目标: {target_words}字 (已写 {len(accumulated)}字, 还需约 {remaining}字)\n"
+                    f"本片段建议推进: {stage_hint}\n"
+                    f"本章核心事件: {outline.get('core_event', '')}\n"
+                    f"本章结尾钩子: {outline.get('end_hook', '')}"
+                )
+
+            # 3) 构造片段级 prompt
+            chunk_user_prompt = self._build_chunk_prompt(
+                part_num=part_num,
+                chunk_idx=chunk_idx,
+                is_first_chunk=(chunk_idx == 1),
+                prev_tail=prev_tail,
+                next_plan=next_plan,
+                context=context if chunk_idx == 1 else "",  # 第一片段带完整上下文，后续片段不再带
+                foreshadow_info=foreshadow_info if chunk_idx == 1 else "",
+                outline=outline,
+                chunk_target=min(CHUNK_WORDS, remaining + 200),
+                target_words=target_words,
+                hard_max=hard_max,
+                written_so_far=len(accumulated),
+            )
+
+            # 4) 调用 LLM（max_tokens 控制在 ~5500，中文 1.5 tokens/字）
+            chunk_max_tokens = min(CHUNK_WORDS * 2 + 300, 6000)
+
+            chunk_start = time.time()
+            self.update_progress(
+                45 + (chunk_idx - 1) * 5,  # 45% → 70% 区间，每个片段 5%
+                f"Part {part_num} 片段 {chunk_idx}/{MAX_CHUNKS} 生成中..."
+            )
+            chunk_text = call_llm(
+                system_prompt=PART_CHUNK_SYSTEM_PROMPT,
+                user_prompt=chunk_user_prompt,
+                temperature=0.85,
+                max_tokens=chunk_max_tokens,
+                agent=self.name,
+            )
+            chunk_elapsed = time.time() - chunk_start
+
+            # 5) 清理：去掉可能的前导重述
+            chunk_text = chunk_text.strip()
+            if prev_tail and chunk_text.startswith(prev_tail):
+                chunk_text = chunk_text[len(prev_tail):].lstrip()
+
+            # 6) 拼接
+            accumulated += chunk_text
+            self.update_progress(
+                50 + (chunk_idx - 1) * 5,
+                f"Part {part_num} 片段 {chunk_idx} 完成 (+{len(chunk_text)}字, {chunk_elapsed:.1f}s, "
+                f"累计 {len(accumulated)}/{target_words}字)"
+            )
+
+            # 7) 提前退出条件：模型认为本章写完（结尾是完整段落 + 已达到最小字数）
+            if len(accumulated) >= PART_WORD_MIN:
+                tail_stripped = accumulated.rstrip()
+                if (
+                    tail_stripped.endswith("\n\n")
+                    or tail_stripped.endswith("。")
+                    or tail_stripped.endswith("！")
+                    or tail_stripped.endswith("？")
+                    or tail_stripped.endswith("…")
+                ) and len(chunk_text) < CHUNK_WORDS * 0.6:
+                    # 自然收尾 + 输出偏短，认为模型主动完结
+                    break
+
+            # 8) 兜底：达到硬上限
+            if len(accumulated) >= hard_max:
+                break
+
+        total_elapsed = time.time() - total_start
+        return accumulated, chunk_idx, total_elapsed
+
+    def _build_chunk_prompt(
+        self,
+        part_num: int,
+        chunk_idx: int,
+        is_first_chunk: bool,
+        prev_tail: str,
+        next_plan: str,
+        context: str,
+        foreshadow_info: str,
+        outline: dict,
+        chunk_target: int,
+        target_words: int,
+        hard_max: int,
+        written_so_far: int,
+    ) -> str:
+        """构造片段级 user prompt。
+
+        第一片段：完整上下文 + Part 规划 + 伏笔任务 + 字数约束
+        后续片段：仅 prev_tail + next_plan + 本片段字数
+        """
+        if is_first_chunk:
+            return f"""请创作第{part_num}部分（Part {part_num}）的第一个片段。
 
 ## Part规划
 阶段：{outline.get('phase', '')}
@@ -111,10 +341,9 @@ class PartWriterAgent(BaseAgent):
 与前面部分的因果关系：{outline.get('causality', '')}
 
 ## 字数硬约束
-目标字数：{target_words}字
-最少：{PART_WORD_MIN}字
-最多：{hard_max}字
-（如果写到{hard_max}字还没完成核心事件，加速收束，不要拖延）
+本章目标：{target_words}字
+本章上限：{hard_max}字（系统会按 {CHUNK_WORDS}字/片段 续写多次）
+本片段目标：约 {chunk_target}字（这是第 1 片段 / 共最多 {MAX_CHUNKS} 片段）
 
 ## 伏笔任务
 {foreshadow_info}
@@ -125,55 +354,30 @@ class PartWriterAgent(BaseAgent):
 ## 创作指令
 1. 第一句话直接进入情节，不要任何铺垫
 2. 自然承接上一部分结尾的情境
-3. 严格完成核心事件
-4. 达到情绪目标
-5. 结尾实现钩子效果
-6. 字数控制在{PART_WORD_MIN}-{hard_max}字之间"""
+3. 严格完成本片段的核心事件推进
+4. 结尾实现钩子效果（但本章还有更多片段，不需要在此处完全收尾）
+5. 本片段字数控制在 {max(1000, chunk_target - 200)}-{chunk_target + 200}字之间"""
 
-            self.update_progress(60, "调用LLM生成内容...")
-            call_start_time = time.time()
-            
-            text = call_llm(
-                system_prompt=SYSTEM_PROMPT,
-                user_prompt=user_prompt,
-                temperature=0.85,
-                max_tokens=hard_max + 500,  # token略多于字数
-                agent=self.name,
-            )
-            
-            call_end_time = time.time()
-            self.update_progress(80, f"LLM调用完成，耗时: {call_end_time - call_start_time:.2f}秒")
+        # 后续片段
+        return f"""请续写 Part {part_num} 的第 {chunk_idx} 片段。
 
-            # 字数检查
-            word_count = len(text)
-            self.update_progress(90, f"生成字数: {word_count}")
-            
-            if word_count < PART_WORD_MIN * 0.7:
-                self.update_progress(95, f"警告：Part {part_num}只有{word_count}字，严重不足")
-            elif word_count > hard_max:
-                self.update_progress(95, f"警告：Part {part_num}有{word_count}字，超出上限{hard_max}，将截断")
-                text = self._truncate_to_complete_paragraph(text, hard_max)
+## 本片段上下文（上一片段末尾 {len(prev_tail)}字）
+{prev_tail}
 
-            summary = f"Part {part_num}「{outline.get('title', '')}」\n" f"字数: {word_count}字 (目标: {target_words})"
-            self.log_done(summary)
-            
-            return {
-                "success": True,
-                "content": text,
-                "word_count": word_count,
-                "target_words": target_words,
-                "part_num": part_num,
-                "summary": summary
-            }
+## 本片段计划
+{next_plan}
 
-        except Exception as e:
-            error_msg = f"Part {part_num} 生成异常: {e}"
-            self.log_error(error_msg)
-            return {
-                "success": False,
-                "error": str(e),
-                "content": f"[Part {part_num}生成失败: {e}]"
-            }
+## 字数约束
+本章目标：{target_words}字（已写 {written_so_far}字, 剩余约 {target_words - written_so_far}字）
+本片段目标：约 {chunk_target}字
+
+## 创作指令
+1. **从【上一片段末尾】最后一句自然续接**，不要重复或复述
+2. 严格遵守番茄快节奏铁律（首句抓人、300字一推进、对白驱动、短段落、感官代替标签）
+3. 角色名称必须与前文一致，言行必须符合档案
+4. 结尾必须是完整段落——不允许在对话中间或动作进行时戛然而止
+5. 本片段字数控制在 {max(1000, chunk_target - 200)}-{chunk_target + 200}字之间
+6. 不要输出任何标注、解释、分隔线——只输出小说正文"""
 
     def validate_input(self, state, **kwargs) -> bool:
         """验证输入"""

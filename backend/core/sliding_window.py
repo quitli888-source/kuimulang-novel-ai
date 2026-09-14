@@ -58,7 +58,22 @@ class SlidingWindow:
         - 同时记录一级摘要
         - 当到达滚动 / 里程碑阈值时，由调用方负责调用 _aggregate_rolling /
           _aggregate_milestone（这里不主动调用 LLM，避免阻塞 IO）。
+
+        R2 改造：入参校验。text / summary 必须是非空 str，否则抛 ValueError
+        （避免静默写入 None 后在 build() 中 `len(None)` 抛 TypeError）。
         """
+        # R2: 入参校验
+        if not isinstance(text, str) or not text:
+            raise ValueError(
+                f"SlidingWindow.add_part: text must be non-empty str, "
+                f"got {type(text).__name__}"
+            )
+        if not isinstance(summary, str) or not summary:
+            raise ValueError(
+                f"SlidingWindow.add_part: summary must be non-empty str, "
+                f"got {type(summary).__name__}"
+            )
+
         self.parts[part_num] = text
         self.summaries[part_num] = summary
 

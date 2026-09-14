@@ -10,6 +10,14 @@
       </div>
 
       <div class="content">
+        <!-- 评审报告占位提示（兼容空报告场景） -->
+        <div v-if="!hasReport" class="empty-report">
+          <div class="empty-report-icon">📋</div>
+          <div class="empty-report-title">暂无评审报告</div>
+          <div class="empty-report-sub">完成 Phase4 风格优化后，逻辑 / 情感 / 一致性评分会显示在这里</div>
+        </div>
+
+        <template v-else>
         <div class="stats-grid">
           <!-- 字数统计 -->
           <div class="stat-card">
@@ -41,6 +49,7 @@
               <div class="bar" :style="{ height: (score / 10 * 100) + '%' }">{{ score }}</div>
               <div class="bar-label">P{{ idx + 1 }}</div>
             </div>
+            <div v-if="!scoreHistory.length" class="empty-issues">暂无评分数据</div>
           </div>
         </div>
 
@@ -54,6 +63,7 @@
             <div class="issue-part">Part {{ issue.part }}</div>
           </div>
         </div>
+        </template>
       </div>
     </div>
   </div>
@@ -76,17 +86,36 @@ const wordCount = computed(() => {
   return Object.values(parts).reduce((sum, text) => sum + (text?.length || 0), 0)
 })
 
+const hasReport = computed(() => {
+  const r = workData.value.review_report
+  return !!(r && (r.parts || r.logic || r.emotion || r.consistency))
+})
+
+// 综合评分：优先读顶层聚合（report.logic.avg_score / report.emotion.avg_score），
+// 兜底从 parts 求均值。
 const avgScore = computed(() => {
   const report = workData.value.review_report
   if (!report) return '-'
-  const logic = report.logic_score || 0
-  const emotion = report.emotion_score || 0
-  return ((logic + emotion) / 2).toFixed(1)
+  let logicAvg = 0
+  let emotionAvg = 0
+  if (report.logic && typeof report.logic.avg_score === 'number') {
+    logicAvg = report.logic.avg_score
+  } else if (Array.isArray(report.parts) && report.parts.length) {
+    logicAvg = report.parts.reduce((s, p) => s + (p.logic_score || 0), 0) / report.parts.length
+  }
+  if (report.emotion && typeof report.emotion.avg_score === 'number') {
+    emotionAvg = report.emotion.avg_score
+  } else if (Array.isArray(report.parts) && report.parts.length) {
+    emotionAvg = report.parts.reduce((s, p) => s + (p.emotion_score || 0), 0) / report.parts.length
+  }
+  if (!logicAvg && !emotionAvg) return '-'
+  return ((logicAvg + emotionAvg) / 2).toFixed(1)
 })
 
+// 评分曲线：每个 Part 的 (logic_score + emotion_score) / 2
 const scoreHistory = computed(() => {
   const report = workData.value.review_report
-  if (!report || !report.parts) return []
+  if (!report || !Array.isArray(report.parts)) return []
   return report.parts.map(p => {
     const l = p.logic_score || 0
     const e = p.emotion_score || 0
@@ -96,7 +125,7 @@ const scoreHistory = computed(() => {
 
 const issues = computed(() => {
   const report = workData.value.review_report
-  if (!report || !report.parts) return []
+  if (!report || !Array.isArray(report.parts)) return []
   const all = []
   for (const p of report.parts) {
     if (p.p0_issues) for (const i of p.p0_issues) all.push({ ...i, part: p.part, level: 'p0' })
@@ -265,17 +294,44 @@ onMounted(async () => {
   color: var(--color-warning, #d97706);
   border: 1px solid #fde68a;
 }
-.issue-content { 
-  flex: 1; 
-  font-size: 13px; 
+.issue-content {
+  flex: 1;
+  font-size: 13px;
   color: var(--color-text-primary, #444);
   line-height: 1.5;
 }
-.issue-part { 
-  font-size: 12px; 
-  color: var(--color-text-secondary, #aaa); 
+.issue-part {
+  font-size: 12px;
+  color: var(--color-text-secondary, #aaa);
   flex-shrink: 0;
   font-weight: 500;
+}
+
+.empty-report {
+  background: var(--color-surface, #fff);
+  border: 1px dashed var(--color-border, #e2e8f0);
+  border-radius: var(--radius-lg, 12px);
+  padding: 60px 24px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.empty-report-icon {
+  font-size: 48px;
+  line-height: 1;
+}
+.empty-report-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--color-text-primary, #333);
+}
+.empty-report-sub {
+  font-size: 13px;
+  color: var(--color-text-secondary, #888);
+  max-width: 480px;
+  line-height: 1.6;
 }
 
 @media (max-width: 1024px) {

@@ -227,31 +227,49 @@ def update_llm_config_legacy(req: LLMConfigUpdateLegacy):
     """兼容：写入当前激活供应商的API Key"""
     cfg = load_llm_config()
     provider_id = cfg.active_provider_id
+
+    # R2: 与 update_provider_config 保持字典结构一致；step 通道补齐
     key_map = {
+        "step": "STEP_API_KEY",
         "minimax": "MINIMAX_API_KEY",
         "deepseek": "DEEPSEEK_API_KEY",
         "openai": "OPENAI_API_KEY",
         "siliconflow": "SILICONFLOW_API_KEY",
+        "custom": "CUSTOM_LLM_API_KEY",
     }
-    key_name = key_map.get(provider_id, "MINIMAX_API_KEY")
+    model_key_map = {
+        "step": "STEP_MODEL",
+        "minimax": "MINIMAX_MODEL",
+        "deepseek": "DEEPSEEK_MODEL",
+        "openai": "OPENAI_MODEL",
+        "siliconflow": "SILICONFLOW_MODEL",
+        "custom": "CUSTOM_LLM_MODEL",
+    }
+    json_model_key_map = {
+        "step": "STEP_JSON_MODEL",
+        "minimax": "MINIMAX_JSON_MODEL",
+        "deepseek": "DEEPSEEK_JSON_MODEL",
+        "openai": "OPENAI_JSON_MODEL",
+        "siliconflow": "SILICONFLOW_JSON_MODEL",
+        "custom": "CUSTOM_LLM_JSON_MODEL",
+    }
+    base_url_key_map = {
+        "step": "STEP_BASE_URL",
+        "minimax": "MINIMAX_BASE_URL",
+        "deepseek": "DEEPSEEK_BASE_URL",
+        "openai": "OPENAI_BASE_URL",
+        "siliconflow": "SILICONFLOW_BASE_URL",
+        "custom": "CUSTOM_LLM_BASE_URL",
+    }
 
-    if req.api_key:
-        write_env(key_name, req.api_key)
-    if req.base_url:
-        write_env("OPENAI_BASE_URL", req.base_url)
-    if req.model:
-        write_env("OPENAI_MODEL", req.model)
-    if req.json_model:
-        write_env("OPENAI_JSON_MODEL", req.json_model)
-
-    # 同步写入 step_* 模型键（保持与 step 供应商模型键一致）
-    if provider_id == "step":
-        if req.model:
-            write_env("STEP_MODEL", req.model)
-        if req.json_model:
-            write_env("STEP_JSON_MODEL", req.json_model)
-        if req.base_url:
-            write_env("STEP_BASE_URL", req.base_url)
+    if req.api_key and provider_id in key_map:
+        write_env(key_map[provider_id], req.api_key)
+    if req.base_url and provider_id in base_url_key_map:
+        write_env(base_url_key_map[provider_id], req.base_url)
+    if req.model and provider_id in model_key_map:
+        write_env(model_key_map[provider_id], req.model)
+    if req.json_model and provider_id in json_model_key_map:
+        write_env(json_model_key_map[provider_id], req.json_model)
 
     from core import llm_client as llm_client_module
     llm_client_module._client_cache.clear()

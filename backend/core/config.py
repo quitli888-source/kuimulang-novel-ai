@@ -5,16 +5,40 @@
 import os
 import re
 import json
+import sys
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
+
+# ---- R2: PyInstaller frozen 模式路径解析 ----
+def _resolve_base_dir() -> Path:
+    """根据运行模式解析数据写入根目录。
+
+    - 开发模式：`backend/core/config.py` → BASE_DIR = 项目根目录
+    - frozen 模式：EXE 所在目录（_internal 是只读的，数据写到 EXE 旁）
+
+    Returns:
+        Path: 数据写入根目录
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def _resolve_prompt_dir() -> Path:
+    """解析提示词目录（frozen 模式仍指向 _internal/prompts，只读）。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent / "_internal" / "prompts"
+    return Path(__file__).resolve().parent.parent.parent / "prompts"
+
+
 # ---- 路径配置 ----
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
+BASE_DIR = _resolve_base_dir()
 DATA_DIR = BASE_DIR / "data"
 WORKS_DIR = DATA_DIR / "works"
 MEMORY_DIR = DATA_DIR / "memory"
-PROMPT_DIR = BASE_DIR / "prompts"
+PROMPT_DIR = _resolve_prompt_dir()
 ENV_FILE = BASE_DIR / ".env"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
