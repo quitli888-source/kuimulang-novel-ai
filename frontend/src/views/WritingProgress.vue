@@ -6,7 +6,7 @@
         <div class="topbar-left">
           <n-button text @click="$router.push('/works')">← 作品列表</n-button>
           <span class="work-title">{{ workData.title || '加载中...' }}</span>
-          <span class="sse-status" :class="sseStatus">
+          <span class="sse-status" :class="store.sseStatus">
             <span class="status-dot"></span>
             <span class="status-text">{{ sseStatusText }}</span>
           </span>
@@ -20,7 +20,7 @@
 
       <div class="content">
         <!-- 实时进度条 -->
-        <ProgressBar :title="'创作进度'" :progress="currentProgress" :message="progressMessage" />
+        <ProgressBar :title="'创作进度'" :progress="store.progress" :message="store.progressMessage" />
 
         <!-- 创作阶段进度 -->
         <div class="phase-progress">
@@ -28,7 +28,7 @@
             v-for="(phase, idx) in phases"
             :key="phase.id"
             class="phase-item"
-            :class="{ active: currentPhase === phase.id, done: phaseDone(phase.id) }"
+            :class="{ active: store.currentPhase === phase.id, done: phaseDone(phase.id) }"
           >
             <div class="phase-dot">
               <span v-if="phaseDone(phase.id)">✓</span>
@@ -46,11 +46,11 @@
               v-for="(p, idx) in workData.part_outline"
               :key="idx"
               class="part-item"
-              :class="{ active: currentPart === idx + 1, done: completedParts.includes(idx + 1) }"
+              :class="{ active: store.currentPart === idx + 1, done: store.completedParts.includes(idx + 1) }"
             >
               <span>Part {{ idx + 1 }}</span>
               <span class="part-theme">{{ p.title || p.theme || '章节' + (idx + 1) }}</span>
-              <span v-if="completedParts.includes(idx + 1)" class="part-done">✓</span>
+              <span v-if="store.completedParts.includes(idx + 1)" class="part-done">✓</span>
             </div>
           </div>
         </div>
@@ -59,7 +59,7 @@
         <div class="log-panel">
           <div class="log-title">实时日志</div>
           <div class="log-list" ref="logList">
-            <div v-for="(log, idx) in logs" :key="idx" class="log-item" :class="log.type">
+            <div v-for="(log, idx) in store.logs" :key="idx" class="log-item" :class="log.type">
               <span class="log-time">{{ log.time }}</span>
               <span class="log-msg">{{ log.msg }}</span>
             </div>
@@ -69,8 +69,8 @@
     </div>
 
     <!-- 确认弹窗 -->
-    <n-modal v-model:show="showConfirm" preset="card" title="⚠️ 需要确认" style="width:500px">
-      <div>{{ confirmMsg }}</div>
+    <n-modal v-model:show="store.showConfirm" preset="card" title="⚠️ 需要确认" style="width:500px">
+      <div>{{ store.confirmMsg }}</div>
       <template #footer>
         <n-button @click="confirmAction('cancel')">取消</n-button>
         <n-button type="primary" @click="confirmAction('proceed')">确认继续</n-button>
@@ -78,16 +78,35 @@
     </n-modal>
 
     <!-- 错误提示弹窗 -->
-    <n-modal v-model:show="showError" preset="card" title="❌ 创作错误" style="width:500px">
+    <n-modal v-model:show="store.showError" preset="card" title="❌ 创作错误" style="width:500px">
       <div class="error-content">
-        <div class="error-message">{{ errorMessage }}</div>
-        <div v-if="errorSuggestion" class="error-suggestion">
+        <div class="error-message">{{ store.errorMessage }}</div>
+        <div v-if="store.errorSuggestion" class="error-suggestion">
           <div class="error-suggestion-title">建议：</div>
-          <div class="error-suggestion-text">{{ errorSuggestion }}</div>
+          <div class="error-suggestion-text">{{ store.errorSuggestion }}</div>
         </div>
       </div>
       <template #footer>
-        <n-button type="primary" @click="showError = false">我知道了</n-button>
+        <n-button type="primary" @click="store.dismissError()">我知道了</n-button>
+      </template>
+    </n-modal>
+
+    <!-- R4-P1-6: 断点恢复提示弹窗 -->
+    <n-modal v-model:show="showResumeDialog" preset="card" title="🔄 检测到未完成创作" style="width:480px">
+      <div class="resume-content">
+        <div class="resume-line">上次停在 <b>Part {{ lastPart }}</b> / 共 {{ totalParts }} Part。</div>
+        <div v-if="lastPart < totalParts" class="resume-sub">
+          是否从 Part {{ lastPart + 1 }} 继续创作？
+        </div>
+        <div v-else class="resume-sub">所有 Part 已完成，可前往报告页查看。</div>
+      </div>
+      <template #footer>
+        <n-button @click="handleResume('restart')" v-if="lastPart < totalParts">从头开始</n-button>
+        <n-button v-if="lastPart < totalParts" @click="showResumeDialog = false">稍后再说</n-button>
+        <n-button type="primary" @click="handleResume('continue')" v-if="lastPart < totalParts">
+          从 Part {{ lastPart + 1 }} 继续
+        </n-button>
+        <n-button v-else type="primary" @click="goToReport">查看报告</n-button>
       </template>
     </n-modal>
   </div>
@@ -97,6 +116,7 @@
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '@/api'
+import { useWritingStore, SSE_STATUS } from '@/stores/writing'
 import LayoutSidebar from '@/components/Layout/Sidebar.vue'
 import ProgressBar from '@/components/ProgressBar.vue'
 
@@ -104,21 +124,16 @@ const route = useRoute()
 const router = useRouter()
 const workId = route.params.workId
 
+const store = useWritingStore()
+
+// 视图内部 ref：作品数据快照（来自 /api/works/{id}，不通过 SSE 更新）
 const workData = ref({ title: '', parts: {}, part_outline: [] })
 const writingStatus = ref({ running: false, paused: false, phase: '', current_part: 0 })
-const logs = ref([])
-const currentPhase = ref('')
-const currentPart = ref(0)
-const completedParts = ref([])
-const showConfirm = ref(false)
-const confirmMsg = ref('')
-const currentProgress = ref(0)
-const progressMessage = ref('准备开始创作')
-const showError = ref(false)
-const errorMessage = ref('')
-const errorSuggestion = ref('')
-const sseStatus = ref('disconnected') // connecting | connected | disconnected | error
-let eventSource = null
+
+// R4-P1-6: 断点恢复弹窗状态
+const showResumeDialog = ref(false)
+const lastPart = ref(0)
+const totalParts = ref(0)
 
 const phases = [
   { id: 'phase1', name: '灵感解析' },
@@ -134,12 +149,74 @@ const sseStatusText = computed(() => {
     disconnected: '已断开',
     error: '连接异常',
   }
-  return map[sseStatus.value] || '未知'
+  return map[store.sseStatus] || '未知'
 })
 
 function phaseDone(id) {
   const order = ['phase1', 'phase2', 'phase3', 'phase4']
-  return order.indexOf(id) < order.indexOf(currentPhase.value)
+  return order.indexOf(id) < order.indexOf(store.currentPhase)
+}
+
+// ---- SSE 连接管理（R4-P0-1: view 直接管理 EventSource，指数退避重连） ----
+let eventSource = null
+const reconnectState = {
+  attempts: 0,
+  maxDelayMs: 30000,
+  baseDelayMs: 1000,
+  timer: null,
+  stopped: false,
+}
+
+function connectSSE() {
+  if (reconnectState.stopped) return
+  // 关闭旧连接
+  try { if (eventSource) eventSource.close() } catch (e) { /* ignore */ }
+
+  store.setSSEStatus(SSE_STATUS.CONNECTING)
+  eventSource = new EventSource(`/api/sse/stream?work_id=${workId}`)
+
+  eventSource.onopen = () => {
+    reconnectState.attempts = 0
+    store.setSSEStatus(SSE_STATUS.CONNECTED)
+  }
+
+  eventSource.onerror = () => {
+    if (reconnectState.stopped) return
+    store.setSSEStatus(SSE_STATUS.ERROR)
+    store.addLog({ msg: 'SSE连接错误，准备重连...', type: 'error' })
+
+    try { eventSource.close() } catch (e) { /* ignore */ }
+
+    reconnectState.attempts += 1
+    const delay = Math.min(
+      reconnectState.maxDelayMs,
+      reconnectState.baseDelayMs * Math.pow(2, reconnectState.attempts - 1)
+    )
+    store.addLog({ msg: `SSE将在 ${(delay / 1000).toFixed(1)}s 后第 ${reconnectState.attempts} 次重连`, type: 'info' })
+    reconnectState.timer = setTimeout(connectSSE, delay)
+  }
+
+  eventSource.onmessage = (e) => {
+    try {
+      const ev = JSON.parse(e.data)
+      handleEvent(ev)
+    } catch (err) {
+      console.error('[WritingProgress] Failed to parse SSE event:', err)
+    }
+  }
+}
+
+function closeSSE() {
+  reconnectState.stopped = true
+  if (reconnectState.timer) {
+    clearTimeout(reconnectState.timer)
+    reconnectState.timer = null
+  }
+  if (eventSource) {
+    try { eventSource.close() } catch (e) { /* ignore */ }
+    eventSource = null
+  }
+  store.setSSEStatus(SSE_STATUS.DISCONNECTED)
 }
 
 onMounted(async () => {
@@ -152,54 +229,68 @@ onMounted(async () => {
     writingStatus.value = s
   } catch {}
 
-  // 连接SSE（按workId隔离）
-  sseStatus.value = 'connecting'
-  eventSource = new EventSource(`/api/sse/stream?work_id=${workId}`)
-  eventSource.onopen = () => {
-    sseStatus.value = 'connected'
+  // R4-P1-6: 检测断点 → 弹窗
+  const savedPhase = String(workData.value.phase || 'init' || 'init')
+  const phaseMatch = savedPhase.match(/^phase3_part(\d+)$/)
+  if (phaseMatch) {
+    const n = parseInt(phaseMatch[1], 10)
+    lastPart.value = n
+    // 估算总 Part 数：来自 part_outline 或 cfg 默认 50
+    totalParts.value = (workData.value.part_outline && workData.value.part_outline.length) || 50
+    // 同步初始 currentPhase / currentPart 到 store
+    store.setPhase(savedPhase)
+    store.currentPart = n
+    showResumeDialog.value = true
   }
-  eventSource.onerror = () => {
-    sseStatus.value = 'error'
-  }
-  eventSource.onmessage = (e) => {
-    const ev = JSON.parse(e.data)
-    handleEvent(ev)
-  }
+
+  // 连接 SSE（带指数退避）
+  reconnectState.stopped = false
+  connectSSE()
 })
 
 onUnmounted(() => {
-  if (eventSource) eventSource.close()
+  closeSSE()
 })
 
+// R4-P0-1: handleEvent 直接调 store action（不再维护视图内 ref）
 function handleEvent(ev) {
-  if (ev.type === 'log') {
-    logs.value.push({ time: new Date().toLocaleTimeString('zh-CN'), msg: ev.data.message, type: 'info' })
-    nextTick(() => scrollLog())
-  } else if (ev.type === 'phase') {
-    currentPhase.value = ev.data.phase
-  } else if (ev.type === 'part_complete') {
-    completedParts.value.push(ev.data.part)
-  } else if (ev.type === 'agent_call') {
-    if (ev.data.status === 'start') {
-      currentPart.value = ev.data.part
-      logs.value.push({ time: new Date().toLocaleTimeString('zh-CN'), msg: `🤖 ${ev.data.message}`, type: 'agent' })
-    } else {
-      logs.value.push({ time: new Date().toLocaleTimeString('zh-CN'), msg: `✅ ${ev.data.message}`, type: 'done' })
+  switch (ev.type) {
+    case 'log':
+      store.addLog(ev.data.message || ev.data.msg || '')
+      nextTick(() => scrollLog())
+      break
+    case 'phase':
+      store.setPhase(ev.data.phase)
+      break
+    case 'part_complete':
+      store.markPartComplete(ev.data.part)
+      break
+    case 'agent_call': {
+      if (ev.data.status === 'start') {
+        store.currentPart = ev.data.part
+        store.addLog({ msg: `🤖 ${ev.data.message}`, type: 'agent' })
+      } else {
+        store.addLog({ msg: `✅ ${ev.data.message}`, type: 'done' })
+      }
+      nextTick(() => scrollLog())
+      break
     }
-    nextTick(() => scrollLog())
-  } else if (ev.type === 'confirm') {
-    showConfirm.value = true
-    confirmMsg.value = ev.data.message
-  } else if (ev.type === 'error') {
-    logs.value.push({ time: new Date().toLocaleTimeString('zh-CN'), msg: `❌ ${ev.data.message}`, type: 'error' })
-    errorMessage.value = ev.data.message
-    errorSuggestion.value = ev.data.recovery_suggestion || ''
-    showError.value = true
-  } else if (ev.type === 'final') {
-    router.push(`/report/${workId}`)
-  } else if (ev.type === 'progress') {
-    currentProgress.value = ev.data.progress
-    progressMessage.value = ev.data.message
+    case 'confirm':
+      store.setConfirm(ev.data.message)
+      break
+    case 'error':
+      store.setError(ev.data.message, ev.data.recovery_suggestion || '')
+      break
+    case 'final':
+      store.finalize()
+      router.push(`/report/${workId}`)
+      break
+    case 'progress':
+      store.setProgress(ev.data.progress, ev.data.message)
+      break
+    default:
+      // 心跳 / 未知事件忽略
+      break
   }
 }
 
@@ -216,13 +307,7 @@ async function startWriting() {
     writingStatus.value.running = true
   } catch (err) {
     console.error('[Frontend] API调用失败:', err)
-    logs.value.push({ 
-      time: new Date().toLocaleTimeString('zh-CN'), 
-      msg: `❌ 启动创作失败: ${err.message}`, 
-      type: 'error' 
-    })
-    errorMessage.value = `启动创作失败: ${err.message}`
-    showError.value = true
+    store.setError(`启动创作失败: ${err.message}`)
   }
 }
 
@@ -232,11 +317,7 @@ async function pauseWriting() {
     writingStatus.value.paused = true
   } catch (err) {
     console.error('[Frontend] 暂停创作失败:', err)
-    logs.value.push({ 
-      time: new Date().toLocaleTimeString('zh-CN'), 
-      msg: `❌ 暂停创作失败: ${err.message}`, 
-      type: 'error' 
-    })
+    store.addLog({ msg: `❌ 暂停创作失败: ${err.message}`, type: 'error' })
   }
 }
 
@@ -246,40 +327,49 @@ async function resumeWriting() {
     writingStatus.value.paused = false
   } catch (err) {
     console.error('[Frontend] 继续创作失败:', err)
-    logs.value.push({ 
-      time: new Date().toLocaleTimeString('zh-CN'), 
-      msg: `❌ 继续创作失败: ${err.message}`, 
-      type: 'error' 
-    })
+    store.addLog({ msg: `❌ 继续创作失败: ${err.message}`, type: 'error' })
   }
 }
 
 async function confirmAction(choice) {
-  showConfirm.value = false
+  store.dismissConfirm()
   try {
-    // 与后端 /api/writing/confirm 对齐（backend/api/writing.py + works.py）
     await api.post('/writing/confirm', { work_id: workId, choice })
     console.log(`[Frontend] 确认选择已发送: ${choice}`)
   } catch (err) {
     console.error('[Frontend] 发送确认选择失败:', err)
-    logs.value.push({
-      time: new Date().toLocaleTimeString('zh-CN'),
-      msg: `❌ 发送确认失败: ${err.message}`,
-      type: 'error'
-    })
+    store.addLog({ msg: `❌ 发送确认失败: ${err.message}`, type: 'error' })
   }
+}
+
+// R4-P1-6: 断点恢复处理
+function handleResume(action) {
+  showResumeDialog.value = false
+  if (action === 'continue') {
+    // 从 Part lastPart+1 继续，调 startWriting 让后端 resume 短路
+    startWriting()
+  } else if (action === 'restart') {
+    // 从头开始（清空 phase 让后端跑完整流程）
+    store.addLog({ msg: '用户选择从头开始', type: 'info' })
+    startWriting()
+  }
+}
+
+function goToReport() {
+  showResumeDialog.value = false
+  router.push(`/report/${workId}`)
 }
 </script>
 
 <style scoped>
 .layout { display: flex; height: 100vh; background: var(--color-background, #f8fafc); }
 .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-.topbar { 
-  display: flex; 
-  align-items: center; 
-  justify-content: space-between; 
-  padding: 14px 24px; 
-  border-bottom: 1px solid var(--color-border, #eee); 
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--color-border, #eee);
   background: var(--color-surface, #fff);
   backdrop-filter: blur(10px);
 }
@@ -336,58 +426,58 @@ async function confirmAction(choice) {
 .sse-status.error .status-text {
   color: var(--color-error);
 }
-.content { 
-  flex: 1; 
-  overflow-y: auto; 
-  padding: var(--content-padding, 24px); 
-  display: flex; 
-  flex-direction: column; 
+.content {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--content-padding, 24px);
+  display: flex;
+  flex-direction: column;
   gap: 24px;
   background: var(--color-background, #f8fafc);
 }
-.phase-progress { 
-  display: flex; 
-  gap: 0; 
-  background: var(--color-surface, #fff); 
-  border-radius: var(--radius-lg, 12px); 
-  padding: 24px 20px; 
+.phase-progress {
+  display: flex;
+  gap: 0;
+  background: var(--color-surface, #fff);
+  border-radius: var(--radius-lg, 12px);
+  padding: 24px 20px;
   border: 1px solid var(--color-border, #e2e8f0);
   box-shadow: var(--shadow-md);
 }
 .phase-item { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 10px; position: relative; }
 .phase-item:not(:last-child)::after { content: ''; position: absolute; top: 16px; left: 60%; width: 80%; height: 3px; background: var(--color-border, #eee); transition: background 0.4s ease; }
 .phase-item.done::after { background: linear-gradient(90deg, var(--color-primary), var(--color-accent)); }
-.phase-dot { 
-  width: 32px; 
-  height: 32px; 
-  border-radius: 50%; 
+.phase-dot {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
   background: var(--color-background);
   border: 2px solid var(--color-border);
-  color: var(--color-text-secondary, #888); 
-  display: flex; 
-  align-items: center; 
-  justify-content: center; 
-  font-size: 13px; 
-  font-weight: 600; 
+  color: var(--color-text-secondary, #888);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
   z-index: 1;
   transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
 }
-.phase-item.done .phase-dot { 
-  background: linear-gradient(135deg, var(--color-primary), var(--color-accent)); 
+.phase-item.done .phase-dot {
+  background: linear-gradient(135deg, var(--color-primary), var(--color-accent));
   border-color: var(--color-primary);
-  color: #fff; 
+  color: #fff;
 }
-.phase-item.active .phase-dot { 
-  background: linear-gradient(135deg, var(--color-primary), var(--color-accent)); 
+.phase-item.active .phase-dot {
+  background: linear-gradient(135deg, var(--color-primary), var(--color-accent));
   border-color: var(--color-primary);
-  color: #fff; 
+  color: #fff;
   box-shadow: 0 0 0 5px color-mix(in srgb, var(--color-primary) 20%, transparent);
   animation: phase-pulse 2s ease-in-out infinite;
 }
 .phase-label { font-size: 12px; color: var(--color-text-secondary, #888); transition: color 0.3s ease; font-weight: 500; }
-.phase-item.done .phase-label, .phase-item.active .phase-label { 
-  color: var(--color-primary); 
-  font-weight: 600; 
+.phase-item.done .phase-label, .phase-item.active .phase-label {
+  color: var(--color-primary);
+  font-weight: 600;
 }
 
 @keyframes phase-pulse {
@@ -400,23 +490,23 @@ async function confirmAction(choice) {
   50% { box-shadow: 0 0 0 6px rgba(37,99,235,0.15); }
 }
 
-.parts-progress { 
-  background: var(--color-surface, #fff); 
-  border-radius: var(--radius-lg, 12px); 
-  padding: 20px; 
+.parts-progress {
+  background: var(--color-surface, #fff);
+  border-radius: var(--radius-lg, 12px);
+  padding: 20px;
   border: 1px solid var(--color-border, #e2e8f0);
   box-shadow: var(--shadow-sm, 0 1px 2px rgba(0,0,0,0.05));
 }
 .parts-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; color: var(--color-text-primary, #333); }
 .parts-list { display: flex; flex-wrap: wrap; gap: 8px; }
-.part-item { 
-  padding: 6px 14px; 
-  border-radius: 20px; 
-  background: var(--color-background, #f5f5f5); 
-  font-size: 13px; 
-  display: flex; 
-  align-items: center; 
-  gap: 8px; 
+.part-item {
+  padding: 6px 14px;
+  border-radius: 20px;
+  background: var(--color-background, #f5f5f5);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   border: 1px solid transparent;
   transition: all 0.25s ease;
 }
@@ -424,8 +514,8 @@ async function confirmAction(choice) {
   transform: translateY(-1px);
   box-shadow: var(--shadow-sm, 0 1px 2px rgba(0,0,0,0.05));
 }
-.part-item.active { 
-  border-color: var(--color-primary, #2563eb); 
+.part-item.active {
+  border-color: var(--color-primary, #2563eb);
   background: linear-gradient(135deg, color-mix(in srgb, var(--color-primary, #2563eb) 10%, white), transparent);
   color: var(--color-primary, #2563eb);
   font-weight: 500;
@@ -433,14 +523,14 @@ async function confirmAction(choice) {
 .part-item.done { background: linear-gradient(135deg, #f0fdf4, #dcfce7); color: var(--color-success, #16a34a); }
 .part-theme { color: var(--color-text-secondary, #888); font-size: 12px; }
 .part-done { color: var(--color-success, #16a34a); font-weight: bold; }
-.log-panel { 
-  background: var(--color-surface, #fff); 
-  border-radius: var(--radius-lg, 12px); 
-  padding: 20px; 
-  border: 1px solid var(--color-border, #e2e8f0); 
-  flex: 1; 
-  display: flex; 
-  flex-direction: column; 
+.log-panel {
+  background: var(--color-surface, #fff);
+  border-radius: var(--radius-lg, 12px);
+  padding: 20px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  flex: 1;
+  display: flex;
+  flex-direction: column;
   min-height: 300px;
   box-shadow: var(--shadow-md);
   position: relative;
@@ -456,10 +546,10 @@ async function confirmAction(choice) {
   background: linear-gradient(90deg, transparent, var(--color-primary), transparent);
   opacity: 0.5;
 }
-.log-title { 
-  font-size: 14px; 
-  font-weight: 600; 
-  margin-bottom: 12px; 
+.log-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 12px;
   color: var(--color-text-primary, #333);
   display: flex;
   align-items: center;
@@ -472,22 +562,22 @@ async function confirmAction(choice) {
   background: linear-gradient(180deg, var(--color-primary), var(--color-accent));
   border-radius: 2px;
 }
-.log-list { 
-  flex: 1; 
-  overflow-y: auto; 
-  display: flex; 
-  flex-direction: column; 
-  gap: 2px; 
-  font-family: 'Consolas', 'Monaco', monospace; 
+.log-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: 'Consolas', 'Monaco', monospace;
   padding-right: 4px;
 }
-.log-item { 
-  display: flex; 
-  gap: 12px; 
-  font-size: 13px; 
-  line-height: 1.7; 
-  padding: 6px 10px; 
-  border-radius: 6px; 
+.log-item {
+  display: flex;
+  gap: 12px;
+  font-size: 13px;
+  line-height: 1.7;
+  padding: 6px 10px;
+  border-radius: 6px;
   transition: all 0.2s ease;
   animation: log-fade-in 0.3s ease-out;
 }
@@ -495,8 +585,8 @@ async function confirmAction(choice) {
   from { opacity: 0; transform: translateX(-10px); }
   to { opacity: 1; transform: translateX(0); }
 }
-.log-item:hover { 
-  background: var(--color-background, #f8fafc); 
+.log-item:hover {
+  background: var(--color-background, #f8fafc);
 }
 .log-time {
   color: var(--color-text-muted, #cbd5e1);
@@ -506,8 +596,8 @@ async function confirmAction(choice) {
 .log-msg { color: var(--color-text-primary, #444); }
 .log-item.done .log-msg { color: var(--color-success, #22c55e); font-weight: 500; }
 .log-item.error .log-msg { color: var(--color-error, #ef4444); font-weight: 500; }
-.log-item.agent .log-msg { 
-  color: var(--color-primary, #0ea5e9); 
+.log-item.agent .log-msg {
+  color: var(--color-primary, #0ea5e9);
   font-weight: 500;
 }
 
@@ -540,6 +630,28 @@ async function confirmAction(choice) {
 
 .error-suggestion-text {
   color: var(--color-text-secondary, #555);
+}
+
+/* R4-P1-6 断点恢复弹窗 */
+.resume-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 8px 0;
+}
+.resume-line {
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--color-text-primary, #333);
+}
+.resume-line b {
+  color: var(--color-primary, #2563eb);
+  font-size: 18px;
+}
+.resume-sub {
+  font-size: 13px;
+  color: var(--color-text-secondary, #666);
+  line-height: 1.6;
 }
 
 @media (max-width: 768px) {

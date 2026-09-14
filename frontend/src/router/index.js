@@ -12,6 +12,16 @@ const router = createRouter({
       component: () => import('../views/WorksList.vue'),
     },
     {
+      // R4-P1-3: 会话管理
+      path: '/works/:workId/sessions',
+      component: () => import('../views/SessionManager.vue'),
+    },
+    {
+      // R4-P1-5: 角色档案编辑
+      path: '/works/:workId/characters',
+      component: () => import('../views/CharacterEdit.vue'),
+    },
+    {
       path: '/config/:workId?',
       component: () => import('../views/ConfigPanel.vue'),
     },

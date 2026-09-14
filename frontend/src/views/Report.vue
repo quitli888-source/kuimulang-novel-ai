@@ -59,6 +59,74 @@
           </div>
         </div>
 
+        <!-- R4-P1-4: 成本趋势（每 Part 成本柱状图，自绘 SVG 不引入新依赖） -->
+        <div class="chart-card">
+          <div class="card-title">
+            <span>成本趋势</span>
+            <span v-if="totalCostTrend > 0" class="chart-sub">合计 ¥{{ totalCostTrend.toFixed(4) }}</span>
+          </div>
+          <div v-if="!costPerPart.length" class="empty-issues">暂无成本数据（成本仅在 Phase3+ 阶段记录）</div>
+          <div v-else class="cost-chart-wrap">
+            <svg class="cost-svg" :viewBox="`0 0 ${costSvgWidth} ${costSvgHeight}`" preserveAspectRatio="none">
+              <!-- 坐标轴 -->
+              <line :x1="40" :y1="costSvgHeight - 20" :x2="costSvgWidth - 10" :y2="costSvgHeight - 20" stroke="#e2e8f0" stroke-width="1" />
+              <line :x1="40" :y1="10" :x2="40" :y2="costSvgHeight - 20" stroke="#e2e8f0" stroke-width="1" />
+              <!-- 折线 -->
+              <polyline
+                v-if="costPolylinePoints"
+                :points="costPolylinePoints"
+                fill="none"
+                stroke="url(#costGradient)"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <!-- 面积 -->
+              <polygon
+                v-if="costAreaPoints"
+                :points="costAreaPoints"
+                fill="url(#costFillGradient)"
+                opacity="0.18"
+              />
+              <!-- 数据点 -->
+              <circle
+                v-for="pt in costPoints"
+                :key="`p${pt.part}`"
+                :cx="pt.x"
+                :cy="pt.y"
+                r="3"
+                fill="#2563eb"
+              >
+                <title>Part {{ pt.part }}: ¥{{ pt.cost.toFixed(4) }}</title>
+              </circle>
+              <!-- 定义 -->
+              <defs>
+                <linearGradient id="costGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                  <stop offset="0%" stop-color="#06b6d4" />
+                  <stop offset="100%" stop-color="#2563eb" />
+                </linearGradient>
+                <linearGradient id="costFillGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                  <stop offset="0%" stop-color="#2563eb" stop-opacity="0.6" />
+                  <stop offset="100%" stop-color="#2563eb" stop-opacity="0" />
+                </linearGradient>
+              </defs>
+              <!-- X 轴标签（每隔 N 个显示） -->
+              <text
+                v-for="lbl in costXLabels"
+                :key="`xl${lbl.part}`"
+                :x="lbl.x"
+                :y="costSvgHeight - 6"
+                text-anchor="middle"
+                fill="#94a3b8"
+                font-size="10"
+              >P{{ lbl.part }}</text>
+              <!-- Y 轴标签（最大值的 50%/100%） -->
+              <text :x="36" :y="14" text-anchor="end" fill="#94a3b8" font-size="10">¥{{ maxPartCost.toFixed(3) }}</text>
+              <text :x="36" :y="costSvgHeight - 22" text-anchor="end" fill="#94a3b8" font-size="10">¥0</text>
+            </svg>
+          </div>
+        </div>
+
         <!-- P0/P1问题 -->
         <div class="issues-card">
           <div class="card-title">问题列表</div>
@@ -86,6 +154,60 @@ const workId = route.params.workId
 
 const workData = ref({ title: '', parts: {}, review_report: null, final_draft: {} })
 const costData = ref({})
+const costPerPart = ref([])  // R4-P1-4: 后端注入的 [{part, total_tokens, calls, estimated_cost_rmb}, ...]
+
+// R4-P1-4: 成本曲线图计算
+const costSvgWidth = 720
+const costSvgHeight = 180
+const chartLeftPad = 40
+const chartRightPad = 10
+const chartTopPad = 10
+const chartBottomPad = 20
+
+const maxPartCost = computed(() => {
+  if (!costPerPart.value.length) return 0
+  return Math.max(...costPerPart.value.map(p => p.estimated_cost_rmb || 0), 0.01)
+})
+
+const totalCostTrend = computed(() => {
+  return costPerPart.value.reduce((s, p) => s + (p.estimated_cost_rmb || 0), 0)
+})
+
+const costPoints = computed(() => {
+  if (!costPerPart.value.length) return []
+  const innerW = costSvgWidth - chartLeftPad - chartRightPad
+  const innerH = costSvgHeight - chartTopPad - chartBottomPad
+  const max = maxPartCost.value
+  const step = costPerPart.value.length > 1 ? innerW / (costPerPart.value.length - 1) : 0
+  return costPerPart.value.map((p, idx) => ({
+    part: p.part,
+    cost: p.estimated_cost_rmb || 0,
+    x: chartLeftPad + idx * step,
+    y: chartTopPad + innerH - ((p.estimated_cost_rmb || 0) / max) * innerH,
+  }))
+})
+
+const costPolylinePoints = computed(() => {
+  return costPoints.value.map(pt => `${pt.x},${pt.y}`).join(' ')
+})
+
+const costAreaPoints = computed(() => {
+  if (!costPoints.value.length) return ''
+  const innerH = costSvgHeight - chartTopPad - chartBottomPad
+  const baseY = chartTopPad + innerH
+  const first = costPoints.value[0]
+  const last = costPoints.value[costPoints.value.length - 1]
+  const pts = costPoints.value.map(pt => `${pt.x},${pt.y}`).join(' ')
+  return `${first.x},${baseY} ${pts} ${last.x},${baseY}`
+})
+
+const costXLabels = computed(() => {
+  if (!costPerPart.value.length) return []
+  const n = costPerPart.value.length
+  // 每隔最多 10 个显示一个标签
+  const step = Math.max(1, Math.floor(n / 10))
+  return costPoints.value.filter((_, idx) => idx % step === 0 || idx === n - 1)
+})
 
 const wordCount = computed(() => {
   const parts = workData.value.final_draft || workData.value.parts || {}
@@ -144,6 +266,8 @@ onMounted(async () => {
   workData.value = (await api.get(`/works/${workId}`)).data
   // R3-P0-1: 把后端注入的 cost_summary 同步到 costData（成本卡数据通路修复）
   costData.value = workData.value.cost_summary || {}
+  // R4-P1-4: 加载按 Part 成本明细
+  costPerPart.value = workData.value.cost_per_part || []
 })
 </script>
 
@@ -219,14 +343,33 @@ onMounted(async () => {
   box-shadow: var(--shadow-md, 0 4px 6px rgba(0,0,0,0.08));
 }
 
-.card-title { 
-  font-size: 15px; 
-  font-weight: 600; 
-  margin-bottom: 16px; 
+.card-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 16px;
   color: var(--color-text-primary, #333);
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.chart-sub {
+  font-size: 12px;
+  color: var(--color-text-secondary, #888);
+  font-weight: 500;
+  margin-left: auto;
+}
+
+/* R4-P1-4: 成本曲线 */
+.cost-chart-wrap {
+  width: 100%;
+  background: linear-gradient(180deg, transparent, rgba(37, 99, 235, 0.02));
+  border-radius: var(--radius-md, 8px);
+  padding: 4px;
+}
+.cost-svg {
+  width: 100%;
+  height: 180px;
+  display: block;
 }
 .chart-placeholder { 
   display: flex; 

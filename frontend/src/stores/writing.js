@@ -2,15 +2,10 @@ import { defineStore } from 'pinia'
 import api from '@/api'
 
 // =====================================================================
-// R3-P0-2 审计结论（2026-09-14）：
-//   grep -rn "useWritingStore" frontend/src/ 唯一命中是本文件定义处 (line 52)。
-//   全前端 0 个 import。本文件 343 行（initSSE / closeSSE / handleSSEEvent /
-//   addLog / persistState / loadWorkStatus / showConfirmDialog / reset 等）
-//   100% 死代码。
-//   处置策略（本轮授权仅"加注释"，删除合并到 R4-B.3 SSE 二合一重构时统一处理）：
-//     1. 本文件保留（避免破坏未来切换路径）；
-//     2. 顶部加本注释说明；
-//     3. R4 时由 SSE 二合一任务决定"删 store 改用 view 内联"或"view 切换为 store"。
+// R4-P0-1 SSE 二合一（2026-09-14）：
+//   删除 handleSSEEvent / initSSE / closeSSE / reconnect 等冗余 SSE 处理逻辑。
+//   WritingProgress.vue 直接订阅 EventSource，调本 store 暴露的 7 个 action。
+//   本文件仅保留：state + 持久化 + 7 个 SSE 事件 action + 状态查询。
 // =====================================================================
 
 // SSE连接状态枚举
@@ -110,9 +105,6 @@ export const useWritingStore = defineStore('writing', {
       showError: false,
       errorMessage: '',
       errorSuggestion: '',
-
-      // EventSource实例
-      eventSource: null,
     }
   },
 
@@ -161,74 +153,108 @@ export const useWritingStore = defineStore('writing', {
       this.sseStatus = status
     },
 
-    // 处理SSE事件
-    handleSSEEvent(ev) {
-      switch (ev.type) {
-        case 'log':
-          this.addLog(ev.data.message, 'info')
-          break
-        case 'phase':
-          this.currentPhase = ev.data.phase
-          this.persistState()
-          break
-        case 'part':
-          this.currentPart = ev.data.part
-          break
-        case 'part_complete':
-          if (!this.completedParts.includes(ev.data.part)) {
-            this.completedParts.push(ev.data.part)
-            this.persistState()
-          }
-          break
-        case 'progress':
-          this.progress = ev.data.progress
-          this.progressMessage = ev.data.message
-          break
-        case 'error':
-          this.showErrorDialog(ev.data.message, ev.data.suggestion)
-          break
-        case 'confirm':
-          this.showConfirmDialog(ev.data.message)
-          break
-        case 'complete':
-          this.writingStatus.running = false
-          this.addLog('创作完成！', 'success')
-          break
-      }
-    },
+    // ---- R4-P0-1: SSE 事件 action（view 调这 7 个方法即可） ----
 
-    // 添加日志
-    addLog(msg, type = 'info') {
-      const logEntry = {
-        time: new Date().toLocaleTimeString('zh-CN'),
-        msg,
-        type,
+    // 1. 添加日志（R4-P0-1: view.handleEvent('log') 调）
+    addLog(log) {
+      // 兼容入参是字符串（直接消息）或对象（{msg, type}）
+      let entry
+      if (typeof log === 'string') {
+        entry = { time: new Date().toLocaleTimeString('zh-CN'), msg: log, type: 'info' }
+      } else {
+        entry = {
+          time: new Date().toLocaleTimeString('zh-CN'),
+          msg: log.msg || log.message || '',
+          type: log.type || 'info',
+        }
       }
-      this.logs.push(logEntry)
-      // 保持日志数量限制
+      this.logs.push(entry)
       if (this.logs.length > 500) {
         this.logs = this.logs.slice(-300)
       }
       this.persistState()
     },
 
-    // 显示确认弹窗
-    showConfirmDialog(msg) {
-      this.confirmMsg = msg
+    // 2. 标记 Part 完成（R4-P0-1: view.handleEvent('part_complete') 调）
+    markPartComplete(part) {
+      const partNum = typeof part === 'number' ? part : part?.part
+      if (!partNum) return
+      if (!this.completedParts.includes(partNum)) {
+        this.completedParts.push(partNum)
+        this.persistState()
+      }
+    },
+
+    // 3. 设置阶段（R4-P0-1: view.handleEvent('phase') 调）
+    setPhase(phase) {
+      this.currentPhase = phase
+      this.persistState()
+    },
+
+    // 4. 设置进度（R4-P0-1: view.handleEvent('progress') 调）
+    // 入参兼容：setProgress(progress, message) 或 setProgress({progress, message})
+    setProgress(p, msg) {
+      if (typeof p === 'object' && p !== null) {
+        this.progress = p.progress ?? p.value ?? 0
+        this.progressMessage = p.message ?? this.progressMessage
+      } else {
+        this.progress = p ?? 0
+        if (msg !== undefined) this.progressMessage = msg
+      }
+    },
+
+    // 5. 设置确认弹窗（R4-P0-1: view.handleEvent('confirm') 调）
+    setConfirm(msg) {
+      this.confirmMsg = typeof msg === 'string' ? msg : msg?.message || ''
       this.showConfirm = true
     },
 
-    // 显示错误弹窗
-    showErrorDialog(message, suggestion = '') {
-      this.errorMessage = message
-      this.errorSuggestion = suggestion
+    // 6. 设置错误弹窗（R4-P0-1: view.handleEvent('error') 调）
+    // 入参兼容：setError(msg, suggestion) 或 setError({message, recovery_suggestion})
+    setError(msg, suggestion) {
+      if (typeof msg === 'object' && msg !== null) {
+        this.errorMessage = msg.message || ''
+        this.errorSuggestion = msg.recovery_suggestion || msg.suggestion || ''
+      } else {
+        this.errorMessage = msg || ''
+        this.errorSuggestion = suggestion || ''
+      }
       this.showError = true
+      // 同步追加到日志流
+      this.addLog({ msg: `❌ ${this.errorMessage}`, type: 'error' })
     },
 
-    // 确认操作
-    confirmAction(proceed) {
+    // 7. finalize（R4-P0-1: view.handleEvent('final') 调）
+    finalize() {
+      this.writingStatus.running = false
+      this.addLog({ msg: '创作完成！', type: 'success' })
+    },
+
+    // ---- 保留方法（供 view / 其他模块沿用） ----
+
+    // 显示确认弹窗（保留兼容旧调用）
+    showConfirmDialog(msg) {
+      this.setConfirm(msg)
+    },
+
+    // 显示错误弹窗（保留兼容旧调用）
+    showErrorDialog(message, suggestion = '') {
+      this.setError(message, suggestion)
+    },
+
+    // 关闭错误弹窗
+    dismissError() {
+      this.showError = false
+    },
+
+    // 关闭确认弹窗
+    dismissConfirm() {
       this.showConfirm = false
-      // V6.1: 与后端 /api/writing/confirm 对齐（works.py 已迁移至 writing.py）
+    },
+
+    // 确认操作（发后端 /api/writing/confirm）
+    confirmAction(proceed) {
+      this.dismissConfirm()
       if (proceed && this.currentWorkId) {
         api.post(`/writing/confirm`, { work_id: this.currentWorkId, choice: 'proceed' }).catch(() => {})
       }
@@ -245,98 +271,8 @@ export const useWritingStore = defineStore('writing', {
       }
     },
 
-    // 初始化SSE连接（带指数退避自动重连）
-    initSSE(workId) {
-      // 关闭已有连接
-      this.closeSSE()
-
-      this.setSSEStatus(SSE_STATUS.CONNECTING)
-      this.currentWorkId = workId
-
-      // V6.1: 指数退避重连状态
-      const reconnectState = {
-        attempts: 0,
-        maxDelayMs: 30000,     // 单次最长 30s
-        baseDelayMs: 1000,     // 起始 1s
-        timer: null,
-        stopped: false,
-      }
-
-      const connect = () => {
-        if (reconnectState.stopped) return
-        const eventSource = new EventSource(`/api/sse/stream?work_id=${workId}`)
-        this.eventSource = eventSource
-
-        eventSource.onopen = () => {
-          // 成功连接，重置重试计数
-          reconnectState.attempts = 0
-          this.setSSEStatus(SSE_STATUS.CONNECTED)
-          this.addLog('SSE连接已建立', 'info')
-        }
-
-        eventSource.onerror = () => {
-          if (reconnectState.stopped) return
-          // 标记错误状态，准备重连
-          this.setSSEStatus(SSE_STATUS.ERROR)
-          this.addLog('SSE连接错误，准备重连...', 'error')
-
-          // 先关闭当前连接（浏览器会自动重试，但我们要自己控制节奏）
-          try { eventSource.close() } catch (e) { /* ignore */ }
-          if (this.eventSource === eventSource) {
-            this.eventSource = null
-          }
-
-          // 计算下一次重连延迟：1s, 2s, 4s, 8s, ... 上限 30s
-          reconnectState.attempts += 1
-          const delay = Math.min(
-            reconnectState.maxDelayMs,
-            reconnectState.baseDelayMs * Math.pow(2, reconnectState.attempts - 1)
-          )
-          this.addLog(
-            `SSE将在 ${(delay / 1000).toFixed(1)}s 后第 ${reconnectState.attempts} 次重连`,
-            'info'
-          )
-          reconnectState.timer = setTimeout(connect, delay)
-        }
-
-        eventSource.onmessage = (e) => {
-          try {
-            const ev = JSON.parse(e.data)
-            this.handleSSEEvent(ev)
-          } catch (err) {
-            console.error('[WritingStore] Failed to parse SSE event:', err)
-          }
-        }
-      }
-
-      connect()
-
-      // 把 stop 控制器挂到实例上，closeSSE 时可以彻底停掉重连
-      this._sseReconnectState = reconnectState
-
-      return this.eventSource
-    },
-
-    // 关闭SSE连接
-    closeSSE() {
-      // V6.1: 停止重连定时器
-      if (this._sseReconnectState) {
-        this._sseReconnectState.stopped = true
-        if (this._sseReconnectState.timer) {
-          clearTimeout(this._sseReconnectState.timer)
-        }
-        this._sseReconnectState = null
-      }
-      if (this.eventSource) {
-        this.eventSource.close()
-        this.eventSource = null
-        this.setSSEStatus(SSE_STATUS.DISCONNECTED)
-      }
-    },
-
     // 重置状态
     reset() {
-      this.closeSSE()
       this.workData = { title: '', parts: {}, part_outline: [] }
       this.currentPhase = ''
       this.currentPart = 0
@@ -348,6 +284,7 @@ export const useWritingStore = defineStore('writing', {
       this.showError = false
       this.errorMessage = ''
       this.errorSuggestion = ''
+      this.sseStatus = SSE_STATUS.DISCONNECTED
     },
   },
 })

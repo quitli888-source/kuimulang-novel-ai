@@ -4,8 +4,13 @@
 追踪每次LLM调用的token消耗，统计总成本。
 R3-P1-6: 增补 step-3.7-flash 定价（按 stepfun 公开市场参考价）；
          暴露 should_prompt_for_cost(work_id, threshold) 用于熔断 SSE 推 CONFIRM。
+R4-P1-7: 增补 attach_work(work_id, persist_dir) —— 把 cost_tracker 绑定到作品，
+         每次 record() 后把累计 calls 增量写回 work_id.cost.json；进程级单例
+         跨重启清零可接受（落盘 history 是 source of truth）。
 """
+import json
 import time
+from pathlib import Path
 from typing import Optional
 
 
@@ -33,6 +38,23 @@ class CostTracker:
     def __init__(self):
         self.calls = []  # [{timestamp, model, agent, is_json, prompt_tokens, completion_tokens, total_tokens, duration_ms}]
         self._start_time = time.time()
+        # R4-P1-7: 当前绑定的 work_id + 持久化文件路径
+        self._persist_work_id: Optional[str] = None
+        self._persist_path: Optional[Path] = None
+
+    def attach_work(self, work_id: str, persist_dir: Path) -> None:
+        """R4-P1-7: 把 cost_tracker 绑定到 work_id，每次 record() 后增量落盘到
+        {persist_dir}/{work_id}.cost.json。重启后 _persist_path 在新进程里
+        attach_work 才挂载，重启前 1s 内写丢失可接受。
+        """
+        self._persist_work_id = work_id
+        try:
+            target_dir = Path(persist_dir)
+            target_dir.mkdir(parents=True, exist_ok=True)
+            self._persist_path = target_dir / f"{work_id}.cost.json"
+        except Exception as e:
+            print(f"[cost_tracker] attach_work 失败: {e}")
+            self._persist_path = None
 
     def record(self, model: str, agent: str, is_json: bool,
                prompt_tokens: int, completion_tokens: int,
@@ -48,6 +70,22 @@ class CostTracker:
             "total_tokens": total_tokens,
             "duration_ms": round(duration_ms, 0),
         })
+        # R4-P1-7: 增量落盘（best-effort，失败不影响主流程）
+        self._flush_to_disk()
+
+    def _flush_to_disk(self) -> None:
+        """R4-P1-7: 把当前 self.calls 序列化为 JSON 写到 _persist_path。"""
+        if not self._persist_path:
+            return
+        try:
+            self._persist_path.write_text(
+                json.dumps(self.calls, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            # 写盘失败静默：成本是辅助数据，不应阻塞创作主流程
+            # TODO(R5): 多 worker 部署时加 fcntl.flock 文件锁
+            pass
 
     def get_summary(self) -> dict:
         """获取统计摘要"""

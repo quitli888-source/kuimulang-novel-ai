@@ -182,6 +182,13 @@ class WritingService:
         self.progress_callback = progress_manager.get_progress_callback(work_id, "WritingService")
         progress_manager.reset_progress(work_id)
 
+        # R4-P1-7: 把 cost_tracker 绑定到当前 work，每次 record() 增量落盘
+        try:
+            from core.cost_tracker import get_tracker
+            get_tracker().attach_work(self.work_id, self.work_path.parent)
+        except Exception as attach_err:
+            print(f"[WritingService] cost_tracker.attach_work 失败（不影响主流程）: {attach_err}")
+
     async def run(self):
         """执行完整创作流程
 
@@ -603,6 +610,46 @@ class WritingService:
                         )
                     except Exception as win_err:
                         print(f"[WritingService] SlidingWindow.add_part 失败（不影响主流程）: {win_err}")
+
+                    # R4-P0-2: 二级滚动摘要生成（每 5 个 Part 一次）
+                    if temp_state.window.should_create_rolling_summary(i):
+                        try:
+                            from core.llm_client import call_llm
+                            # 取最近 ROLLING_EVERY 个 Part 的 1 级摘要
+                            recent_keys = sorted(
+                                [p for p in temp_state.window.summaries.keys() if p < i]
+                            )[-temp_state.window.ROLLING_EVERY:]
+                            recent_text = "\n".join(
+                                f"Part {p}: {temp_state.window.summaries[p]}"
+                                for p in recent_keys
+                                if p in temp_state.window.summaries
+                            )
+                            rolling = call_llm(
+                                system_prompt=(
+                                    "你是长篇小说剧情压缩助手。"
+                                    "将下面若干个 Part 的剧情概要压缩为一段 500 字以内的连贯剧情段，"
+                                    "保留关键人物、冲突、伏笔，输出纯叙事文本，不要分点。"
+                                ),
+                                user_prompt=recent_text or "(无最近摘要)",
+                                temperature=0.3,
+                                max_tokens=800,
+                                agent="rolling_summary",
+                            )
+                            rolling_text = (rolling or "")[:500]
+                            if not rolling_text.strip():
+                                # Fallback: 拼接 5 个一级摘要前 100 字
+                                rolling_text = "\n".join(
+                                    f"Part {p}: {temp_state.window.summaries[p][:100]}"
+                                    for p in recent_keys
+                                    if p in temp_state.window.summaries
+                                )[:500]
+                            temp_state.window.add_rolling_summary(i, rolling_text)
+                            await self.emitter.emit(EventType.LOG, {
+                                "message": f"📚 Part {i} 二级滚动摘要已生成（{len(rolling_text)} 字）",
+                                "work_id": self.work_id,
+                            }, work_id=self.work_id)
+                        except Exception as roll_err:
+                            print(f"[WritingService] 二级滚动摘要生成失败（不影响主流程）: {roll_err}")
 
                     word_count = len(part_text)
                     break  # 成功
@@ -1118,5 +1165,13 @@ class WritingService:
             await self.emitter.emit(EventType.PART_COMPLETE, {"part": part_num, "words": 0, "work_id": self.work_id}, work_id=self.work_id)
 
     def _save(self):
-        """保存作品数据"""
+        """保存作品数据（R4-P1-7: 同时把 cost_tracker 当前 summary 写回 data）"""
+        try:
+            from core.cost_tracker import get_tracker
+            # 同步当前进程的 cost_tracker 累计到 data，便于 uvicorn 重启后
+            # works.py get_work 能 merge history（in-memory 视为最新源）
+            self.data["cost_summary"] = get_tracker().get_summary()
+        except Exception:
+            # tracker 不可用时保留已有值
+            pass
         self.work_path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")

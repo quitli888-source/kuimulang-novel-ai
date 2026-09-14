@@ -23,6 +23,8 @@ class CreateWorkRequest(BaseModel):
 class UpdateMetaRequest(BaseModel):
     title: Optional[str] = None
     inspiration: Optional[str] = None
+    # R4-P1-5: 角色档案编辑
+    characters: Optional[list] = None
 
 
 class CreateSessionRequest(BaseModel):
@@ -110,7 +112,25 @@ def get_work(work_id: str):
     # 成本 / 调用次数卡（costData 永远空 修复）
     try:
         from core.cost_tracker import get_tracker
-        data["cost_summary"] = get_tracker().get_summary()
+        tracker = get_tracker()
+        data["cost_summary"] = tracker.get_summary()
+        # R4-P1-4: 按 Part 成本明细供 Report.vue 成本曲线渲染
+        try:
+            total_parts = max(
+                len(data.get("parts", {}) or {}),
+                len(data.get("part_outline", []) or []),
+                0,
+            )
+            per_part = []
+            for part_num in range(1, total_parts + 1):
+                per_part.append({
+                    "part": part_num,
+                    **tracker.get_per_part_summary(part_num),
+                })
+            data["cost_per_part"] = per_part
+        except Exception as per_part_err:
+            data["cost_per_part"] = []
+            print(f"[works.get_work] cost_per_part 聚合失败（不影响主流程）: {per_part_err}")
     except Exception:
         # tracker 不可用时给空 summary，前端兜底为 0
         data["cost_summary"] = {
@@ -118,6 +138,7 @@ def get_work(work_id: str):
             "total_tokens": 0,
             "estimated_cost_rmb": 0.0,
         }
+        data["cost_per_part"] = []
     return data
 
 
@@ -135,6 +156,13 @@ def update_work(work_id: str, req: UpdateMetaRequest):
         data["title"] = req.title
     if req.inspiration is not None:
         data["inspiration"] = req.inspiration
+    # R4-P1-5: 角色档案写回（前端 CharacterEdit.vue 提交）
+    if req.characters is not None:
+        # 简单校验：必须是 list
+        if isinstance(req.characters, list):
+            data["characters"] = req.characters
+        else:
+            raise HTTPException(400, "characters 字段必须是 list")
 
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"ok": True}
