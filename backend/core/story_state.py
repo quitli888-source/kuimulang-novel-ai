@@ -5,10 +5,15 @@ V4改动：
 - 结构化角色状态追踪（character_state_track）
 - 利用ConsistencyReviewAgent返回的character_states
 - 增强角色状态快照生成
+
+V6.1 改动：
+- 引入 SlidingWindow，把"全部摘要 + 末尾1200字"升级为真正的滑动窗口
+  （最近 K 个 Part 原文 + 远端 Part 的三级摘要）
 """
 import json
 from pathlib import Path
 from core.config import MEMORY_DIR
+from core.sliding_window import SlidingWindow
 
 
 class StoryState:
@@ -45,6 +50,9 @@ class StoryState:
         # V4: 结构化角色状态追踪
         # {char_name: {part_num: "状态描述", ...}}
         self.character_state_track = {}
+
+        # V6.1: 真正的滑动窗口（默认保留最近 3 个 Part 原文）
+        self.window = SlidingWindow(window_size=3)
 
     def save(self, filepath: str = None):
         """保存状态到JSON文件"""
@@ -87,18 +95,81 @@ class StoryState:
 
     def get_part_context(self, part_num: int) -> str:
         """
-        获取当前Part的完整创作上下文（V3增强版）
+        获取当前Part的完整创作上下文。
 
-        包含：
-        1. 角色档案
-        2. 世界观
-        3. 伏笔表
-        4. 全部已完成Part的摘要
-        5. 上一Part的详细结尾（最后1200字，V3从800提升）
-        6. 当前剧情进度追踪
-        7. 角色状态快照（V3新增）
-        8. 关键事实清单（V3新增）
+        V6.1：委托给 SlidingWindow 组装；旧实现的"角色状态快照 +
+        关键事实 + 当前剧情进度"通过 extra_context_provider 注入，
+        确保行为平滑过渡。窗口失败时回退到旧实现，避免单点失败炸整链。
         """
+        # 把当前 parts / summaries 同步给窗口（兼容旧代码可能直接修改 state.parts）
+        try:
+            self._sync_window(part_num)
+            self.window.update_foreshadowing(self.foreshadowing or [])
+            self.window.update_character_state(self.character_state_track or {})
+
+            def _legacy_extras(pn: int) -> str:
+                """把旧实现的"角色状态快照 + 关键事实 + 当前剧情进度"注入"""
+                sections = []
+                if self.current_plot_state:
+                    sections.append(f"【当前剧情进度】{self.current_plot_state}")
+                    sections.append("")
+                completed_parts = sorted(
+                    [k for k in self.part_summaries.keys() if int(k) < pn]
+                )
+                if self.characters and completed_parts:
+                    char_states = self._build_character_state_snapshot(pn)
+                    if char_states:
+                        sections.append("【角色状态快照】")
+                        sections.append(char_states)
+                        sections.append("")
+                if completed_parts:
+                    key_facts = self._build_key_facts(pn)
+                    if key_facts:
+                        sections.append("【已确立的关键事实——不可违反】")
+                        sections.append(key_facts)
+                        sections.append("")
+                return "\n".join(sections)
+
+            return self.window.build(
+                part_num,
+                characters=self.characters,
+                world_setting=self.world_setting,
+                extra_context_provider=_legacy_extras,
+            )
+        except Exception:
+            # 回退到旧实现（窗口失败时保证主流程不挂）
+            return self._legacy_get_part_context(part_num)
+
+    def _sync_window(self, part_num: int) -> None:
+        """把 state.parts 中所有 < part_num 的原文灌入 SlidingWindow。"""
+        existing_in_window = set(self.window.parts.keys())
+        # 只灌入尚未在窗口里的 Part
+        for p_num in sorted(self.parts.keys()):
+            try:
+                p_int = int(p_num)
+            except (TypeError, ValueError):
+                continue
+            if p_int >= part_num:
+                continue
+            if p_int in existing_in_window:
+                continue
+            text = self.parts[p_num]
+            summary = self.part_summaries.get(p_num, "")
+            if not summary and text:
+                summary = text[:200] + ("..." if len(text) > 200 else "")
+            self.window.add_part(p_int, text, summary)
+
+        # 一级摘要也补齐（窗口淘汰后远端 Part 只剩摘要）
+        for p_num, summary in self.part_summaries.items():
+            try:
+                p_int = int(p_num)
+            except (TypeError, ValueError):
+                continue
+            if p_int < part_num and p_int not in self.window.summaries:
+                self.window.summaries[p_int] = summary
+
+    def _legacy_get_part_context(self, part_num: int) -> str:
+        """保留的旧实现，作为滑动窗口失败时的回退路径（V3增强版）。"""
         parts = []
 
         # 1. 角色档案

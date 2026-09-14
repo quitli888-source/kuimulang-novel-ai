@@ -61,6 +61,7 @@ _NO_JSON_FORMAT_MODELS = (
     "qwen",
     "glm",
     "ernie",
+    "step",           # step-3.7-flash 暂按保守策略走 prompt 引导，避免协议差异
 )
 
 # 运行时缓存：模型名 -> 是否支持

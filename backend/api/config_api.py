@@ -27,9 +27,10 @@ router = APIRouter()
 def list_providers():
     """返回所有预设LLM供应商（带API Key填写状态和用户自定义模型配置）"""
     providers = get_all_providers()
-    
+
     # 为每个供应商读取用户可能自定义的模型配置
     model_key_map = {
+        "step": ("STEP_MODEL", "STEP_JSON_MODEL"),
         "minimax": ("MINIMAX_MODEL", "MINIMAX_JSON_MODEL"),
         "deepseek": ("DEEPSEEK_MODEL", "DEEPSEEK_JSON_MODEL"),
         "openai": ("OPENAI_MODEL", "OPENAI_JSON_MODEL"),
@@ -83,6 +84,7 @@ def update_provider_config(provider_id: str, req: ProviderConfigUpdate):
     - Base URL（仅自定义LLM）
     """
     key_map = {
+        "step": "STEP_API_KEY",
         "minimax": "MINIMAX_API_KEY",
         "deepseek": "DEEPSEEK_API_KEY",
         "openai": "OPENAI_API_KEY",
@@ -96,17 +98,19 @@ def update_provider_config(provider_id: str, req: ProviderConfigUpdate):
     if req.api_key:
         write_env(key_map[provider_id], req.api_key)
         print(f"[PUT] 供应商 {provider_id} API Key已更新")
-    
+
     # 对于所有供应商，都支持写入模型配置
     model_key_map = {
+        "step": "STEP_MODEL",
         "minimax": "MINIMAX_MODEL",
         "deepseek": "DEEPSEEK_MODEL",
         "openai": "OPENAI_MODEL",
         "siliconflow": "SILICONFLOW_MODEL",
         "custom": "CUSTOM_LLM_MODEL",
     }
-    
+
     json_model_key_map = {
+        "step": "STEP_JSON_MODEL",
         "minimax": "MINIMAX_JSON_MODEL",
         "deepseek": "DEEPSEEK_JSON_MODEL",
         "openai": "OPENAI_JSON_MODEL",
@@ -239,6 +243,15 @@ def update_llm_config_legacy(req: LLMConfigUpdateLegacy):
         write_env("OPENAI_MODEL", req.model)
     if req.json_model:
         write_env("OPENAI_JSON_MODEL", req.json_model)
+
+    # 同步写入 step_* 模型键（保持与 step 供应商模型键一致）
+    if provider_id == "step":
+        if req.model:
+            write_env("STEP_MODEL", req.model)
+        if req.json_model:
+            write_env("STEP_JSON_MODEL", req.json_model)
+        if req.base_url:
+            write_env("STEP_BASE_URL", req.base_url)
 
     from core import llm_client as llm_client_module
     llm_client_module._client_cache.clear()

@@ -257,14 +257,15 @@ async function resumeWriting() {
 async function confirmAction(choice) {
   showConfirm.value = false
   try {
-    await api.post('/works/writing/confirm', { work_id: workId, choice })
+    // 与后端 /api/writing/confirm 对齐（backend/api/writing.py + works.py）
+    await api.post('/writing/confirm', { work_id: workId, choice })
     console.log(`[Frontend] 确认选择已发送: ${choice}`)
   } catch (err) {
     console.error('[Frontend] 发送确认选择失败:', err)
-    logs.value.push({ 
-      time: new Date().toLocaleTimeString('zh-CN'), 
-      msg: `❌ 发送确认失败: ${err.message}`, 
-      type: 'error' 
+    logs.value.push({
+      time: new Date().toLocaleTimeString('zh-CN'),
+      msg: `❌ 发送确认失败: ${err.message}`,
+      type: 'error'
     })
   }
 }

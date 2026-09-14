@@ -78,17 +78,17 @@ def delete_env(key: str):
 class LLMConfig:
     """LLM配置（对应.env中的MINIMAX_API_KEY等）"""
     api_key: str = ""
-    base_url: str = "https://api.minimax.io"
-    model: str = "MiniMax-Text-01"
-    json_model: str = "MiniMax-Text-01"
+    base_url: str = "https://api.stepfun.com/v1"
+    model: str = "step-3.7-flash"
+    json_model: str = "step-3.7-flash"
 
     @classmethod
     def from_env(cls) -> "LLMConfig":
         return cls(
-            api_key=read_env("MINIMAX_API_KEY", ""),
-            base_url=read_env("OPENAI_BASE_URL", "https://api.minimax.io"),
-            model=read_env("OPENAI_MODEL", "MiniMax-Text-01"),
-            json_model=read_env("OPENAI_JSON_MODEL", "MiniMax-Text-01"),
+            api_key=read_env("STEP_API_KEY", "") or read_env("MINIMAX_API_KEY", ""),
+            base_url=read_env("OPENAI_BASE_URL", "https://api.stepfun.com/v1"),
+            model=read_env("OPENAI_MODEL", "step-3.7-flash"),
+            json_model=read_env("OPENAI_JSON_MODEL", "step-3.7-flash"),
         )
 
     def to_dict(self) -> dict:

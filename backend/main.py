@@ -202,7 +202,8 @@ async def config_post_no_slash(request: Request):
 @app.post("/writing/confirm")
 async def writing_confirm_no_slash(request: Request):
     from starlette.responses import RedirectResponse
-    return RedirectResponse(url="/api/writing/confirm/", status_code=307)
+    # V6.1: confirm 端点已迁移至 api/writing.py，保持向后兼容重定向
+    return RedirectResponse(url="/api/writing/confirm", status_code=307)
 
 # 前端SPA fallback
 @app.get("/{path:path}")

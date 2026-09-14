@@ -216,9 +216,9 @@ export const useWritingStore = defineStore('writing', {
     // 确认操作
     confirmAction(proceed) {
       this.showConfirm = false
-      // 通过API通知后端
+      // V6.1: 与后端 /api/writing/confirm 对齐（works.py 已迁移至 writing.py）
       if (proceed && this.currentWorkId) {
-        api.post(`/writing/confirm/${this.currentWorkId}`, { action: 'proceed' }).catch(() => {})
+        api.post(`/writing/confirm`, { work_id: this.currentWorkId, choice: 'proceed' }).catch(() => {})
       }
     },
 
@@ -233,7 +233,7 @@ export const useWritingStore = defineStore('writing', {
       }
     },
 
-    // 初始化SSE连接
+    // 初始化SSE连接（带指数退避自动重连）
     initSSE(workId) {
       // 关闭已有连接
       this.closeSSE()
@@ -241,33 +241,80 @@ export const useWritingStore = defineStore('writing', {
       this.setSSEStatus(SSE_STATUS.CONNECTING)
       this.currentWorkId = workId
 
-      const eventSource = new EventSource(`/api/sse/stream?work_id=${workId}`)
-      this.eventSource = eventSource
-
-      eventSource.onopen = () => {
-        this.setSSEStatus(SSE_STATUS.CONNECTED)
-        this.addLog('SSE连接已建立', 'info')
+      // V6.1: 指数退避重连状态
+      const reconnectState = {
+        attempts: 0,
+        maxDelayMs: 30000,     // 单次最长 30s
+        baseDelayMs: 1000,     // 起始 1s
+        timer: null,
+        stopped: false,
       }
 
-      eventSource.onerror = () => {
-        this.setSSEStatus(SSE_STATUS.ERROR)
-        this.addLog('SSE连接错误', 'error')
-      }
+      const connect = () => {
+        if (reconnectState.stopped) return
+        const eventSource = new EventSource(`/api/sse/stream?work_id=${workId}`)
+        this.eventSource = eventSource
 
-      eventSource.onmessage = (e) => {
-        try {
-          const ev = JSON.parse(e.data)
-          this.handleSSEEvent(ev)
-        } catch (err) {
-          console.error('[WritingStore] Failed to parse SSE event:', err)
+        eventSource.onopen = () => {
+          // 成功连接，重置重试计数
+          reconnectState.attempts = 0
+          this.setSSEStatus(SSE_STATUS.CONNECTED)
+          this.addLog('SSE连接已建立', 'info')
+        }
+
+        eventSource.onerror = () => {
+          if (reconnectState.stopped) return
+          // 标记错误状态，准备重连
+          this.setSSEStatus(SSE_STATUS.ERROR)
+          this.addLog('SSE连接错误，准备重连...', 'error')
+
+          // 先关闭当前连接（浏览器会自动重试，但我们要自己控制节奏）
+          try { eventSource.close() } catch (e) { /* ignore */ }
+          if (this.eventSource === eventSource) {
+            this.eventSource = null
+          }
+
+          // 计算下一次重连延迟：1s, 2s, 4s, 8s, ... 上限 30s
+          reconnectState.attempts += 1
+          const delay = Math.min(
+            reconnectState.maxDelayMs,
+            reconnectState.baseDelayMs * Math.pow(2, reconnectState.attempts - 1)
+          )
+          this.addLog(
+            `SSE将在 ${(delay / 1000).toFixed(1)}s 后第 ${reconnectState.attempts} 次重连`,
+            'info'
+          )
+          reconnectState.timer = setTimeout(connect, delay)
+        }
+
+        eventSource.onmessage = (e) => {
+          try {
+            const ev = JSON.parse(e.data)
+            this.handleSSEEvent(ev)
+          } catch (err) {
+            console.error('[WritingStore] Failed to parse SSE event:', err)
+          }
         }
       }
 
-      return eventSource
+      connect()
+
+      // 把 stop 控制器挂到实例上，closeSSE 时可以彻底停掉重连
+      this._sseReconnectState = reconnectState
+
+      return this.eventSource
     },
 
     // 关闭SSE连接
     closeSSE() {
+      // V6.1: 停止重连定时器
+      if (this._sseReconnectState) {
+        this._sseReconnectState.stopped = true
+        if (this._sseReconnectState.timer) {
+          clearTimeout(this._sseReconnectState.timer)
+        }
+        this._sseReconnectState = null
+      }
       if (this.eventSource) {
         this.eventSource.close()
         this.eventSource = null

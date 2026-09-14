@@ -1,6 +1,6 @@
 """
 番茄小说AI创作系统 V5 - LLM供应商配置
-支持 MiniMax / DeepSeek / OpenAI / SiliconFlow
+支持 MiniMax / DeepSeek / OpenAI / SiliconFlow / Step-3.7-Flash
 """
 from dataclasses import dataclass, field, asdict
 from typing import Optional
@@ -10,7 +10,7 @@ from typing import Optional
 @dataclass
 class LLMProvider:
     """单个LLM供应商配置"""
-    id: str           # "minimax" / "deepseek" / "openai" / "siliconflow"
+    id: str           # "minimax" / "deepseek" / "openai" / "siliconflow" / "step"
     name: str         # 显示名
     api_key_name: str # .env中的变量名
     base_url: str     # 默认API地址
@@ -22,6 +22,14 @@ class LLMProvider:
 
 # 预设供应商列表（供前端下拉框使用）
 PRESET_PROVIDERS = [
+    LLMProvider(
+        id="step",
+        name="Step-3.7-Flash",
+        api_key_name="STEP_API_KEY",
+        base_url="https://api.stepfun.com/v1",
+        model="step-3.7-flash",
+        json_model="step-3.7-flash",
+    ),
     LLMProvider(
         id="minimax",
         name="MiniMax（推荐）",
@@ -93,19 +101,19 @@ class ActiveLLMConfig:
     支持单个主供应商（所有Agent共用）或每个Agent独立配置
     """
     # 当前选中的供应商ID
-    active_provider_id: str = "minimax"
+    active_provider_id: str = "step"
 
     # 每个Agent是否使用独立供应商（默认False，所有Agent共用active_provider_id）
     per_agent_enabled: bool = False
 
     # 当 per_agent_enabled=True 时，每个Agent的供应商ID
     agent_providers: dict = field(default_factory=lambda: {
-        "plot_planner": "minimax",
-        "part_writer": "minimax",
-        "style_optimizer": "minimax",
-        "emotion_review": "minimax",
-        "logic_review": "minimax",
-        "consistency_review": "minimax",
+        "plot_planner": "step",
+        "part_writer": "step",
+        "style_optimizer": "step",
+        "emotion_review": "step",
+        "logic_review": "step",
+        "consistency_review": "step",
     })
 
     # 全局温度（当per_agent_enabled=False时所有Agent使用此温度）

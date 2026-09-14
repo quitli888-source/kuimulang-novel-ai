@@ -16,11 +16,12 @@ from core.config import get_app_config, MEMORY_DIR
 from core.progress_manager import progress_manager
 from core.error_handler import error_handler, ErrorType
 from core.memory_manager import get_all_memory
+from core.sliding_window import SlidingWindow
 
 
 class TempStoryState:
     """临时故事状态类，用于构建 PartWriterAgent 所需的上下文"""
-    
+
     def __init__(self, data, memory=None):
         self.inspiration = data.get("inspiration", "")
         self.core_elements = data.get("core_elements", {})
@@ -34,9 +35,62 @@ class TempStoryState:
         self.current_plot_state = data.get("current_plot_state", "")
         self.character_state_track = data.get("character_state_track", {})
         self.memory = memory
+        # V6.1: 真正的滑动窗口（最近 3 个 Part 原文 + 远端三级摘要）
+        self.window = SlidingWindow(window_size=3)
 
     def get_part_context(self, part_num):
-        """获取指定部分的上下文信息"""
+        """获取指定部分的上下文信息（V6.1：委托给 SlidingWindow，失败回退旧实现）"""
+        try:
+            # 同步 data 中已存在的 Part 到窗口
+            self._sync_window(part_num)
+            self.window.update_foreshadowing(self.foreshadowing or [])
+            self.window.update_character_state(self.character_state_track or {})
+
+            def _legacy_extras(pn: int) -> str:
+                sections = []
+                if self.current_plot_state:
+                    sections.append(f"【当前剧情进度】{self.current_plot_state}")
+                    sections.append("")
+                return "\n".join(sections)
+
+            return self.window.build(
+                part_num,
+                characters=self.characters,
+                world_setting=self.world_setting,
+                extra_context_provider=_legacy_extras,
+            )
+        except Exception:
+            return self._legacy_get_part_context(part_num)
+
+    def _sync_window(self, part_num: int) -> None:
+        """把 self.parts 中 < part_num 的所有 Part 灌入窗口。"""
+        existing_in_window = set(self.window.parts.keys())
+        for p_key in list(self.parts.keys()):
+            try:
+                p_int = int(p_key)
+            except (TypeError, ValueError):
+                continue
+            if p_int >= part_num:
+                continue
+            if p_int in existing_in_window:
+                continue
+            text = self.parts[p_key]
+            summary = self.part_summaries.get(p_key) or (
+                text[:200] + ("..." if len(text) > 200 else "")
+            )
+            self.window.add_part(p_int, text, summary)
+
+        # 远端 Part 的一级摘要补齐
+        for p_key, summary in self.part_summaries.items():
+            try:
+                p_int = int(p_key)
+            except (TypeError, ValueError):
+                continue
+            if p_int < part_num and p_int not in self.window.summaries:
+                self.window.summaries[p_int] = summary
+
+    def _legacy_get_part_context(self, part_num):
+        """保留的旧实现，作为滑动窗口失败时的回退路径。"""
         parts = []
 
         # 角色档案
@@ -479,6 +533,18 @@ class WritingService:
                 summary = part_text[:200] + "..." if len(part_text) > 200 else part_text
                 self.data["part_summaries"][str(i)] = summary
 
+                # V6.1: 把新 Part 写入滑动窗口（下一 Part 自动滚动）
+                try:
+                    temp_state.window.add_part(i, part_text, summary)
+                    temp_state.window.update_foreshadowing(
+                        self.data.get("foreshadowing", []) or []
+                    )
+                    temp_state.window.update_character_state(
+                        self.data.get("character_state_track", {}) or {}
+                    )
+                except Exception as win_err:
+                    print(f"[WritingService] SlidingWindow.add_part 失败（不影响主流程）: {win_err}")
+
                 word_count = len(part_text)
 
             except Exception as e:
@@ -607,10 +673,17 @@ class WritingService:
 
             # 保存终稿
             self.data["final_draft"] = self.data.get("parts", {})
+            # V6.1: review_report 同时输出两种形态——
+            #   1) 顶层 {logic, emotion, consistency} 摘要（向后兼容旧前端）
+            #   2) parts: [{part, logic_score, emotion_score, consistency_score, p0_issues, p1_issues}]
+            #      数组（新前端 Report.vue 期望的形态）
             self.data["review_report"] = {
                 "logic": logic_result,
                 "emotion": emotion_result,
                 "consistency": consistency_result,
+                "parts": self._build_review_parts_list(
+                    logic_result, emotion_result, consistency_result
+                ),
             }
             self.data["phase"] = "phase4"
 
@@ -667,3 +740,91 @@ class WritingService:
     def _save(self):
         """保存作品数据"""
         self.work_path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _build_review_parts_list(logic_result, emotion_result, consistency_result) -> list:
+        """
+        把三类评审结果归一化为按 Part 排序的列表，供前端 Report.vue 使用。
+
+        输入：三个 review agent 返回的 dict（结构可能差异很大）
+        输出：[{"part": 1, "logic_score": 8.0, "emotion_score": 7.5,
+               "consistency_score": 9.0, "p0_issues": [...], "p1_issues": [...]}, ...]
+        """
+        def _extract_per_part(result: dict) -> dict:
+            """从单个 agent 的返回里挑出 per_part 字段（兼容多种命名）。"""
+            if not isinstance(result, dict):
+                return {}
+            for key in ("per_part", "parts", "part_results", "by_part"):
+                if key in result and isinstance(result[key], (list, dict)):
+                    return result[key]
+            return {}
+
+        def _coerce_score(value, default: float = 0.0) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _coerce_issues(value) -> list:
+            if isinstance(value, list):
+                return value
+            if isinstance(value, dict):
+                return [value]
+            return []
+
+        parts_indexed = {}
+
+        def _merge_part(entry, label: str) -> None:
+            if not isinstance(entry, dict):
+                return
+            # 提取 Part 编号（兼容 int / 字符串字段）
+            p_num = entry.get("part") or entry.get("part_num") or entry.get("index")
+            try:
+                p_num = int(p_num)
+            except (TypeError, ValueError):
+                return
+            slot = parts_indexed.setdefault(p_num, {
+                "part": p_num,
+                "logic_score": 0.0,
+                "emotion_score": 0.0,
+                "consistency_score": 0.0,
+                "p0_issues": [],
+                "p1_issues": [],
+            })
+            # 评分字段（多种命名）
+            score_keys_map = {
+                "logic": ("logic_score", "score", "logic"),
+                "emotion": ("emotion_score", "score", "emotion"),
+                "consistency": ("consistency_score", "score", "consistency"),
+            }
+            keys = score_keys_map.get(label, ("score",))
+            for k in keys:
+                if k in entry and entry[k] is not None:
+                    slot[f"{label}_score"] = _coerce_score(entry[k], slot[f"{label}_score"])
+                    break
+            # 问题列表
+            for issue_key in ("p0_issues", "p0", "critical_issues"):
+                if issue_key in entry and entry[issue_key]:
+                    slot["p0_issues"].extend(_coerce_issues(entry[issue_key]))
+                    break
+            for issue_key in ("p1_issues", "p1", "major_issues"):
+                if issue_key in entry and entry[issue_key]:
+                    slot["p1_issues"].extend(_coerce_issues(entry[issue_key]))
+                    break
+
+        for label, result in (
+            ("logic", logic_result),
+            ("emotion", emotion_result),
+            ("consistency", consistency_result),
+        ):
+            per_part = _extract_per_part(result)
+            if isinstance(per_part, list):
+                for entry in per_part:
+                    _merge_part(entry, label)
+            elif isinstance(per_part, dict):
+                # {part_num: entry} 形态
+                for entry in per_part.values():
+                    _merge_part(entry, label)
+
+        # 按 Part 编号排序
+        return [parts_indexed[k] for k in sorted(parts_indexed.keys())]

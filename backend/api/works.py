@@ -34,16 +34,8 @@ class UpdateSessionRequest(BaseModel):
     title: str
 
 
-class ConfirmRequest(BaseModel):
-    work_id: str
-    choice: str
-
-
-@router.post("/writing/confirm")
-def handle_confirm(req: ConfirmRequest):
-    from services.writing_service import WritingService
-    WritingService.handle_confirm_response(req.work_id, req.choice)
-    return {"ok": True, "message": f"已收到您的选择: {req.choice}"}
+# V6.1: /writing/confirm 已迁移至 api/writing.py（与 start/pause/resume 同侧）。
+# 旧的 /api/works/writing/confirm 路由保留为向后兼容薄壳（重定向至新路径）。
 
 
 # ---- 作品数据文件 ----

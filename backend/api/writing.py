@@ -105,3 +105,18 @@ async def rewrite_part(work_id: str, part_num: int, background_tasks: Background
 
     background_tasks.add_task(run)
     return {"status": "rewriting", "part": part_num}
+
+
+# ---- 确认响应（手动确认模式）----
+# V6.1: 与其它创作端点统一放在 writing.py，避免前后端路径错位。
+class _ConfirmRequest(BaseModel):
+    work_id: str
+    choice: str
+
+
+@router.post("/confirm")
+def writing_confirm(req: _ConfirmRequest):
+    """处理用户对 phase / part 完成提示的确认选择"""
+    from services.writing_service import WritingService
+    WritingService.handle_confirm_response(req.work_id, req.choice)
+    return {"ok": True, "message": f"已收到您的选择: {req.choice}"}
