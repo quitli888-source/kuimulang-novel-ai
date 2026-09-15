@@ -37,10 +37,12 @@ print(f"大纲: 复用 R11（已验证 4 阶段叙事弧完整）")
 
 # 加载 STEP_API_KEY
 NEW_KEY = 'dfJjLgI755TGpRvd4YKCg1C2BYcubVn9MRfYZgvAS7BfWXYcCszGUCbecFwsfKuv'
+STEP_PLAN_BASE_URL = 'https://api.stepfun.com/step_plan/v1'
 os.environ['STEP_API_KEY'] = NEW_KEY
+os.environ['STEP_BASE_URL'] = STEP_PLAN_BASE_URL
 with open('.env', 'w', encoding='utf-8') as f:
-    f.write(f"STEP_API_KEY={NEW_KEY}\nSTEP_BASE_URL=https://api.stepfun.com/v1\nSTEP_MODEL=step-3.7-flash\nSTEP_JSON_MODEL=step-3.7-flash\n")
-print(f"✓ .env 已更新为新 API key")
+    f.write(f"STEP_API_KEY={NEW_KEY}\nSTEP_BASE_URL={STEP_PLAN_BASE_URL}\nSTEP_MODEL=step-3.7-flash\nSTEP_JSON_MODEL=step-3.7-flash\n")
+print(f"✓ .env 已更新为新 API key + step_plan endpoint")
 
 
 class State:

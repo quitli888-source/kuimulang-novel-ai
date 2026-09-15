@@ -26,7 +26,7 @@ PRESET_PROVIDERS = [
         id="step",
         name="Step-3.7-Flash",
         api_key_name="STEP_API_KEY",
-        base_url="https://api.stepfun.com/v1",
+        base_url="https://api.stepfun.com/step_plan/v1",
         model="step-3.7-flash",
         json_model="step-3.7-flash",
     ),

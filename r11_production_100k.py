@@ -187,7 +187,7 @@ with open('.env', 'w', encoding='utf-8') as f:
 # 奎木狼AI小说创作系统 V7 - 配置文件
 # ============================================================
 STEP_API_KEY={NEW_KEY}
-STEP_BASE_URL=https://api.stepfun.com/v1
+STEP_BASE_URL=https://api.stepfun.com/step_plan/v1
 STEP_MODEL=step-3.7-flash
 STEP_JSON_MODEL=step-3.7-flash
 """)
