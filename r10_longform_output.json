@@ -1,0 +1,905 @@
+{
+  "parts": {
+    "1": "[Part 1生成失败: 'PartWriterAgent' object has no attribute '_get_foreshadow_for_part']",
+    "2": "[Part 2生成失败: 'PartWriterAgent' object has no attribute '_get_foreshadow_for_part']",
+    "3": "[Part 3生成失败: 'PartWriterAgent' object has no attribute '_get_foreshadow_for_part']",
+    "4": "[Part 4生成失败: 'PartWriterAgent' object has no attribute '_get_foreshadow_for_part']",
+    "5": "[Part 5生成失败: 'PartWriterAgent' object has no attribute '_get_foreshadow_for_part']",
+    "6": "[Part 6生成失败: 'PartWriterAgent' object has no attribute '_get_foreshadow_for_part']",
+    "7": "[Part 7生成失败: 'PartWriterAgent' object has no attribute '_get_foreshadow_for_part']",
+    "8": "[Part 8生成失败: 'PartWriterAgent' object has no attribute '_get_foreshadow_for_part']"
+  },
+  "review_results": {
+    "1": {
+      "LogicReviewAgent": {
+        "result": {
+          "score": 10,
+          "overall_score": 10,
+          "pass": true,
+          "p0_count": 0,
+          "p1_count": 0,
+          "p2_count": 0,
+          "issues": [],
+          "verdict": "首部无前文基线，跳过一致性",
+          "continuity_check": {
+            "character_states": "ok",
+            "timeline": "ok",
+            "established_facts": "ok"
+          },
+          "strengths": [],
+          "_protocol": "V5"
+        },
+        "duration": 3.176623821258545,
+        "success": true
+      },
+      "EmotionReviewAgent": {
+        "result": {
+          "pass": false,
+          "emotion_score": 1,
+          "resonance_score": 1,
+          "immersion_score": 1,
+          "emotion_target_met": false,
+          "emotion_curve": {
+            "start": "无有效内容，无情绪起伏",
+            "middle": "无有效内容，无情绪起伏",
+            "end": "无有效内容，无情绪起伏"
+          },
+          "highlights": [],
+          "weaknesses": [
+            "Part内容生成失败，无有效叙事文本，无法传递悬疑不安的情绪目标",
+            "缺乏角色情感、场景细节等基础情感表达要素，读者无法代入"
+          ],
+          "enhancement_suggestions": [
+            {
+              "location": "Part全文",
+              "current": "内容生成失败，无有效文本",
+              "suggested": "修复生成错误，补充开端阶段内容：1. 匿名包裹的细节描写（如磨损的牛皮纸信封、陌生的黑色邮戳、信封角落干涸的褐色痕迹）；2. 林枫收到包裹时的心理活动与细微反应（指尖的凉意、莫名的心跳加速、拆封时的犹豫）；3. 前往旧宅路上的环境烘托（连绵的冷雨、昏黄的路灯、刮过耳畔的冷风）；4. 旧宅的外观与初步感知（爬满青藤的院墙、吱呀作响的院门、门缝里渗出的微弱暖光与腐朽气息）",
+              "expected_effect": "营造悬疑不安的开端氛围，让读者代入林枫的疑惑与隐隐的不安情绪，为后续剧情铺垫情绪基础"
+            }
+          ],
+          "verdict": "Part内容生成失败，无有效情感表达，未达成悬疑不安的情绪目标"
+        },
+        "duration": 8.882822036743164,
+        "success": true
+      },
+      "ConsistencyReviewAgent": {
+        "result": {
+          "pass": true,
+          "overall_score": 10,
+          "issues": [],
+          "character_states": {},
+          "verdict": "第一部分，无需检查"
+        },
+        "duration": 6.198883056640625e-06,
+        "success": true
+      }
+    },
+    "2": {
+      "LogicReviewAgent": {
+        "result": {
+          "score": 7,
+          "overall_score": 7,
+          "pass": true,
+          "p0_count": 0,
+          "p1_count": 0,
+          "p2_count": 0,
+          "issues": [],
+          "verdict": "前文无有效基线，无逻辑矛盾，默认通过",
+          "continuity_check": {
+            "character_states": "ok",
+            "timeline": "ok",
+            "established_facts": "ok"
+          },
+          "strengths": [],
+          "_protocol": "V5"
+        },
+        "duration": 4.584115982055664,
+        "success": true
+      },
+      "EmotionReviewAgent": {
+        "result": {
+          "pass": false,
+          "emotion_score": 1,
+          "resonance_score": 1,
+          "immersion_score": 1,
+          "emotion_target_met": false,
+          "emotion_curve": {
+            "start": "无有效内容，无法判断",
+            "middle": "无有效内容，无法判断",
+            "end": "无有效内容，无法判断"
+          },
+          "highlights": [],
+          "weaknesses": [
+            "Part2生成失败，无有效叙事内容，无法承载情感表达与情绪目标"
+          ],
+          "enhancement_suggestions": [
+            {
+              "location": "全文",
+              "current": "无有效生成内容，仅返回生成失败报错",
+              "suggested": "修复PartWriterAgent的生成故障，输出包含林枫在旧宅发现红字暗号、与旧书商老板娘接头的完整叙事文本",
+              "expected_effect": "具备可评估的情感表达基础，能够尝试达成紧张的情绪目标"
+            }
+          ],
+          "verdict": "因Part2生成失败无有效内容，情感效果无法评估，需先完成章节内容生成"
+        },
+        "duration": 10.038544654846191,
+        "success": true
+      },
+      "ConsistencyReviewAgent": {
+        "result": {
+          "pass": true,
+          "overall_score": 10,
+          "issues": [],
+          "character_states": {
+            "林枫": "前刑警，三年前停职，执拗敏锐，正追查三年前搭档失踪案，曾收到搭档匿名警告",
+            "沈渊": "原刑侦队长，冷静缜密，三年前失踪为主动安排，已潜伏在犯罪组织内部三年",
+            "陈锋": "犯罪组织执行官，狠辣狡诈，以维护组织利益、灭口所有知情者为动机，组织头目为其亲哥哥"
+          },
+          "verdict": "因Part1、Part2均生成失败，无有效剧情内容，未发现角色一致性冲突"
+        },
+        "duration": 5.628327369689941,
+        "success": true
+      }
+    },
+    "3": {
+      "LogicReviewAgent": {
+        "result": {
+          "score": 7,
+          "overall_score": 7,
+          "pass": true,
+          "p0_count": 0,
+          "p1_count": 0,
+          "p2_count": 0,
+          "issues": [],
+          "verdict": "前文无有效基线，无逻辑矛盾",
+          "continuity_check": {
+            "character_states": "ok",
+            "timeline": "ok",
+            "established_facts": "ok"
+          },
+          "strengths": [],
+          "_protocol": "V5"
+        },
+        "duration": 3.7985997200012207,
+        "success": true
+      },
+      "EmotionReviewAgent": {
+        "result": {
+          "pass": false,
+          "emotion_score": 1,
+          "resonance_score": 1,
+          "immersion_score": 1,
+          "emotion_target_met": false,
+          "emotion_curve": {
+            "start": "无有效内容",
+            "middle": "无有效内容",
+            "end": "无有效内容"
+          },
+          "highlights": [],
+          "weaknesses": [
+            "Part3正文内容生成失败，无有效叙事内容支撑情感表达",
+            "缺乏角色情感、场景细节等必要情感要素，无法构建情感共鸣"
+          ],
+          "enhancement_suggestions": [
+            {
+              "location": "全文",
+              "current": "无有效内容",
+              "suggested": "补充完整的林枫潜入钟楼地下库房、发现三年前封存案卷的完整叙事，包含角色潜入时的紧张心理、钟楼环境的感官细节、发现案卷时的震撼情绪释放",
+              "expected_effect": "构建完整的情感起伏脉络，达成震撼的情绪目标，提升读者代入感与共鸣效果"
+            }
+          ],
+          "verdict": "因Part3内容生成失败，无有效情感表达，完全无法达成预设的震撼情绪目标"
+        },
+        "duration": 7.432620048522949,
+        "success": true
+      },
+      "ConsistencyReviewAgent": {
+        "result": {
+          "pass": true,
+          "overall_score": 10,
+          "issues": [],
+          "character_states": {
+            "林枫": "前刑警，三年前停职，执拗敏锐，追查三年前搭档失踪案，曾收到搭档匿名警告，因无Part3有效正文，无额外状态信息",
+            "沈渊": "原刑侦队长，三年前失踪为主动安排，已潜伏犯罪组织内部三年，冷静缜密，因无Part3有效正文，无额外状态信息",
+            "陈锋": "组织执行官，狠辣狡诈，为维护组织利益灭口知情者，系组织头目亲弟弟，因无Part3有效正文，无额外状态信息"
+          },
+          "verdict": "因Part1至Part3均生成失败，无有效正文内容可开展角色一致性核查，未发现角色不一致问题。"
+        },
+        "duration": 7.79092264175415,
+        "success": true
+      }
+    },
+    "4": {
+      "LogicReviewAgent": {
+        "result": {
+          "score": 7,
+          "overall_score": 7,
+          "pass": true,
+          "p0_count": 0,
+          "p1_count": 0,
+          "p2_count": 0,
+          "issues": [],
+          "verdict": "前文无有效基线，无逻辑矛盾",
+          "continuity_check": {
+            "character_states": "ok",
+            "timeline": "ok",
+            "established_facts": "ok"
+          },
+          "strengths": [],
+          "_protocol": "V5"
+        },
+        "duration": 4.866605043411255,
+        "success": true
+      },
+      "EmotionReviewAgent": {
+        "result": {
+          "pass": false,
+          "emotion_score": 1,
+          "resonance_score": 1,
+          "immersion_score": 1,
+          "emotion_target_met": false,
+          "emotion_curve": {
+            "start": "无有效内容",
+            "middle": "无有效内容",
+            "end": "无有效内容"
+          },
+          "highlights": [],
+          "weaknesses": [
+            "Part4内容生成失败，无有效叙事文本，无法承载情感表达与情绪传递"
+          ],
+          "enhancement_suggestions": [
+            {
+              "location": "Part4整体内容",
+              "current": "内容生成失败，无可用正文",
+              "suggested": "修复内容生成逻辑，输出完整的陈锋带人追杀林枫至废弃码头、林枫险些被俘的叙事内容",
+              "expected_effect": "具备可评估的情感表达基础，能够达成恐惧绝望的情绪目标，实现相应情感效果"
+            }
+          ],
+          "verdict": "Part4内容生成失败，无有效情感表达，无法达成预期恐惧绝望的情绪目标"
+        },
+        "duration": 8.265985488891602,
+        "success": true
+      },
+      "ConsistencyReviewAgent": {
+        "result": {
+          "pass": false,
+          "overall_score": 0,
+          "issues": [
+            {
+              "level": "P0",
+              "dimension": "无有效内容可核查",
+              "character": "全体角色",
+              "location": "Part4及前序Part1-3",
+              "description": "Part1至Part4均生成失败，无实际角色剧情内容，无法判断角色名称、状态、知识、性格、关系的一致性",
+              "suggestion": "请补充生成完整的Part1至Part4正文内容后，重新提交角色一致性检查请求"
+            }
+          ],
+          "character_states": {
+            "林枫": "前刑警，三年前停职，特质执拗敏锐，当前动机为追查三年前搭档失踪案，曾收到搭档匿名警告",
+            "沈渊": "原刑侦队长，特质冷静缜密，已潜伏犯罪组织内部三年，三年前失踪为主动安排",
+            "陈锋": "犯罪组织执行官，特质狠辣狡诈，动机为维护组织利益灭口所有知情者，秘密为组织头目是其亲哥哥"
+          },
+          "verdict": "因所有Part均生成失败，无实际剧情内容，无法完成角色一致性检查，需补充完整内容后重新核查"
+        },
+        "duration": 9.526714086532593,
+        "success": true
+      }
+    },
+    "5": {
+      "LogicReviewAgent": {
+        "result": {
+          "score": 7,
+          "overall_score": 7,
+          "pass": true,
+          "p0_count": 0,
+          "p1_count": 0,
+          "p2_count": 0,
+          "issues": [],
+          "verdict": "前文无有效基线，默认通过",
+          "continuity_check": {
+            "character_states": "ok",
+            "timeline": "ok",
+            "established_facts": "ok"
+          },
+          "strengths": [],
+          "_protocol": "V5"
+        },
+        "duration": 5.817009925842285,
+        "success": true
+      },
+      "EmotionReviewAgent": {
+        "result": {
+          "pass": false,
+          "emotion_score": 1,
+          "resonance_score": 1,
+          "immersion_score": 1,
+          "emotion_target_met": false,
+          "emotion_curve": {
+            "start": "无有效内容，无法判断",
+            "middle": "无有效内容，无法判断",
+            "end": "无有效内容，无法判断"
+          },
+          "highlights": [],
+          "weaknesses": [
+            "Part5生成失败，无实际正文内容，完全无法支撑情感表达与读者共鸣"
+          ],
+          "enhancement_suggestions": [
+            {
+              "location": "整体Part5内容",
+              "current": "无有效正文（生成失败，返回错误信息）",
+              "suggested": "修复PartWriterAgent的生成错误，输出完整的搭档重逢相关剧情正文",
+              "expected_effect": "获得可评估的情感内容基础，进而分析情感冲击力与共鸣效果"
+            }
+          ],
+          "verdict": "因Part5生成失败无有效内容，情感效果完全缺失，属于内容生成失败导致的评估不通过"
+        },
+        "duration": 8.567824363708496,
+        "success": true
+      },
+      "ConsistencyReviewAgent": {
+        "result": {
+          "pass": true,
+          "overall_score": 10,
+          "issues": [],
+          "character_states": {
+            "林枫": "前刑警，三年前停职，特质执拗敏锐，动机为追查三年前搭档失踪案，无明确当前位置/身体/心理状态（因无实际剧情内容）",
+            "沈渊": "原刑侦队长，特质冷静缜密，三年前失踪为主动安排，潜伏在犯罪组织内部三年，无明确当前位置/身体/心理状态（因无实际剧情内容）",
+            "陈锋": "组织执行官，特质狠辣狡诈，动机为维护组织利益灭口知情者，组织头目为其亲哥哥，无明确当前位置/身体/心理状态（因无实际剧情内容）"
+          },
+          "verdict": "因Part5及前序所有部分均生成失败，无实际剧情内容可核查，角色一致性无冲突"
+        },
+        "duration": 6.911508321762085,
+        "success": true
+      }
+    },
+    "6": {
+      "LogicReviewAgent": {
+        "result": {
+          "score": 7,
+          "overall_score": 7,
+          "pass": true,
+          "p0_count": 0,
+          "p1_count": 0,
+          "p2_count": 0,
+          "issues": [],
+          "verdict": "前文均生成失败无基线，默认评分通过",
+          "continuity_check": {
+            "character_states": "ok",
+            "timeline": "ok",
+            "established_facts": "ok"
+          },
+          "strengths": [],
+          "_protocol": "V5"
+        },
+        "duration": 5.311640501022339,
+        "success": true
+      },
+      "EmotionReviewAgent": {
+        "result": {
+          "pass": false,
+          "emotion_score": 1,
+          "resonance_score": 1,
+          "immersion_score": 1,
+          "emotion_target_met": false,
+          "emotion_curve": {
+            "start": "无有效内容支撑",
+            "middle": "无有效内容支撑",
+            "end": "无有效内容支撑"
+          },
+          "highlights": [],
+          "weaknesses": [
+            "Part6正文生成失败，无实际可分析的情节与情感表达内容",
+            "缺乏角色情感刻画、场景细节与情绪起伏，无法支撑愤怒震惊的情绪目标"
+          ],
+          "enhancement_suggestions": [
+            {
+              "location": "全文",
+              "current": "无有效正文内容",
+              "suggested": "补充完整的Part6正文，包含二人回警署的过程铺垫、发现内鬼时的细节刻画、情绪爆发的高潮场景，调动视觉、听觉等感官细节增强代入感",
+              "expected_effect": "可有效达成愤怒震惊的情绪目标，提升情感共鸣与沉浸感"
+            }
+          ],
+          "verdict": "因Part6正文生成失败，无有效内容支撑情感评估，当前无法实现预期的情感效果"
+        },
+        "duration": 6.321192026138306,
+        "success": true
+      },
+      "ConsistencyReviewAgent": {
+        "result": {
+          "pass": true,
+          "overall_score": 10,
+          "issues": [],
+          "character_states": {
+            "林枫": "前刑警，三年前停职，特质执拗敏锐，当前正追查三年前搭档失踪案，曾收到搭档的匿名警告",
+            "沈渊": "原刑侦队长，三年前失踪为主动安排，当前已潜伏在犯罪组织内部三年，性格冷静缜密",
+            "陈锋": "犯罪组织执行官，特质狠辣狡诈，动机为维护组织利益、灭口所有知情者，秘密是组织头目为其亲哥哥"
+          },
+          "verdict": "因Part1至Part6均生成失败，无有效叙事内容，未检测到角色一致性问题"
+        },
+        "duration": 7.8235743045806885,
+        "success": true
+      }
+    },
+    "7": {
+      "LogicReviewAgent": {
+        "result": {
+          "score": 7,
+          "overall_score": 7,
+          "pass": true,
+          "p0_count": 0,
+          "p1_count": 0,
+          "p2_count": 0,
+          "issues": [],
+          "verdict": "前文均生成失败无有效基线，默认通过",
+          "continuity_check": {
+            "character_states": "ok",
+            "timeline": "ok",
+            "established_facts": "ok"
+          },
+          "strengths": [],
+          "_protocol": "V5"
+        },
+        "duration": 4.915698528289795,
+        "success": true
+      },
+      "EmotionReviewAgent": {
+        "result": {
+          "pass": false,
+          "emotion_score": 1,
+          "resonance_score": 1,
+          "immersion_score": 1,
+          "emotion_target_met": false,
+          "emotion_curve": {
+            "start": "无有效内容",
+            "middle": "无有效内容",
+            "end": "无有效内容"
+          },
+          "highlights": [],
+          "weaknesses": [
+            "Part生成失败，无有效正文内容，无法承载任何情感表达",
+            "缺失决战核心情节与人物情感互动，悲壮激昂的情绪目标完全无法达成",
+            "无任何感官描写与情绪铺垫，读者无法产生共鸣与沉浸感"
+          ],
+          "enhancement_suggestions": [
+            {
+              "location": "全文",
+              "current": "Part生成失败，无有效内容",
+              "suggested": "修复生成故障，补全林枫、沈渊与陈锋的钟楼顶层决战完整情节，明确人物动机与情感冲突",
+              "expected_effect": "为情感表达提供基础内容载体"
+            },
+            {
+              "location": "决战铺垫段",
+              "current": "无",
+              "suggested": "添加林枫与沈渊的过往羁绊回忆、陈锋的反派动机铺垫，渲染决战前的压抑氛围",
+              "expected_effect": "为后续悲壮高潮做情绪铺垫，增强读者代入感"
+            },
+            {
+              "location": "决战高潮段",
+              "current": "无",
+              "suggested": "补充钟声、寒风、兵刃碰撞声、血的气息等感官细节，设计角色牺牲或信念碰撞的悲壮高潮点",
+              "expected_effect": "实现悲壮激昂的情绪目标，增强情感冲击力与读者共鸣"
+            }
+          ],
+          "verdict": "Part生成失败无有效内容，情感效果完全缺失，需先修复内容生成问题，再通过情节铺垫、感官描写与高潮设计实现悲壮激昂的情绪目标"
+        },
+        "duration": 13.151489734649658,
+        "success": true
+      },
+      "ConsistencyReviewAgent": {
+        "result": {
+          "pass": true,
+          "overall_score": 10,
+          "issues": [],
+          "character_states": {
+            "林枫": "前刑警，三年前停职，执拗敏锐，正追查三年前搭档失踪案，曾收到搭档匿名警告",
+            "沈渊": "原刑侦队长，冷静缜密，已潜伏在犯罪组织内部三年，三年前失踪为主动安排",
+            "陈锋": "犯罪组织执行官，狠辣狡诈，以维护组织利益、灭口所有知情者为动机，组织头目为其亲哥哥"
+          },
+          "verdict": "因Part1至Part7均生成失败，无实际剧情内容可供核查，未发现角色一致性问题"
+        },
+        "duration": 8.914712905883789,
+        "success": true
+      }
+    },
+    "8": {
+      "LogicReviewAgent": {
+        "result": {
+          "score": 7,
+          "overall_score": 7,
+          "pass": true,
+          "p0_count": 0,
+          "p1_count": 0,
+          "p2_count": 0,
+          "issues": [],
+          "verdict": "前文无有效基线，Part8无正文，默认通过",
+          "continuity_check": {
+            "character_states": "ok",
+            "timeline": "ok",
+            "established_facts": "ok"
+          },
+          "strengths": [],
+          "_protocol": "V5"
+        },
+        "duration": 4.663402557373047,
+        "success": true
+      },
+      "EmotionReviewAgent": {
+        "result": {
+          "pass": false,
+          "emotion_score": 1,
+          "resonance_score": 1,
+          "immersion_score": 1,
+          "emotion_target_met": false,
+          "emotion_curve": {
+            "start": "无（内容缺失）",
+            "middle": "无（内容缺失）",
+            "end": "无（内容缺失）"
+          },
+          "highlights": [],
+          "weaknesses": [
+            "Part 8内容完全生成失败，无有效文本可承载情感表达",
+            "前文1-7Part均生成失败，无情感铺垫与脉络支撑"
+          ],
+          "enhancement_suggestions": [
+            {
+              "location": "PartWriterAgent代码层",
+              "current": "PartWriterAgent对象缺失_get_foreshadow_for_part属性，导致所有Part生成失败",
+              "suggested": "修复代码逻辑，补充缺失的属性方法，确保Part内容可正常生成",
+              "expected_effect": "解决内容缺失问题，为情感评估提供基础文本"
+            },
+            {
+              "location": "前文1-7Part内容",
+              "current": "前文所有Part均生成失败，无情感铺垫",
+              "suggested": "生成1-7Part的完整内容，构建完整的情感发展脉络，为Part8的悲而不伤情绪目标做铺垫",
+              "expected_effect": "建立连贯的情感基础，让Part8的情感表达有承接性"
+            },
+            {
+              "location": "Part8情节设计",
+              "current": "无有效内容",
+              "suggested": "设计具体情节：林枫踏入旧宅时触景生情的细节（如积灰的旧家具、院角的梧桐树），沈渊遗物中的私人物品（如未送出的信、磨损的钢笔），真相大白时林枫的情绪转变（从沉痛到释然，带着怅然的笑意），调动视觉、触觉、嗅觉等感官描写增强画面感",
+              "expected_effect": "实现悲而不伤的情绪目标，引发读者共鸣，提升情感冲击力与沉浸感"
+            }
+          ],
+          "verdict": "因Part内容完全生成失败，无有效情感表达，需先解决内容生成故障后再评估情感效果"
+        },
+        "duration": 12.8559889793396,
+        "success": true
+      },
+      "ConsistencyReviewAgent": {
+        "result": {
+          "pass": true,
+          "overall_score": 10,
+          "issues": [],
+          "character_states": {
+            "林枫": "前刑警，三年前停职，特质执拗敏锐，正追查三年前搭档失踪案，曾收到搭档匿名警告，因无有效正文内容无额外状态信息",
+            "沈渊": "原刑侦队长，特质冷静缜密，三年前失踪为主动安排，潜伏在犯罪组织内部三年，因无有效正文内容无额外状态信息",
+            "陈锋": "犯罪组织执行官，特质狠辣狡诈，动机为维护组织利益灭口所有知情者，秘密是组织头目为其亲哥哥，因无有效正文内容无额外状态信息"
+          },
+          "verdict": "因Part1至Part8均生成失败，无有效正文内容，未检测到角色一致性问题"
+        },
+        "duration": 5.700247764587402,
+        "success": true
+      }
+    }
+  },
+  "cost_summary": {
+    "total_calls": 23,
+    "total_tokens": 42932,
+    "prompt_tokens": 22136,
+    "completion_tokens": 20796,
+    "estimated_cost_rmb": 0.0158,
+    "estimated_cost": 0.0158,
+    "total_duration_ms": 153092.0,
+    "model_breakdown": {
+      "step-3.7-flash": 0.0158
+    },
+    "calls": [
+      {
+        "timestamp": 3.2,
+        "model": "step-3.7-flash",
+        "agent": "逻辑校验Agent",
+        "is_json": true,
+        "prompt_tokens": 1086,
+        "completion_tokens": 220,
+        "total_tokens": 1306,
+        "duration_ms": 2648.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 12.1,
+        "model": "step-3.7-flash",
+        "agent": "情感评估Agent",
+        "is_json": true,
+        "prompt_tokens": 704,
+        "completion_tokens": 1300,
+        "total_tokens": 2004,
+        "duration_ms": 8401.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 16.6,
+        "model": "step-3.7-flash",
+        "agent": "逻辑校验Agent",
+        "is_json": true,
+        "prompt_tokens": 1107,
+        "completion_tokens": 460,
+        "total_tokens": 1567,
+        "duration_ms": 4116.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 26.7,
+        "model": "step-3.7-flash",
+        "agent": "情感评估Agent",
+        "is_json": true,
+        "prompt_tokens": 734,
+        "completion_tokens": 1368,
+        "total_tokens": 2102,
+        "duration_ms": 9551.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 32.3,
+        "model": "step-3.7-flash",
+        "agent": "角色一致性检查Agent",
+        "is_json": true,
+        "prompt_tokens": 816,
+        "completion_tokens": 686,
+        "total_tokens": 1502,
+        "duration_ms": 5173.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 36.1,
+        "model": "step-3.7-flash",
+        "agent": "逻辑校验Agent",
+        "is_json": true,
+        "prompt_tokens": 1135,
+        "completion_tokens": 360,
+        "total_tokens": 1495,
+        "duration_ms": 3344.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 43.5,
+        "model": "step-3.7-flash",
+        "agent": "情感评估Agent",
+        "is_json": true,
+        "prompt_tokens": 761,
+        "completion_tokens": 914,
+        "total_tokens": 1675,
+        "duration_ms": 6975.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 51.3,
+        "model": "step-3.7-flash",
+        "agent": "角色一致性检查Agent",
+        "is_json": true,
+        "prompt_tokens": 844,
+        "completion_tokens": 1105,
+        "total_tokens": 1949,
+        "duration_ms": 7296.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 56.2,
+        "model": "step-3.7-flash",
+        "agent": "逻辑校验Agent",
+        "is_json": true,
+        "prompt_tokens": 1162,
+        "completion_tokens": 470,
+        "total_tokens": 1632,
+        "duration_ms": 4303.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 64.5,
+        "model": "step-3.7-flash",
+        "agent": "情感评估Agent",
+        "is_json": true,
+        "prompt_tokens": 788,
+        "completion_tokens": 1013,
+        "total_tokens": 1801,
+        "duration_ms": 7797.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 74.0,
+        "model": "step-3.7-flash",
+        "agent": "角色一致性检查Agent",
+        "is_json": true,
+        "prompt_tokens": 872,
+        "completion_tokens": 1300,
+        "total_tokens": 2172,
+        "duration_ms": 8884.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 79.8,
+        "model": "step-3.7-flash",
+        "agent": "逻辑校验Agent",
+        "is_json": true,
+        "prompt_tokens": 1187,
+        "completion_tokens": 502,
+        "total_tokens": 1689,
+        "duration_ms": 5116.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 88.4,
+        "model": "step-3.7-flash",
+        "agent": "情感评估Agent",
+        "is_json": true,
+        "prompt_tokens": 814,
+        "completion_tokens": 1033,
+        "total_tokens": 1847,
+        "duration_ms": 7852.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 95.3,
+        "model": "step-3.7-flash",
+        "agent": "角色一致性检查Agent",
+        "is_json": true,
+        "prompt_tokens": 900,
+        "completion_tokens": 843,
+        "total_tokens": 1743,
+        "duration_ms": 6313.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 100.6,
+        "model": "step-3.7-flash",
+        "agent": "逻辑校验Agent",
+        "is_json": true,
+        "prompt_tokens": 1219,
+        "completion_tokens": 509,
+        "total_tokens": 1728,
+        "duration_ms": 4855.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 106.9,
+        "model": "step-3.7-flash",
+        "agent": "情感评估Agent",
+        "is_json": true,
+        "prompt_tokens": 846,
+        "completion_tokens": 834,
+        "total_tokens": 1680,
+        "duration_ms": 5875.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 114.7,
+        "model": "step-3.7-flash",
+        "agent": "角色一致性检查Agent",
+        "is_json": true,
+        "prompt_tokens": 928,
+        "completion_tokens": 968,
+        "total_tokens": 1896,
+        "duration_ms": 7392.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 119.7,
+        "model": "step-3.7-flash",
+        "agent": "逻辑校验Agent",
+        "is_json": true,
+        "prompt_tokens": 1244,
+        "completion_tokens": 511,
+        "total_tokens": 1755,
+        "duration_ms": 4483.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 132.8,
+        "model": "step-3.7-flash",
+        "agent": "情感评估Agent",
+        "is_json": true,
+        "prompt_tokens": 871,
+        "completion_tokens": 1954,
+        "total_tokens": 2825,
+        "duration_ms": 12631.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 141.7,
+        "model": "step-3.7-flash",
+        "agent": "角色一致性检查Agent",
+        "is_json": true,
+        "prompt_tokens": 956,
+        "completion_tokens": 1157,
+        "total_tokens": 2113,
+        "duration_ms": 8455.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 146.4,
+        "model": "step-3.7-flash",
+        "agent": "逻辑校验Agent",
+        "is_json": true,
+        "prompt_tokens": 1275,
+        "completion_tokens": 548,
+        "total_tokens": 1823,
+        "duration_ms": 4213.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 159.2,
+        "model": "step-3.7-flash",
+        "agent": "情感评估Agent",
+        "is_json": true,
+        "prompt_tokens": 903,
+        "completion_tokens": 1982,
+        "total_tokens": 2885,
+        "duration_ms": 12406.0,
+        "estimated": false
+      },
+      {
+        "timestamp": 164.9,
+        "model": "step-3.7-flash",
+        "agent": "角色一致性检查Agent",
+        "is_json": true,
+        "prompt_tokens": 984,
+        "completion_tokens": 759,
+        "total_tokens": 1743,
+        "duration_ms": 5013.0,
+        "estimated": false
+      }
+    ]
+  },
+  "scores": {
+    "logic": [
+      10,
+      7,
+      7,
+      7,
+      7,
+      7,
+      7,
+      7
+    ],
+    "emotion": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "consistency": [
+      10,
+      10,
+      10,
+      0,
+      10,
+      10,
+      10,
+      10
+    ],
+    "avg_logic": 7.375,
+    "avg_emotion": 1.0,
+    "avg_consistency": 8.75
+  },
+  "narrative_arc": {
+    "开端_parts": [
+      1,
+      2
+    ],
+    "发展_parts": [
+      3,
+      4,
+      5
+    ],
+    "高潮_parts": [
+      6,
+      7
+    ],
+    "结局_parts": [
+      8
+    ]
+  }
+}

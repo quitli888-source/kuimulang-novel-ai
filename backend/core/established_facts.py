@@ -288,3 +288,51 @@ def facts_from_extractor_payload(payload: dict, part_num: int) -> List[Fact]:
             predicate=(raw.get("predicate") or "").strip(),
         ))
     return out
+
+
+def derive_facts_from_summary(state, part_num: int) -> list:
+    """R9 应急：基于 part_summaries + characters + outline 规则派生事实，
+    保证 Part N+1 至少有 facts 可用（避免 LLM 抽取 JSON 解析失败导致 Logic 评分退步）。
+
+    返回 Fact 列表（最多 8 条）。
+    """
+    facts = []
+    # 1) 角色 fact
+    for c in (state.characters or []):
+        name = c.get('name', '').strip()
+        if not name:
+            continue
+        identity = c.get('identity', '')
+        if identity:
+            facts.append(Fact(
+                id=f"F{part_num}_c_{name}",
+                part_num=part_num,
+                category='character',
+                text=f"{name}是{identity}",
+                quote='',
+            ))
+    # 2) Part 摘要 fact（从 part_summaries 截取前 120 字作为事件描述）
+    summary = state.part_summaries.get(str(part_num), '')[:120]
+    if summary:
+        facts.append(Fact(
+            id=f"F{part_num}_e_summary",
+            part_num=part_num,
+            category='event',
+            text=summary,
+            quote='',
+        ))
+    # 3) outline fact
+    outline = (state.part_outline or [])
+    if part_num <= len(outline):
+        o = outline[part_num - 1]
+        title = o.get('title', '')
+        core = o.get('core_event', '')
+        if title:
+            facts.append(Fact(
+                id=f"F{part_num}_o_title",
+                part_num=part_num,
+                category='event',
+                text=f"Part {part_num} 标题《{title}》，核心事件：{core}",
+                quote='',
+            ))
+    return facts[:8]
