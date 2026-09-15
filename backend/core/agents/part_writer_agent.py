@@ -504,6 +504,13 @@ class PartWriterAgent(BaseAgent):
         if not new_facts:
             return 0
         added = ef.add_many(new_facts)
+        # R9 应急：LLM 抽取常失败，叠加规则 fallback（从 part_summaries + characters + outline 派生）
+        if added == 0:
+            try:
+                rule_facts = _derive_facts_from_summary(state, part_num)
+                added = ef.add_many(rule_facts)
+            except Exception as _:
+                pass
         if added:
             try:
                 self.update_progress(
@@ -512,6 +519,51 @@ class PartWriterAgent(BaseAgent):
             except Exception:
                 pass
         return added
+
+
+def _derive_facts_from_summary(state, part_num: int) -> list:
+    """R9 应急：基于 part_summaries + characters + outline 规则派生事实，保证 Part N+1 至少有 facts 可用。"""
+    from core.established_facts import Fact
+    facts = []
+    # 1) 角色 fact
+    for c in (state.characters or []):
+        name = c.get('name', '').strip()
+        if not name:
+            continue
+        identity = c.get('identity', '')
+        if identity:
+            facts.append(Fact(
+                id=f"F{part_num}_c_{name}",
+                part_num=part_num,
+                category='character',
+                text=f"{name}是{identity}",
+                quote='',
+            ))
+    # 2) Part 摘要 fact（从 part_summaries 截取前 80 字作为事件描述）
+    summary = state.part_summaries.get(str(part_num), '')[:120]
+    if summary:
+        facts.append(Fact(
+            id=f"F{part_num}_e_summary",
+            part_num=part_num,
+            category='event',
+            text=summary,
+            quote='',
+        ))
+    # 3) outline fact
+    outline = (state.part_outline or [])
+    if part_num <= len(outline):
+        o = outline[part_num - 1]
+        title = o.get('title', '')
+        core = o.get('core_event', '')
+        if title:
+            facts.append(Fact(
+                id=f"F{part_num}_o_title",
+                part_num=part_num,
+                category='event',
+                text=f"Part {part_num} 标题《{title}》，核心事件：{core}",
+                quote='',
+            ))
+    return facts[:8]  # 限制 8 条避免 prompt 过长
 
     def _get_foreshadow_for_part(self, state, part_num: int) -> str:
         """获取当前Part需要处理的伏笔"""
