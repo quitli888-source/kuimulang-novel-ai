@@ -164,12 +164,16 @@ class CostTracker:
 
         R5-P0-3: 返回值增加 'calls' 字段（self.calls 拷贝），
         供 _save() / works.py:get_work 在持久化层合并使用。
+        R8-P0-3 (Bug G): 返回值同时含 'estimated_cost' 别名（旧下游脚本 r7_real_test.py
+        / real_e2e_smoke.py 历史遗留使用 'estimated_cost' 读，会拿到默认 0）。
         """
         if not self.calls:
             return {
                 "total_calls": 0, "total_tokens": 0,
                 "prompt_tokens": 0, "completion_tokens": 0,
-                "estimated_cost_rmb": 0.0, "total_duration_ms": 0,
+                "estimated_cost_rmb": 0.0,
+                "estimated_cost": 0.0,  # R8-P0-3 alias
+                "total_duration_ms": 0,
                 "calls": [],
             }
 
@@ -188,13 +192,15 @@ class CostTracker:
             model_costs[model] = model_costs.get(model, 0.0) + cost
 
         total_cost = sum(model_costs.values())
+        cost_rounded = round(total_cost, 4)
 
         return {
             "total_calls": len(self.calls),
             "total_tokens": total,
             "prompt_tokens": total_prompt,
             "completion_tokens": total_completion,
-            "estimated_cost_rmb": round(total_cost, 4),
+            "estimated_cost_rmb": cost_rounded,
+            "estimated_cost": cost_rounded,  # R8-P0-3 alias
             "total_duration_ms": round(total_duration, 0),
             "model_breakdown": {m: round(c, 4) for m, c in model_costs.items()},
             "calls": list(self.calls),
@@ -205,7 +211,11 @@ class CostTracker:
         # Part调用都带有 "Part N" 在agent字段中
         part_calls = [c for c in self.calls if f"Part {part_num}" in c.get("agent", "")]
         if not part_calls:
-            return {"total_tokens": 0, "calls": 0, "estimated_cost_rmb": 0.0}
+            return {
+                "total_tokens": 0, "calls": 0,
+                "estimated_cost_rmb": 0.0,
+                "estimated_cost": 0.0,  # R8-P0-3 alias
+            }
 
         total_prompt = sum(c["prompt_tokens"] for c in part_calls)
         total_completion = sum(c["completion_tokens"] for c in part_calls)
@@ -214,11 +224,13 @@ class CostTracker:
         model = part_calls[0]["model"]
         pricing = self.MODEL_PRICING.get(model, self.MODEL_PRICING["default"])
         cost = (total_prompt * pricing["input"] + total_completion * pricing["output"]) / 1_000_000
+        cost_rounded = round(cost, 4)
 
         return {
             "total_tokens": total_prompt + total_completion,
             "calls": len(part_calls),
-            "estimated_cost_rmb": round(cost, 4),
+            "estimated_cost_rmb": cost_rounded,
+            "estimated_cost": cost_rounded,  # R8-P0-3 alias
         }
 
     def should_prompt_for_cost(self, work_id: Optional[str] = None, threshold: Optional[float] = None) -> bool:
@@ -236,7 +248,9 @@ class CostTracker:
             threshold = self.DEFAULT_COST_THRESHOLD_RMB
         try:
             summary = self.get_summary()
-            return float(summary.get("estimated_cost_rmb", 0.0)) >= float(threshold)
+            # R8-P0-3: 优先 estimated_cost_rmb，回退 estimated_cost 兼容
+            cost = summary.get("estimated_cost_rmb", summary.get("estimated_cost", 0.0))
+            return float(cost) >= float(threshold)
         except Exception:
             return False
 

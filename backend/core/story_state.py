@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 from core.config import MEMORY_DIR
 from core.sliding_window import SlidingWindow
+from core.established_facts import EstablishedFacts
 
 
 class StoryState:
@@ -54,6 +55,11 @@ class StoryState:
         # V6.1: 真正的滑动窗口（默认保留最近 3 个 Part 原文）
         self.window = SlidingWindow(window_size=3)
 
+        # R8-P0-1: 跨 Part "已确立事实" 结构化数据（EstablishedFacts）。
+        # 在 Part 写完后由 PartWriterAgent 调用 LLM 抽取追加；Logic Agent 评
+        # Part N 时把 Part 1..N-1 的事实注入 prompt 作为权威基线。
+        self.established_facts = EstablishedFacts()
+
     def save(self, filepath: str = None):
         """保存状态到JSON文件"""
         if filepath is None:
@@ -77,6 +83,8 @@ class StoryState:
             "title_options": self.title_options,
             "tags": self.tags,
             "character_state_track": self.character_state_track,
+            "established_facts": self.established_facts.to_dict()
+                if hasattr(self, "established_facts") else {"version": 1, "facts": []},
         }
 
         with open(filepath, "w", encoding="utf-8") as f:
@@ -91,6 +99,16 @@ class StoryState:
             data = json.load(f)
 
         for key, value in data.items():
+            # R8-P0-1: established_facts 需要反序列化为 EstablishedFacts 实例
+            if key == "established_facts":
+                if not hasattr(self, "established_facts") or self.established_facts is None:
+                    self.established_facts = EstablishedFacts()
+                # 确保 type 正确（防止旧数据是 dict）
+                if not isinstance(self.established_facts, EstablishedFacts):
+                    self.established_facts = EstablishedFacts()
+                self.established_facts.clear()
+                self.established_facts.from_dict(value or {})
+                continue
             setattr(self, key, value)
 
     def get_part_context(self, part_num: int) -> str:
@@ -295,6 +313,30 @@ class StoryState:
                 for s in sentences[:3]:  # 每个Part最多取3个关键事件
                     facts.append(f"  - Part{p_num}: {s}")
         return "\n".join(facts) if facts else ""
+
+    def build_established_facts_block(self, current_part: int,
+                                       categories: list = None) -> str:
+        """R8-P0-1: 渲染 Part 1..{current_part-1} 的"已确立事实"为可注入 prompt 的文本。
+
+        Args:
+            current_part: 当前正在创作的 Part 编号（事实表只取 part_num < current_part）
+            categories: 限定 category 列表；None 表示全部
+
+        Returns:
+            多行字符串（已含标题），空字符串表示无事实。
+        """
+        if not hasattr(self, "established_facts") or self.established_facts is None:
+            return ""
+        try:
+            block = self.established_facts.render_for_prompt(
+                categories=categories,
+                before_part_num=current_part,
+            )
+        except Exception:
+            return ""
+        if not block:
+            return ""
+        return "【前文已确立事实清单——只能对照本表评判一致性】\n" + block
 
     def get_characters_state(self) -> str:
         """获取角色当前状态摘要（用于逻辑校验）"""

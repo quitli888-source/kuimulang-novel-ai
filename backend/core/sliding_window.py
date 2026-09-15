@@ -20,10 +20,13 @@ class SlidingWindow:
     """真正的滑动窗口上下文管理器。"""
 
     # 摘要级别参数（按 Part 数量聚合）
-    ROLLING_EVERY = 5       # 每 5 个 Part 生成一次二级滚动摘要
+    # R8-P1-4: ROLLING_EVERY 5 → 3；SUMMARY_L2_LEN 500 → 800。
+    # 理由：3 Part 真实 E2E 场景下 R7 看不到二级滚动摘要；Part 3 写完立刻生成
+    # "Part 1-2 的 800 字聚合"，Part 4 写作时 Logic Agent 就能对照远端一致性。
+    ROLLING_EVERY = 3       # 每 3 个 Part 生成一次二级滚动摘要（R8: 5 → 3）
     MILESTONE_EVERY = 20    # 每 20 个 Part 生成一次里程碑摘要
     SUMMARY_L1_LEN = 200    # 一级摘要目标长度（字）
-    SUMMARY_L2_LEN = 500    # 二级滚动摘要目标长度（字）
+    SUMMARY_L2_LEN = 800    # 二级滚动摘要目标长度（字）（R8: 500 → 800）
     SUMMARY_L3_LEN = 2000   # 三级里程碑摘要目标长度（字）
 
     def __init__(self, window_size: int = 3):

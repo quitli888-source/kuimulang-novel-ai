@@ -711,7 +711,8 @@ class WritingService:
                     except Exception as vs_err:
                         print(f"[WritingService] vector_store.add 失败（不影响主流程）: {vs_err}")
 
-                    # R4-P0-2: 二级滚动摘要生成（每 5 个 Part 一次）
+                    # R4-P0-2: 二级滚动摘要生成（每 ROLLING_EVERY 个 Part 一次；
+                    # R8-P1-4: 5 → 3，500 → 800）
                     if temp_state.window.should_create_rolling_summary(i):
                         try:
                             from core.llm_client import call_llm
@@ -724,25 +725,30 @@ class WritingService:
                                 for p in recent_keys
                                 if p in temp_state.window.summaries
                             )
+                            # R8-P1-4: 字数 500 → 800（更详细，便于 Logic Agent 对照）
                             rolling = call_llm(
                                 system_prompt=(
                                     "你是长篇小说剧情压缩助手。"
-                                    "将下面若干个 Part 的剧情概要压缩为一段 500 字以内的连贯剧情段，"
-                                    "保留关键人物、冲突、伏笔，输出纯叙事文本，不要分点。"
+                                    "将下面若干个 Part 的剧情概要压缩为一段 800 字以内的连贯剧情段，"
+                                    "保留关键人物、冲突、伏笔、角色位置/状态/伤势变化，"
+                                    "输出纯叙事文本，不要分点。"
                                 ),
                                 user_prompt=recent_text or "(无最近摘要)",
                                 temperature=0.3,
-                                max_tokens=800,
+                                # R8: max_tokens 同步从 800 → 1200（容纳 800 字中文）
+                                max_tokens=1200,
                                 agent="rolling_summary",
                             )
-                            rolling_text = (rolling or "")[:500]
+                            # R8-P1-4: 截断 500 → 800
+                            rolling_text = (rolling or "")[:800]
                             if not rolling_text.strip():
-                                # Fallback: 拼接 5 个一级摘要前 100 字
-                                rolling_text = "\n".join(
+                                # Fallback: 拼接 ROLLING_EVERY 个一级摘要前 100 字
+                                fallback = "\n".join(
                                     f"Part {p}: {temp_state.window.summaries[p][:100]}"
                                     for p in recent_keys
                                     if p in temp_state.window.summaries
-                                )[:500]
+                                )
+                                rolling_text = fallback[:800]
                             temp_state.window.add_rolling_summary(i, rolling_text)
                             await self.emitter.emit(EventType.LOG, {
                                 "message": f"📚 Part {i} 二级滚动摘要已生成（{len(rolling_text)} 字）",

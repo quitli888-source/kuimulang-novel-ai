@@ -1,0 +1,290 @@
+"""
+R8-P0-1: 跨 Part "已确立事实" 结构化数据 (Established Facts)
+
+R8 新增 —— 解决 Logic Agent 评 Part N 时只看到"前文摘要 + 末尾 1200 字"，
+缺乏"前文已确立事实清单"作为权威基线，导致 P0 级"信息越界/物品遗忘/
+时间漂移"频繁误判的问题。
+
+设计要点：
+- 轻量级 dataclass，不依赖外部数据库（≤ 20 Part × ≤ 15 facts/Part ≤ 300 条）
+- 用 LLM 在 Part 写完后增量抽取（prompts/established_facts.txt）
+- 按 part_num + category 双向索引，支持"Part N 写作前注入 Part 1..N-1 事实"
+- 与 state.established_facts 字段 1:1 对应，to_dict / from_dict 持久化
+- 不替代 character_state_track / foreshadowing，而是上层语义层
+"""
+from dataclasses import dataclass, field, asdict
+from typing import List, Optional, Iterable
+
+
+# 合法 category 集合（与 prompts/established_facts.txt 协议保持一致）
+VALID_CATEGORIES = {
+    "character",       # 角色（姓名/身份/状态/位置/伤势/技能/秘密）
+    "location",        # 地点（位置/转移/描述）
+    "object",          # 物品（位置/拥有者/状态变化）
+    "event",           # 事件（谁-何时-对谁-做了什么-导致什么）
+    "trait",           # 性格 / 特质
+    "relationship",    # 关系（A 与 B 的关系/决裂/结盟/师徒等）
+    "world_rule",      # 世界观硬规则（物理/魔法/法律）
+    "foreshadow",      # 伏笔（已埋设/已揭晓）
+    "knowledge",       # 信息边界（角色 A 知道 X —— 用于信息越界检查）
+}
+
+
+@dataclass
+class Fact:
+    """单条已确立事实。"""
+    id: str                                # "F{part_num}_{n}"，全局唯一
+    part_num: int                          # 哪 Part 确立（首次确立的 Part）
+    category: str                          # 详见 VALID_CATEGORIES
+    text: str                              # 事实描述（≤ 60 字）
+    quote: str = ""                        # 原文引用（≤ 30 字，可空）
+    subject: str = ""                      # 主语（角色名/物品名/地点名）—— 用于去重
+    predicate: str = ""                    # 谓语（位于/拥有/死亡/知道/......）—— 用于去重
+    superseded_by: Optional[str] = None    # 若被同 subject+predicate 后续事实覆盖，记录新 fact.id
+
+    def __post_init__(self):
+        # 归一化 category 到合法集合
+        if self.category not in VALID_CATEGORIES:
+            # 兼容旧数据 / 模型回退：未知 category 暂存为 character
+            self.category = "character"
+        if not self.id:
+            # 防御：id 必填，缺失时合成一个
+            self.id = f"F{self.part_num}_0"
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Fact":
+        return cls(
+            id=d.get("id", ""),
+            part_num=int(d.get("part_num", 0) or 0),
+            category=d.get("category", "character"),
+            text=d.get("text", ""),
+            quote=d.get("quote", ""),
+            subject=d.get("subject", ""),
+            predicate=d.get("predicate", ""),
+            superseded_by=d.get("superseded_by"),
+        )
+
+
+@dataclass
+class EstablishedFacts:
+    """已确立事实集合。
+
+    用法：
+        ef = EstablishedFacts()
+        ef.add(Fact(id="F1_1", part_num=1, category="character", text="林枫是前刑警"))
+        # Part 2 写作前注入：
+        prompt_block = ef.render_for_prompt(categories=["character", "object", "event"])
+    """
+    facts: List[Fact] = field(default_factory=list)
+
+    # ----------------- 增删查 -----------------
+    def add(self, fact: Fact) -> None:
+        """添加一条事实。
+
+        冲突处理：若 (subject, predicate) 已有非空事实，标记旧事实为 superseded_by 新 id。
+        """
+        if not fact or not fact.id:
+            return
+        if fact.subject and fact.predicate:
+            for old in self.facts:
+                if (
+                    old.subject == fact.subject
+                    and old.predicate == fact.predicate
+                    and not old.superseded_by
+                ):
+                    old.superseded_by = fact.id
+                    break
+        self.facts.append(fact)
+
+    def add_many(self, facts: Iterable[Fact]) -> int:
+        """批量添加，返回成功条数。"""
+        n = 0
+        for f in facts:
+            if f and f.id:
+                self.add(f)
+                n += 1
+        return n
+
+    def by_category(self, cat: str) -> List[Fact]:
+        """按 category 过滤（包含已 superseded 的事实，便于回溯）。"""
+        return [f for f in self.facts if f.category == cat]
+
+    def before_part(self, part_num: int, *, include_superseded: bool = False) -> List[Fact]:
+        """返回 part_num 之前确立的所有事实。
+
+        include_superseded=False 时只返回当前有效事实（默认，符合 Logic Agent 评估语义）。
+        """
+        out = []
+        for f in self.facts:
+            if f.part_num >= part_num:
+                continue
+            if not include_superseded and f.superseded_by:
+                continue
+            out.append(f)
+        return out
+
+    def by_id(self, fact_id: str) -> Optional[Fact]:
+        for f in self.facts:
+            if f.id == fact_id:
+                return f
+        return None
+
+    def clear(self) -> None:
+        self.facts = []
+
+    # ----------------- 渲染为 prompt 段 -----------------
+    def render_for_prompt(
+        self,
+        categories: Optional[List[str]] = None,
+        *,
+        before_part_num: Optional[int] = None,
+        max_per_category: int = 8,
+    ) -> str:
+        """渲染为可注入 prompt 的多行文本。
+
+        Args:
+            categories: 限定要包含的 category；None 表示全部
+            before_part_num: 只包含 part_num < 该值的事实；None 表示全部
+            max_per_category: 每个 category 最多取多少条（按 part_num 降序）
+
+        Returns:
+            多行字符串，category 段标题 + 条目；若全部为空返回 ""。
+        """
+        selected = []
+        for f in self.facts:
+            if f.superseded_by:
+                continue  # 渲染给模型时不展示被覆盖的旧事实
+            if before_part_num is not None and f.part_num >= before_part_num:
+                continue
+            if categories is not None and f.category not in categories:
+                continue
+            selected.append(f)
+
+        if not selected:
+            return ""
+
+        # 按 category 分组
+        grouped: dict = {}
+        for f in selected:
+            grouped.setdefault(f.category, []).append(f)
+
+        # 渲染顺序（与 VALID_CATEGORIES 顺序一致）
+        order = [c for c in ("character", "location", "object", "event", "trait",
+                              "relationship", "world_rule", "foreshadow", "knowledge")
+                 if c in grouped]
+        # 未识别的 category 兜底追加
+        for c in grouped:
+            if c not in order:
+                order.append(c)
+
+        lines: List[str] = []
+        for cat in order:
+            facts_in_cat = sorted(grouped[cat], key=lambda x: x.part_num, reverse=True)
+            facts_in_cat = facts_in_cat[:max_per_category]
+            cat_label = {
+                "character": "【角色状态/身份】",
+                "location": "【地点】",
+                "object": "【物品】",
+                "event": "【已发生事件】",
+                "trait": "【性格/特质】",
+                "relationship": "【角色关系】",
+                "world_rule": "【世界观硬规则】",
+                "foreshadow": "【伏笔】",
+                "knowledge": "【角色信息边界】",
+            }.get(cat, f"【{cat}】")
+            lines.append(cat_label)
+            for f in facts_in_cat:
+                txt = (f.text or "").strip()
+                if not txt:
+                    continue
+                # 截断 text 到 80 字防止 prompt 爆掉
+                if len(txt) > 80:
+                    txt = txt[:80] + "…"
+                lines.append(f"- (Part{f.part_num}) {txt}")
+            lines.append("")
+
+        return "\n".join(lines).rstrip()
+
+    # ----------------- 滚动合并（跨 Part 增量更新） -----------------
+    def merge(self, other: "EstablishedFacts", *, prefer: str = "newer") -> None:
+        """合并另一份 EstablishedFacts（用于滑动窗口 / resume 时的双向同步）。
+
+        Args:
+            other: 待合并的 EstablishedFacts
+            prefer: "newer" —— 保留 part_num 更大的；"older" —— 保留 part_num 更小的；
+                    "skip" —— 若 id 已存在则跳过
+        """
+        if other is None or not other.facts:
+            return
+        existing_ids = {f.id for f in self.facts}
+        for f in other.facts:
+            if f.id in existing_ids:
+                continue
+            if prefer == "newer" and f.superseded_by:
+                # 新版本已 supersede 该事实，按 new 优先：跳过被覆盖的旧事实
+                continue
+            self.facts.append(f)
+
+    # ----------------- 持久化 -----------------
+    def to_dict(self) -> dict:
+        return {
+            "version": 1,
+            "facts": [f.to_dict() for f in self.facts],
+        }
+
+    def from_dict(self, d: dict) -> None:
+        """从 dict 加载；保留现有 facts 不预清空（外部决定是否先 clear）。"""
+        if not isinstance(d, dict):
+            return
+        raw = d.get("facts") or []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                self.facts.append(Fact.from_dict(item))
+            except Exception:
+                # 单条解析失败不影响整体
+                continue
+
+    # ----------------- 调试 -----------------
+    def __len__(self) -> int:
+        return len(self.facts)
+
+    def __repr__(self) -> str:
+        return f"EstablishedFacts(facts={len(self.facts)})"
+
+
+# ----------------- LLM 抽取辅助 -----------------
+def facts_from_extractor_payload(payload: dict, part_num: int) -> List[Fact]:
+    """从 call_llm_json 返回的 payload 解析为 Fact 列表。
+
+    协议（prompts/established_facts.txt）：
+        {"facts": [{"category": "...", "text": "...", "quote": "...", "subject": "...", "predicate": "..."}, ...]}
+    """
+    if not isinstance(payload, dict):
+        return []
+    raw_list = payload.get("facts") or []
+    if not isinstance(raw_list, list):
+        return []
+    out: List[Fact] = []
+    for i, raw in enumerate(raw_list[:15], start=1):
+        if not isinstance(raw, dict):
+            continue
+        text = (raw.get("text") or "").strip()
+        if not text:
+            continue
+        cat = (raw.get("category") or "character").strip() or "character"
+        out.append(Fact(
+            id=f"F{part_num}_{i}",
+            part_num=part_num,
+            category=cat,
+            text=text[:120],  # 防止单条过长
+            quote=(raw.get("quote") or "")[:30],
+            subject=(raw.get("subject") or "").strip(),
+            predicate=(raw.get("predicate") or "").strip(),
+        ))
+    return out

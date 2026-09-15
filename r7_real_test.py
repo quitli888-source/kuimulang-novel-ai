@@ -146,7 +146,9 @@ print("=" * 70)
 summary = tracker.get_summary()
 print(f"total_calls: {summary.get('total_calls')}")
 print(f"total_tokens: {summary.get('total_tokens')}")
-print(f"estimated_cost: ¥{summary.get('estimated_cost', 0):.4f}")
+# R8-P0-3 (Bug G): 改用 estimated_cost_rmb（R8 已在 cost_tracker.get_summary 加 alias，
+# 用 _rmb 后缀字段名更明确；R7 旧脚本误读 'estimated_cost' 总是拿到默认 0）
+print(f"estimated_cost_rmb: ¥{summary.get('estimated_cost_rmb', 0):.4f}")
 
 # 保存完整产出到 JSON
 output = {

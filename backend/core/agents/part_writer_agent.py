@@ -15,9 +15,10 @@ R2改动（生成器式分块生成）：
 import time
 from typing import Dict, Any
 from core.agents.base_agent import BaseAgent
-from core.llm_client import call_llm
+from core.llm_client import call_llm, call_llm_json
 from core.config import PART_WORD_MIN, PART_WORD_MAX
 from core.prompt_loader import load_prompt
+from core.established_facts import facts_from_extractor_payload
 
 SYSTEM_PROMPT = load_prompt("part_writer", """你是一位番茄小说平台的顶级短篇作家。你的作品以快节奏、强冲突、高情感密度著称，读者一旦开始就无法放下。
 
@@ -92,6 +93,19 @@ PART_CHUNK_SYSTEM_PROMPT = """你是番茄小说平台顶级短篇作家，正�
 """
 
 
+# R8-P0-1: 事实抽取专用 system prompt —— 复用 prompts/established_facts.txt（与外置文件保持一致）
+_FACTS_EXTRACTOR_SYSTEM_PROMPT = load_prompt(
+    "established_facts",
+    """你是"小说事实抽取员"。从以下小说片段中提取"已确立的关键事实"。
+
+每条事实用一行："[category] text"
+category 限：character / location / object / event / trait / relationship / world_rule / foreshadow / knowledge
+最多提取 15 条最关键的事实。
+输出 JSON: {"facts": [{"category": "...", "text": "...", "quote": "...", "subject": "...", "predicate": "..."}]}
+""",
+)
+
+
 class PartWriterAgent(BaseAgent):
     name = "Part写作Agent"
     description = "基于Part规划和全文上下文生成正文（生成器式分块）"
@@ -153,6 +167,13 @@ class PartWriterAgent(BaseAgent):
                 self.update_progress(95, f"警告：Part {part_num}有{word_count}字，超出上限{hard_max}，将截断")
                 full_text = self._truncate_to_complete_paragraph(full_text, hard_max)
                 word_count = len(full_text)
+
+            # R8-P0-1: 写完后增量抽取"已确立事实"并 append 到 state.established_facts
+            # 失败不影响主流程（best-effort；Logic Agent 评 Part N+1 时仍能拿到摘要兜底）
+            try:
+                self._extract_and_register_facts(state=state, part_num=part_num, part_text=full_text)
+            except Exception as ef_err:
+                print(f"[PartWriterAgent] R8-P0-1 事实抽取失败（不影响主流程）: {ef_err}")
 
             summary = f"Part {part_num}「{outline.get('title', '')}」\n字数: {word_count}字 (目标: {target_words}, 片段数: {chunk_count})"
             self.log_done(summary)
@@ -256,6 +277,7 @@ class PartWriterAgent(BaseAgent):
                 target_words=target_words,
                 hard_max=hard_max,
                 written_so_far=len(accumulated),
+                state=state,
             )
 
             # 4) 调用 LLM（max_tokens 控制在 ~5500，中文 1.5 tokens/字）
@@ -329,6 +351,7 @@ class PartWriterAgent(BaseAgent):
         target_words: int,
         hard_max: int,
         written_so_far: int,
+        state=None,
     ) -> str:
         """构造片段级 user prompt。
 
@@ -336,6 +359,19 @@ class PartWriterAgent(BaseAgent):
         后续片段：仅 prev_tail + next_plan + 本片段字数
         """
         if is_first_chunk:
+            # R8-P0-1: 在 context 末尾追加"前文已确立事实清单"（用于 Part N 写作时参考）
+            facts_block = ""
+            if state is not None:
+                try:
+                    facts_block = state.build_established_facts_block(part_num) or ""
+                except Exception:
+                    facts_block = ""
+            facts_paragraph = (
+                "\n" + facts_block + "\n"
+                if facts_block else
+                "\n（这是第一部分，没有前文事实清单）\n"
+            )
+
             return f"""请创作第{part_num}部分（Part {part_num}）的第一个片段。
 
 ## Part规划
@@ -357,13 +393,20 @@ class PartWriterAgent(BaseAgent):
 
 ## 故事上下文
 {context}
+{facts_paragraph}
 
 ## 创作指令
 1. 第一句话直接进入情节，不要任何铺垫
 2. 自然承接上一部分结尾的情境
 3. 严格完成本片段的核心事件推进
 4. 结尾实现钩子效果（但本章还有更多片段，不需要在此处完全收尾）
-5. 本片段字数控制在 {max(1000, chunk_target - 200)}-{chunk_target + 200}字之间"""
+5. 本片段字数控制在 {max(1000, chunk_target - 200)}-{chunk_target + 200}字之间
+
+## 强制约束（R8 新增）
+
+- 严禁与【前文已确立事实清单】（或第 1 部分时的"无前文"提示）中的任何事实矛盾
+- 严禁使用清单中没有的"已知信息"（如某物品在清单中未出现，不得假设角色持有）
+- 新引入的角色名/地名/物品名不要与前文已有的同名实体混淆（如不要让两个不同角色共享同一个名字）"""
 
         # 后续片段
         return f"""请续写 Part {part_num} 的第 {chunk_idx} 片段。
@@ -396,6 +439,68 @@ class PartWriterAgent(BaseAgent):
             self.log_error("缺少state参数")
             return False
         return True
+
+    # ----------------- R8-P0-1: 事实抽取 -----------------
+    def _extract_and_register_facts(self, state, part_num: int, part_text: str) -> int:
+        """R8-P0-1: Part 写完后用 LLM 增量抽取"已确立事实"并 append 到 state.established_facts。
+
+        失败时静默（best-effort；Logic Agent 评 Part N+1 时回退到只用 part_summaries）。
+        返回成功追加的 fact 数量。
+        """
+        if state is None or not part_text or len(part_text) < 100:
+            return 0
+        # state.established_facts 可能在 load() 后是 dict（旧数据兼容）；若是则惰性转成 EstablishedFacts
+        from core.established_facts import EstablishedFacts
+        ef = getattr(state, "established_facts", None)
+        if ef is None:
+            state.established_facts = EstablishedFacts()
+            ef = state.established_facts
+        elif not isinstance(ef, EstablishedFacts):
+            new_ef = EstablishedFacts()
+            try:
+                new_ef.from_dict(ef if isinstance(ef, dict) else {})
+            except Exception:
+                pass
+            state.established_facts = new_ef
+            ef = new_ef
+
+        # 节流：若本 part_num 已抽取过（≥1 条），跳过（避免 resume / 重复调用时叠加）
+        already_extracted = any(
+            getattr(f, "part_num", None) == part_num for f in ef.facts
+        )
+        if already_extracted:
+            return 0
+
+        try:
+            user_prompt = (
+                f"Part {part_num} 全文（约 {len(part_text)} 字）：\n\n{part_text}\n\n"
+                f"请按 system prompt 的协议输出 JSON。"
+            )
+            payload = call_llm_json(
+                system_prompt=_FACTS_EXTRACTOR_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                temperature=0.0,
+                max_tokens=1800,
+                agent="established_facts",
+            )
+        except Exception as call_err:
+            print(f"[PartWriterAgent] R8-P0-1 事实抽取 LLM 调用失败: {call_err}")
+            return 0
+
+        if not isinstance(payload, dict):
+            return 0
+        new_facts = facts_from_extractor_payload(payload, part_num)
+        if not new_facts:
+            return 0
+        added = ef.add_many(new_facts)
+        if added:
+            try:
+                self.update_progress(
+                    90, f"📑 Part {part_num} 已抽取 {added} 条事实写入 established_facts"
+                )
+            except Exception:
+                pass
+        return added
 
     def _get_foreshadow_for_part(self, state, part_num: int) -> str:
         """获取当前Part需要处理的伏笔"""
