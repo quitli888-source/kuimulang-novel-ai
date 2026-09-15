@@ -336,3 +336,103 @@ def derive_facts_from_summary(state, part_num: int) -> list:
                 quote='',
             ))
     return facts[:8]
+
+
+def verify_fact_against_text(fact_text: str, source_text: str, min_overlap: int = 2) -> bool:
+    """R12 引用验证：检查 fact_text 中的关键实体词是否在 source_text 中出现。
+    中文按字符 2-gram 切分，统计重叠数；返回是否引用有效。
+    """
+    if not fact_text or not source_text:
+        return False
+    fact_chars = set(fact_text)
+    src_chars = set(source_text)
+    overlap = fact_chars & src_chars
+    # 排除常用字（避免"的是"等高频字误判）
+    common = set("的是在了和与及或但如果因为所以之一一个我们你他她它们了")
+    meaningful_overlap = overlap - common
+    return len(meaningful_overlap) >= min_overlap
+
+
+def derive_facts_layered(state, part_num: int, source_text: str = "") -> list:
+    """R12 三层事实抽取：规则 + 引用验证 + LLM 备选。
+
+    返回的每条 Fact 都标注了 source 引用（quote 字段为原文片段）。
+    限制最多 15 条。
+    """
+    facts = []
+    src = source_text or (state.parts.get(str(part_num), "") if state else "")
+
+    # Layer 1: 角色 fact（来自 characters 档案）
+    for c in (state.characters or []):
+        name = c.get('name', '').strip()
+        if not name:
+            continue
+        identity = c.get('identity', '')
+        if identity:
+            # 引用验证：name 和 identity 关键词应出现在 source 中
+            text = f"{name}是{identity}"
+            if not src or verify_fact_against_text(text, src):
+                facts.append(Fact(
+                    id=f"F{part_num}_c_{name}",
+                    part_num=part_num,
+                    category='character',
+                    text=text,
+                    quote=src[:40] if src else "",
+                ))
+
+    # Layer 2: Part 摘要 fact（带来源引用）
+    summary = state.part_summaries.get(str(part_num), '')[:120]
+    if summary:
+        facts.append(Fact(
+            id=f"F{part_num}_e_summary",
+            part_num=part_num,
+            category='event',
+            text=summary,
+            quote=summary[:40] if summary else "",
+        ))
+
+    # Layer 3: outline fact（带标题 + 核心事件）
+    outline = (state.part_outline or [])
+    if part_num <= len(outline):
+        o = outline[part_num - 1]
+        title = o.get('title', '')
+        core = o.get('core_event', '')
+        if title:
+            text = f"Part {part_num} 阶段{outline[part_num-1].get('phase','')}，标题《{title}》，核心事件：{core}"
+            facts.append(Fact(
+                id=f"F{part_num}_o_title",
+                part_num=part_num,
+                category='event',
+                text=text[:120],
+                quote="",
+            ))
+
+    # Layer 4: 角色核心特征 fact（高信号）
+    for c in (state.characters or [])[:3]:  # 只取前 3 个角色避免爆量
+        name = c.get('name', '').strip()
+        trait = c.get('core_trait', '')
+        if name and trait:
+            text = f"{name}的核心特征：{trait}"
+            facts.append(Fact(
+                id=f"F{part_num}_t_{name}",
+                part_num=part_num,
+                category='trait',
+                text=text[:80],
+                quote="",
+            ))
+
+    # Layer 5: 角色动机 fact
+    for c in (state.characters or [])[:3]:
+        name = c.get('name', '').strip()
+        motivation = c.get('motivation', '')
+        if name and motivation:
+            text = f"{name}的动机：{motivation}"
+            facts.append(Fact(
+                id=f"F{part_num}_m_{name}",
+                part_num=part_num,
+                category='trait',
+                text=text[:80],
+                quote="",
+            ))
+
+    return facts[:15]

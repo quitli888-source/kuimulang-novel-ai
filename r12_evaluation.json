@@ -1,0 +1,571 @@
+{
+  "sample_parts": [
+    1,
+    5,
+    10,
+    15,
+    20,
+    25,
+    30
+  ],
+  "review_results": {
+    "1": {
+      "LogicReviewAgent": {
+        "result": {
+          "score": 10,
+          "overall_score": 10,
+          "pass": true,
+          "p0_count": 0,
+          "p1_count": 0,
+          "p2_count": 0,
+          "issues": [],
+          "verdict": "首部无前文基线，跳过一致性",
+          "continuity_check": {
+            "character_states": "ok",
+            "timeline": "ok",
+            "established_facts": "ok"
+          },
+          "strengths": [],
+          "_protocol": "V5"
+        },
+        "duration": 3.1737632751464844,
+        "success": true
+      },
+      "EmotionReviewAgent": {
+        "result": {
+          "pass": true,
+          "emotion_score": 8,
+          "resonance_score": 8,
+          "immersion_score": 8,
+          "emotion_target_met": true,
+          "emotion_curve": {
+            "start": "警觉悬疑",
+            "middle": "惊疑压抑",
+            "end": "恐慌紧张"
+          },
+          "highlights": [
+            "专属信物的情感锚点：歪刻‘渊’字的铜纽扣、带沈渊专属牙印的冰露，将三年前沈渊失踪的旧痛与当下的匿名包裹直接勾连，瞬间唤起角色与读者的共同记忆，情感代入感极强",
+            "悬念的层层递进：从匿名包裹的疑窦，到发现张勇隐瞒线索的惊怒，再到门外暗号反转、李明被胁迫的生死危机，情绪张力逐步拉满，节奏把控到位",
+            "多维度感官沉浸：铜锁锈味、冷雨腥气、冰露的凉意、红墨的黏腻、晾衣杆勒手的痛感，充分调动读者视觉、嗅觉、触觉，场景画面感极强"
+          ],
+          "weaknesses": [
+            "林枫看到沈渊便签时的情绪爆发稍弱，当前仅以“心口猛地一缩”带过，缺乏具体的生理反应或旧日闪回细节，难以完全传递三年前旧案未平的沉痛感",
+            "张勇的反派伏笔铺垫稍显薄弱，仅通过林枫的内心回忆提及其过往行为，缺乏更早的细节暗示，读者对“张勇有问题”的冲击力会稍打折扣"
+          ],
+          "enhancement_suggestions": [
+            {
+              "location": "林枫看到沈渊便签“三年前的那场雨还没停”的段落",
+              "current": "林枫盯着这句话，心口猛地一缩。三年前沈渊失踪的那天，也是这样的雨，下了一整夜，江面上飘着碎冰，警署说沈渊是叛逃，收了犯罪组织的黑钱，跳了江，但是他找了三年的尸体，都没找到",
+              "suggested": "林枫盯着这句话，指腹蹭过便签上被水晕开的墨痕，后颈瞬间凉了。三年前沈渊失踪的那天也是这样的雨，他攥着从江边捞起的、沈渊的湿外套站了三个小时，警署说沈渊叛逃跳江，他找了三年的尸体，连块骨头都没找到",
+              "expected_effect": "通过具体的闪回细节强化林枫的沉痛与惊疑，让读者更直观感受到三年前旧案对他的影响，情感共鸣更强"
+            },
+            {
+              "location": "发现黑雨衣人下颌线伤疤的段落",
+              "current": "露出来的下颌线有一道新鲜的疤——和三年前他在沈渊失踪的江边，从带血的刀柄上拓下来的那道划痕，分毫不差",
+              "suggested": "露出来的下颌线有一道新鲜的疤——和三年前他在沈渊失踪的江边，从带血的刀柄上拓下来的那道划痕，分毫不差。林枫的胃里猛地一沉，三年前他拓这道划痕的时候，沈渊还站在他旁边，笑他手笨连拓印都弄不好，说等案子结了就请他喝冰露",
+              "expected_effect": "通过关联沈渊的旧日记忆，强化刀疤带来的冲击力，让读者更深刻感受到林枫的愤怒与痛心，情绪张力更强"
+            }
+          ],
+          "verdict": "以扎实的细节锚点和层层递进的悬念节奏，完美达成开端悬疑不安的情绪目标，情感代入感与氛围营造均属上乘"
+        },
+        "duration": 53.397618770599365,
+        "success": true
+      },
+      "ConsistencyReviewAgent": {
+        "result": {
+          "pass": true,
+          "overall_score": 10,
+          "issues": [],
+          "character_states": {},
+          "verdict": "第一部分，无需检查"
+        },
+        "duration": 8.106231689453125e-06,
+        "success": true
+      }
+    },
+    "5": {
+      "LogicReviewAgent": {
+        "result": {
+          "score": 3,
+          "overall_score": 3,
+          "pass": false,
+          "p0_count": 6,
+          "p1_count": 3,
+          "p2_count": 0,
+          "issues": [],
+          "verdict": "Part5存在6处P0矛盾：小棠消失、沈渊与张勇无交代突现/消失、时间线断裂、老陈死亡时间矛盾、U盘无前文依据",
+          "continuity_check": {
+            "character_states": "violated",
+            "timeline": "violated",
+            "established_facts": "violated"
+          },
+          "strengths": [],
+          "_protocol": "V5"
+        },
+        "duration": 32.687121629714966,
+        "success": true
+      },
+      "EmotionReviewAgent": {
+        "result": {
+          "pass": true,
+          "emotion_score": 9,
+          "resonance_score": 8,
+          "immersion_score": 9,
+          "emotion_target_met": true,
+          "emotion_curve": {
+            "start": "紧张逃脱",
+            "middle": "震惊压抑",
+            "end": "绝望紧绷"
+          },
+          "highlights": [
+            "老陈临死前托付U盘、吐露关键线索的悲壮桥段，将牺牲的冲击力拉满",
+            "揭露乌鸦为林枫警校教官的身份反转，冲击力极强",
+            "绝境反杀陈锋后立刻遭遇炸弹倒计时的强转折，张力拉满"
+          ],
+          "weaknesses": [
+            "林枫得知乌鸦是教官时的情绪反应稍显仓促，缺乏足够的细节铺垫，共鸣感可再提升",
+            "脚踝受伤的痛觉线索后续提及较少，身体状态的真实感可再加强"
+          ],
+          "enhancement_suggestions": [
+            {
+              "location": "老陈说出‘乌鸦是周明’的段落",
+              "current": "林枫只是攥紧U盘，没有额外的情绪反应",
+              "suggested": "加入林枫指尖发麻、瞳孔骤缩，脑海中闪过教官教他射击、鼓励他的零碎回忆闪回，甚至U盘边缘硌得掌心生疼的细节",
+              "expected_effect": "强化身份反转的冲击力，让读者更能共情林枫的崩溃与震惊"
+            },
+            {
+              "location": "结尾发现钟楼炸弹红灯的段落",
+              "current": "直接描写林枫抬头看见红灯",
+              "suggested": "加入雨幕突然静止的感官细节，放大林枫的心跳声、远处警笛的嗡鸣，甚至能听见炸弹倒计时的滴答声（心理感知）",
+              "expected_effect": "强化绝境的紧绷感，让读者和林枫一同感受到死亡的迫近"
+            }
+          ],
+          "verdict": "绝境中层层反转，牺牲与真相交织，紧绷感贯穿始终，情感冲击力与悬念感都极为出色"
+        },
+        "duration": 18.739251852035522,
+        "success": true
+      },
+      "ConsistencyReviewAgent": {
+        "result": {
+          "pass": true,
+          "overall_score": 10,
+          "issues": [],
+          "character_states": {
+            "林枫": "当前位置处于钟楼后老巷死胡同；身体状况：脚踝崴伤、脸颊被玻璃碎片划伤；心理状态：坚定追查搭档失踪真相，不放弃，意图救出沈渊并揭露组织内幕",
+            "沈渊": "当前位置处于钟楼内与陈锋手下对峙；身体状况：左胳膊被陈锋划伤流血；心理状态：以保护林枫、完成卧底任务为优先，不惜拼命",
+            "陈锋": "当前位置处于老巷外围包围林枫；身体状况：手腕被沈渊划伤；心理状态：得意于围堵林枫，意图灭口所有知情者以维护组织利益",
+            "乌鸦（周明）": "未在Part5实际出场，身份已被林枫知晓为林枫警校时期的教官、组织头目",
+            "张勇": "未在Part5实际出场，身份已被确认为内鬼、三年前签署沈渊叛逃结论的档案室副队长",
+            "李明": "未在Part5出场，无状态变化",
+            "老陈": "已死亡，死前将存有线索的U盘及沈渊卧底相关证据交给林枫"
+          },
+          "verdict": "Part5角色一致性良好，无角色名称、状态、知识、性格、关系方面的矛盾问题"
+        },
+        "duration": 25.92737126350403,
+        "success": true
+      }
+    },
+    "10": {
+      "LogicReviewAgent": {
+        "result": {
+          "score": 2,
+          "overall_score": 2,
+          "pass": false,
+          "p0_count": 5,
+          "p1_count": 2,
+          "p2_count": 0,
+          "issues": [],
+          "verdict": "Part10与Part9行动路线冲突，凭空新增芯片、纵火案、张勇职位、督查等5处P0问题",
+          "continuity_check": {
+            "character_states": "violated",
+            "timeline": "violated",
+            "established_facts": "violated"
+          },
+          "strengths": [],
+          "_protocol": "V5"
+        },
+        "duration": 106.45546388626099,
+        "success": true
+      },
+      "EmotionReviewAgent": {
+        "result": {
+          "pass": true,
+          "emotion_score": 8,
+          "resonance_score": 8,
+          "immersion_score": 8,
+          "emotion_target_met": true,
+          "emotion_curve": {
+            "start": "压抑紧绷",
+            "middle": "惊惧骇然",
+            "end": "极致紧张"
+          },
+          "highlights": [
+            "林枫发现张勇三次领走沈渊失踪案原始卷宗，且领用单签字与当年“沈渊叛逃”定性结论的签字完全一致，三年查案的所有疑点瞬间串联，憋屈与震撼感拉满",
+            "张勇捡到林枫掉落的领用单碎纸后，冷笑着扫向林枫藏身的档案柜，还当场栽赃林枫是替死鬼，内鬼的狠厉与压迫感直击读者",
+            "结尾张勇的脚步声停在档案室门口，门把手转动声在死寂走廊里格外清晰，留白式收尾把紧张感推到顶点，余味十足"
+          ],
+          "weaknesses": [
+            "林枫发现签字一致时的情绪反应稍显平缓，没有充分释放三年被蒙蔽、被停职的憋屈感，冲击力可以更强",
+            "张勇离开时的冷笑铺垫稍短，与后续威胁短信、脚步声逼近的衔接可以更紧密，强化步步紧逼的窒息感",
+            "沈渊收到短信后的反应稍显简略，可增加细节体现他对林枫的在意，让情感层次更丰富"
+          ],
+          "enhancement_suggestions": [
+            {
+              "location": "林枫翻到张勇领用单发现签字一致的情节",
+              "current": "连‘勇’字最后一笔那个小小的右勾都分毫不差——三年前他第一次看到那份结论的时候，就觉得这个签字有点奇怪，因为平时张勇写‘勇’字最后一笔是平的，那时候他还以为是局里重新走流程签的，现在才知道，那时候张勇就已经在动手脚了。",
+              "suggested": "连‘勇’字最后一笔那个小小的右勾都分毫不差——三年前他盯着那份‘沈渊叛逃’的定性结论时，就觉得这个勾不对劲，那时候张勇写‘勇’字最后一笔永远是平的，什么时候改了习惯？三年攒的疑问、憋的屈、查不出真相的钝痛，瞬间撞得他胸口发闷，喉结滚了滚，差点把嘴里的血腥气咬出来。",
+              "expected_effect": "让林枫的情绪爆发更自然，读者能更直观共情他三年来的憋屈，情感共鸣更强"
+            },
+            {
+              "location": "张勇捡起碎纸片抬头看向林枫藏身方向的情节",
+              "current": "随后他缓缓抬起头，目光像淬了冰的毒蛇，一寸寸扫过整个档案室，最后落在林枫躲的那个档案柜的方向，眼神冷得瘆人。",
+              "suggested": "随后他缓缓抬起头，目光像浸了冰的锥子，顺着碎纸片的边缘一寸寸刮过来，最后钉在林枫藏身的柜子缝隙上，他嘴角扯了扯，露出个森白的笑，指尖把碎纸片攥得咯吱响，转身时故意把皮鞋踩得格外响，像在警告躲着的人：我看见你了。",
+              "expected_effect": "强化对峙的张力，让读者的紧张感随张勇的动作同步拉满，代入感更强"
+            },
+            {
+              "location": "林枫收到威胁短信的情节",
+              "current": "林枫盯着那三个字，后背的寒意一层层往上爬，他猛地抬头看向档案室门口，就看见沈渊站在门口，脸色沉得可怕，手里攥着手机，显然也收到了同样的短信。",
+              "suggested": "短信跳出来的瞬间，林枫的后背瞬间绷紧，手机差点滑进积水里，‘别查了’三个字像冰锥子扎进眼底，他第一反应是沈渊出事了，指尖抖得几乎按不准屏幕，刚要抬头找沈渊，就看见对方也举着手机站在门口，脸色黑得像要滴出水。",
+              "expected_effect": "突出林枫对沈渊的在意，让情感更有层次，避免情绪表达单一"
+            }
+          ],
+          "verdict": "本Part压抑氛围贯穿始终，内鬼现身的悬念、步步紧逼的张力与留白式结尾完美结合，情感冲击和读者共鸣效果出色，是全程紧张感拉满的高质量情节"
+        },
+        "duration": 67.03990769386292,
+        "success": true
+      },
+      "ConsistencyReviewAgent": {
+        "result": {
+          "pass": true,
+          "overall_score": 8,
+          "issues": [
+            {
+              "level": "P2",
+              "dimension": "名称一致性",
+              "character": "督查",
+              "location": "Part10开头沈渊安排工作的段落",
+              "description": "“督查”角色未在前期提供的角色档案及前文剧情中提及，属于凭空出现的未建档角色",
+              "suggestion": "若需保留该角色，可补充其基础身份信息（如隶属督察大队的警员），或替换为前文已出现的警员角色（如李明）以保持角色体系一致性"
+            },
+            {
+              "level": "P2",
+              "dimension": "名称一致性",
+              "character": "秘书",
+              "location": "Part10开头沈渊提及羁押要求的段落",
+              "description": "“秘书”角色未在前期提供的角色档案及前文剧情中提及，属于凭空出现的未建档角色",
+              "suggestion": "可补充该秘书的身份背景（如乌鸦的贴身秘书），或替换为前文已出现的组织相关人员以保持角色一致性"
+            }
+          ],
+          "character_states": {
+            "林枫": "位于警署档案室，脚踝崴伤未愈、行走时疼痛难忍，心理上刚确认张勇是内鬼的证据，警惕性极高，坚定要追查沈渊失踪案的真相",
+            "沈渊": "位于警署档案室，身体状况无异常，心理上确认船锚暗号的真实性，警惕组织内鬼，正与林枫商议下一步行动",
+            "张勇": "刚离开警署档案室，身体状况无异常，心理上因发现档案被动过而慌乱心虚，意图栽赃林枫以自保"
+          },
+          "verdict": "Part10角色整体一致性良好，无P0/P1级严重问题，仅存在两个未在前期档案中提及的次要角色，无角色逻辑矛盾"
+        },
+        "duration": 60.03042149543762,
+        "success": true
+      }
+    },
+    "15": {
+      "LogicReviewAgent": {
+        "result": {
+          "score": 3,
+          "overall_score": 3,
+          "pass": false,
+          "p0_count": 6,
+          "p1_count": 1,
+          "p2_count": 0,
+          "issues": [],
+          "verdict": "Part15存在陈锋状态与前文冲突、场景突变、多处信息越界等P0问题，逻辑不一致",
+          "continuity_check": {
+            "character_states": "violated",
+            "timeline": "violated",
+            "established_facts": "violated"
+          },
+          "strengths": [],
+          "_protocol": "V5"
+        },
+        "duration": 28.955937147140503,
+        "success": true
+      },
+      "EmotionReviewAgent": {
+        "result": {
+          "pass": true,
+          "emotion_score": 9,
+          "resonance_score": 8,
+          "immersion_score": 9,
+          "emotion_target_met": true,
+          "emotion_curve": {
+            "start": "紧张对峙（陈锋与疤狼的势力对峙）",
+            "middle": "震惊愤怒（林枫得知父母真相、发现刺青与纸条的关联）",
+            "end": "惊险绝望（陈锋开枪、警笛逼近的绝境）"
+          },
+          "highlights": [
+            "林枫发现陈锋手腕蝎子刺青与三年前红墨水纸条的图案、缺口完全吻合，意识到自己三年来一直被对方监视玩弄的毛骨悚然感",
+            "陈锋当众挑明林枫父母车祸与沈渊有关，林枫信仰崩塌、沈渊有口难辩的强烈情绪张力",
+            "疤狼突然开枪击杀陈锋手下，码头对峙瞬间升级为火并，警笛逼近的绝境感拉满"
+          ],
+          "weaknesses": [
+            "陈锋与疤狼的内讧铺垫稍显仓促，两人矛盾爆发的转折略显突兀，缺乏前期伏笔支撑",
+            "林枫得知父母车祸真相后的情绪反应描写稍显克制，缺乏更具冲击力的生理反应、记忆闪回等细节来强化崩溃感",
+            "结尾陈锋开枪的瞬间，林枫的心理活动描写不足，冲突的冲击力还有提升空间"
+          ],
+          "enhancement_suggestions": [
+            {
+              "location": "陈锋与疤狼对峙转折处",
+              "current": "陈锋的脸色瞬间铁青，抬枪就对准了沈渊的额头……疤狼突然嗤笑了一声，手里的消音手枪抬了抬，对准了陈锋的后心：“陈锋，你跟你哥吵翻的事，是不是忘了跟我说？”",
+              "suggested": "陈锋的脸色瞬间铁青，抬枪就对准了沈渊的额头——他刚才瞥见疤狼的人偷偷摸到了自己手下的身后，指尖的扳机扣得发紧。疤狼突然嗤笑了一声，手里的消音手枪抬了抬，对准了陈锋的后心：“陈锋，你跟你哥吵翻分赃的事，是不是忘了跟我说？你哥临死前把账本藏的地方告诉我了，你以为你今天带这么多人，是来抓沈渊的？还是来杀我灭口的？”",
+              "expected_effect": "补全陈锋与疤狼的矛盾伏笔，让内讧转折更合理，张力更强"
+            },
+            {
+              "location": "林枫得知父母真相的段落",
+              "current": "林枫的脑子“嗡”地一声，扣着扳机的手猛地一抖，他盯着陈锋的脸，声音发颤：“你说什么？”",
+              "suggested": "林枫的脑子“嗡”地一声，扣着扳机的手猛地一抖，掌心的旧伤疤瞬间裂开渗出血珠，他盯着陈锋的脸，声音发颤得像被砂纸磨过：“你说什么？”三年前父母车祸现场的碎玻璃、救护车尖锐的鸣笛声突然撞进脑海，疼得他太阳穴突突直跳，连呼吸都带着血腥气",
+              "expected_effect": "强化林枫的震惊与痛苦，让读者更直观代入他的信仰崩塌感"
+            },
+            {
+              "location": "陈锋开枪的瞬间",
+              "current": "陈锋突然抬枪对着他的腿扣动了扳机",
+              "suggested": "陈锋突然抬枪对着他的腿扣动了扳机，林枫脑子里瞬间闪过三年前父母车祸时挡在他身前的父亲的后背，还有沈渊失踪前夜拍着他肩膀说“我替你守着”的温度，心脏猛地缩成一团，连躲闪的念头都慢了半拍",
+              "expected_effect": "强化冲突的冲击力，让读者更揪心，为后续剧情埋下情绪伏笔"
+            }
+          ],
+          "verdict": "本Part多层对峙张力拉满，真相反转极具冲击力，情感代入感强，节奏把控优秀，是全文情绪的高潮段落之一"
+        },
+        "duration": 24.82176661491394,
+        "success": true
+      },
+      "ConsistencyReviewAgent": {
+        "result": {
+          "pass": false,
+          "overall_score": 3,
+          "issues": [
+            {
+              "level": "P0",
+              "dimension": "自动审查",
+              "character": "全局",
+              "location": "Part 15",
+              "description": "一致性检查Agent执行失败: 速率限制或配额不足: Error code: 402 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details', 'type': 'quota_exceeded'}}",
+              "suggestion": "需人工核查此Part的角色一致性"
+            }
+          ],
+          "character_states": {},
+          "verdict": "检查失败（已降级评分）: 速率限制或配额不足: Error code: 402 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details', 'type': 'quota_exceeded'}}"
+        },
+        "duration": 75.76803922653198,
+        "success": true
+      }
+    },
+    "20": {
+      "LogicReviewAgent": {
+        "result": {
+          "score": 3,
+          "overall_score": 3,
+          "pass": false,
+          "p0_count": 1,
+          "p1_count": 0,
+          "p2_count": 0,
+          "issues": [],
+          "verdict": "审查失败（已降级评分）: 速率限制或配额不足: Error code: 402 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details', 'type': 'quota_exceeded'}}",
+          "continuity_check": {
+            "character_states": "未检查",
+            "timeline": "未检查",
+            "established_facts": "未检查"
+          },
+          "strengths": [],
+          "_protocol": "V5",
+          "_fallback": true,
+          "_error": "速率限制或配额不足: Error code: 402 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details', 'type': 'quota_exceeded'}}"
+        },
+        "duration": 9.779953002929688,
+        "success": true
+      },
+      "EmotionReviewAgent": {
+        "result": {
+          "pass": false,
+          "emotion_score": 3,
+          "resonance_score": 3,
+          "immersion_score": 3,
+          "emotion_target_met": false,
+          "emotion_curve": {
+            "start": "未知",
+            "middle": "未知",
+            "end": "未知"
+          },
+          "highlights": [],
+          "weaknesses": [
+            "情感评估Agent执行失败: 速率限制或配额不足: Error code: 402 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details', 'type': 'quota_exceeded'}}"
+          ],
+          "enhancement_suggestions": [],
+          "verdict": "评估失败（已降级评分）: 速率限制或配额不足: Error code: 402 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details', 'type': 'quota_exceeded'}}"
+        },
+        "duration": 9.802308320999146,
+        "success": true
+      },
+      "ConsistencyReviewAgent": {
+        "result": {
+          "pass": false,
+          "overall_score": 3,
+          "issues": [
+            {
+              "level": "P0",
+              "dimension": "自动审查",
+              "character": "全局",
+              "location": "Part 20",
+              "description": "一致性检查Agent执行失败: 速率限制或配额不足: Error code: 402 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details', 'type': 'quota_exceeded'}}",
+              "suggestion": "需人工核查此Part的角色一致性"
+            }
+          ],
+          "character_states": {},
+          "verdict": "检查失败（已降级评分）: 速率限制或配额不足: Error code: 402 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details', 'type': 'quota_exceeded'}}"
+        },
+        "duration": 9.792782545089722,
+        "success": true
+      }
+    },
+    "25": {
+      "LogicReviewAgent": {
+        "result": {
+          "score": 3,
+          "overall_score": 3,
+          "pass": false,
+          "p0_count": 1,
+          "p1_count": 0,
+          "p2_count": 0,
+          "issues": [],
+          "verdict": "审查失败（已降级评分）: 速率限制或配额不足: Error code: 402 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details', 'type': 'quota_exceeded'}}",
+          "continuity_check": {
+            "character_states": "未检查",
+            "timeline": "未检查",
+            "established_facts": "未检查"
+          },
+          "strengths": [],
+          "_protocol": "V5",
+          "_fallback": true,
+          "_error": "速率限制或配额不足: Error code: 402 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details', 'type': 'quota_exceeded'}}"
+        },
+        "duration": 9.82936978340149,
+        "success": true
+      },
+      "EmotionReviewAgent": {
+        "result": {
+          "pass": false,
+          "emotion_score": 3,
+          "resonance_score": 3,
+          "immersion_score": 3,
+          "emotion_target_met": false,
+          "emotion_curve": {
+            "start": "未知",
+            "middle": "未知",
+            "end": "未知"
+          },
+          "highlights": [],
+          "weaknesses": [
+            "情感评估Agent执行失败: 速率限制或配额不足: Error code: 402 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details', 'type': 'quota_exceeded'}}"
+          ],
+          "enhancement_suggestions": [],
+          "verdict": "评估失败（已降级评分）: 速率限制或配额不足: Error code: 402 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details', 'type': 'quota_exceeded'}}"
+        },
+        "duration": 9.8008451461792,
+        "success": true
+      },
+      "ConsistencyReviewAgent": {
+        "result": {
+          "pass": false,
+          "overall_score": 3,
+          "issues": [
+            {
+              "level": "P0",
+              "dimension": "自动审查",
+              "character": "全局",
+              "location": "Part 25",
+              "description": "一致性检查Agent执行失败: 速率限制或配额不足: Error code: 402 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details', 'type': 'quota_exceeded'}}",
+              "suggestion": "需人工核查此Part的角色一致性"
+            }
+          ],
+          "character_states": {},
+          "verdict": "检查失败（已降级评分）: 速率限制或配额不足: Error code: 402 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details', 'type': 'quota_exceeded'}}"
+        },
+        "duration": 9.809711933135986,
+        "success": true
+      }
+    },
+    "30": {
+      "LogicReviewAgent": {
+        "result": {
+          "score": 3,
+          "overall_score": 3,
+          "pass": false,
+          "p0_count": 1,
+          "p1_count": 0,
+          "p2_count": 0,
+          "issues": [],
+          "verdict": "审查失败（已降级评分）: 速率限制或配额不足: Error code: 402 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details', 'type': 'quota_exceeded'}}",
+          "continuity_check": {
+            "character_states": "未检查",
+            "timeline": "未检查",
+            "established_facts": "未检查"
+          },
+          "strengths": [],
+          "_protocol": "V5",
+          "_fallback": true,
+          "_error": "速率限制或配额不足: Error code: 402 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details', 'type': 'quota_exceeded'}}"
+        },
+        "duration": 9.897368669509888,
+        "success": true
+      },
+      "EmotionReviewAgent": {
+        "result": {
+          "pass": false,
+          "emotion_score": 3,
+          "resonance_score": 3,
+          "immersion_score": 3,
+          "emotion_target_met": false,
+          "emotion_curve": {
+            "start": "未知",
+            "middle": "未知",
+            "end": "未知"
+          },
+          "highlights": [],
+          "weaknesses": [
+            "情感评估Agent执行失败: 速率限制或配额不足: Error code: 402 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details', 'type': 'quota_exceeded'}}"
+          ],
+          "enhancement_suggestions": [],
+          "verdict": "评估失败（已降级评分）: 速率限制或配额不足: Error code: 402 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details', 'type': 'quota_exceeded'}}"
+        },
+        "duration": 10.730353116989136,
+        "success": true
+      },
+      "ConsistencyReviewAgent": {
+        "result": {
+          "pass": false,
+          "overall_score": 3,
+          "issues": [
+            {
+              "level": "P0",
+              "dimension": "自动审查",
+              "character": "全局",
+              "location": "Part 30",
+              "description": "一致性检查Agent执行失败: 速率限制或配额不足: Error code: 402 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details', 'type': 'quota_exceeded'}}",
+              "suggestion": "需人工核查此Part的角色一致性"
+            }
+          ],
+          "character_states": {},
+          "verdict": "检查失败（已降级评分）: 速率限制或配额不足: Error code: 402 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details', 'type': 'quota_exceeded'}}"
+        },
+        "duration": 9.88559365272522,
+        "success": true
+      }
+    }
+  },
+  "avg_logic": 3.857142857142857,
+  "avg_emotion": 6.142857142857143,
+  "avg_consistency": 5.714285714285714,
+  "improvements": {
+    "window_size": "3 → 6",
+    "rag_enabled": true,
+    "facts_layered": true,
+    "prev_part_anchor": true
+  }
+}

@@ -73,8 +73,8 @@ class VectorStore:
         embedding_provider: Optional[str] = None,
         embedding_dim: int = EMBEDDING_DIM,
     ):
-        # 默认关闭，由环境变量 ENABLE_VECTOR_RAG 控制
-        self.enabled = os.environ.get("ENABLE_VECTOR_RAG", "0") == "1"
+        # R12: 默认开启 RAG（hash 假向量），仍可通过 ENABLE_VECTOR_RAG=0 显式关闭
+        self.enabled = os.environ.get("ENABLE_VECTOR_RAG", "1") == "1"
         self.embedding_provider = (embedding_provider or os.environ.get("VECTOR_EMBEDDING_PROVIDER", "none")).lower()
         self.embedding_dim = embedding_dim
         # { part_num: { "text": str, "embedding": List[float] } }

@@ -383,6 +383,21 @@ class PartWriterAgent(BaseAgent):
                 "\n（这是第一部分，没有前文事实清单）\n"
             )
 
+            # R12: 显式注入 Part N-1 结尾最后 600 字，作为第一片段的"承接锚点"
+            # （window_size=6 后，Part N-1 仍在窗口内，可直接读 part_summaries + 末尾）
+            prev_part_anchor = ""
+            if state is not None and part_num > 1 and hasattr(state, "parts"):
+                try:
+                    prev_text = (state.parts.get(str(part_num - 1), "") or
+                                 state.parts.get(part_num - 1, ""))
+                    if prev_text:
+                        prev_part_anchor = (
+                            f"\n## ⚠ Part {part_num-1} 结尾最后 600 字（你的开篇必须直接承接以下情境，地点/时间/在场人物/动作状态保持一致）\n"
+                            f"{prev_text[-600:]}\n"
+                        )
+                except Exception:
+                    prev_part_anchor = ""
+
             return f"""请创作第{part_num}部分（Part {part_num}）的第一个片段。
 
 ## Part规划
@@ -405,13 +420,15 @@ class PartWriterAgent(BaseAgent):
 ## 故事上下文
 {context}
 {facts_paragraph}
+{prev_part_anchor}
 
-## 创作指令
-1. 第一句话直接进入情节，不要任何铺垫
-2. 自然承接上一部分结尾的情境
-3. 严格完成本片段的核心事件推进
-4. 结尾实现钩子效果（但本章还有更多片段，不需要在此处完全收尾）
-5. 本片段字数控制在 {max(1000, chunk_target - 200)}-{chunk_target + 200}字之间
+## 创作指令（R12 强化）
+1. **【强约束】开篇必须从 Part {part_num-1 if part_num > 1 else '0'} 结尾情境直接续接** —— 地点、时辰、在场人物、动作状态保持一致，不允许场景跳跃
+2. 第一句话直接进入情节，不要任何铺垫
+3. 自然承接上一部分结尾的情境
+4. 严格完成本片段的核心事件推进
+5. 结尾实现钩子效果（但本章还有更多片段，不需要在此处完全收尾）
+6. 本片段字数控制在 {max(1000, chunk_target - 200)}-{chunk_target + 200}字之间
 
 ## 强制约束（R8 新增）
 
@@ -505,10 +522,11 @@ class PartWriterAgent(BaseAgent):
             return 0
         added = ef.add_many(new_facts)
         # R9 应急：LLM 抽取常失败，叠加规则 fallback（从 part_summaries + characters + outline 派生）
+        # R12 强化：使用 derive_facts_layered 三层抽取 + 引用验证 + 上限 15 条
         if added == 0:
             try:
-                from core.established_facts import derive_facts_from_summary
-                rule_facts = derive_facts_from_summary(state, part_num)
+                from core.established_facts import derive_facts_layered
+                rule_facts = derive_facts_layered(state, part_num, part_text)
                 added = ef.add_many(rule_facts)
             except Exception as _:
                 pass

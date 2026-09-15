@@ -29,7 +29,8 @@ class SlidingWindow:
     SUMMARY_L2_LEN = 800    # 二级滚动摘要目标长度（字）（R8: 500 → 800）
     SUMMARY_L3_LEN = 2000   # 三级里程碑摘要目标长度（字）
 
-    def __init__(self, window_size: int = 3):
+    def __init__(self, window_size: int = 6):
+        # R12: window_size 3→6，覆盖更长上下文，减小长程一致性衰减
         self.window_size = window_size
         # 最近 K 个 Part 的原文
         self.parts: dict = {}               # {part_num: text}
