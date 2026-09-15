@@ -280,21 +280,32 @@ class PartWriterAgent(BaseAgent):
                 state=state,
             )
 
-            # 4) 调用 LLM（max_tokens 控制在 ~5500，中文 1.5 tokens/字）
-            chunk_max_tokens = min(CHUNK_WORDS * 2 + 300, 6000)
+            # 4) 调用 LLM（max_tokens 提到 12000 应对 step-3.7-flash CoT + 内容；空内容时增大重试）
+            chunk_max_tokens = min(CHUNK_WORDS * 2 + 300, 12000)
 
             chunk_start = time.time()
             self.update_progress(
                 45 + (chunk_idx - 1) * 5,  # 45% → 70% 区间，每个片段 5%
                 f"Part {part_num} 片段 {chunk_idx}/{MAX_CHUNKS} 生成中..."
             )
-            chunk_text = call_llm(
-                system_prompt=PART_CHUNK_SYSTEM_PROMPT,
-                user_prompt=chunk_user_prompt,
-                temperature=0.85,
-                max_tokens=chunk_max_tokens,
-                agent=self.name,
-            )
+            chunk_text = ""
+            # R8 应急修复：step-3.7-flash 是推理模型，CoT 偶尔会吃掉全部 token
+            for retry_attempt in range(3):
+                cur_max = chunk_max_tokens * (1 + retry_attempt)  # 12000 / 24000 / 36000
+                try:
+                    chunk_text = call_llm(
+                        system_prompt=PART_CHUNK_SYSTEM_PROMPT,
+                        user_prompt=chunk_user_prompt,
+                        temperature=0.85,
+                        max_tokens=cur_max,
+                        agent=self.name,
+                    )
+                except Exception as e:
+                    print(f"[PartWriterAgent] Part {part_num} 片段 {chunk_idx} 第 {retry_attempt+1} 次调用异常: {e}")
+                    chunk_text = ""
+                if chunk_text and chunk_text.strip():
+                    break
+                print(f"[PartWriterAgent] Part {part_num} 片段 {chunk_idx} 第 {retry_attempt+1} 次返回空内容（max_tokens={cur_max}），重试...")
             chunk_elapsed = time.time() - chunk_start
 
             # 5) 清理：去掉可能的前导重述
