@@ -114,9 +114,8 @@ def update_provider_config(provider_id: str, req: ProviderConfigUpdate):
         print(f"[PUT] 自定义LLM Base URL已更新为: {req.base_url}")
     
     # 清除 llm_client 的缓存
-    from core import llm_client as llm_client_module
-    llm_client_module._client_cache.clear()
-    llm_client_module._client = None
+    from core.llm_client import reset_llm_clients
+    reset_llm_clients()
     llm_client_module._json_client = None
     
     print(f"[PUT] 供应商 {provider_id} 配置更新完成")
@@ -173,9 +172,8 @@ def update_llm_config_api(req: LLMConfigUpdate):
     )
     save_llm_config(cfg)
     # 清除 llm_client 的缓存（下次调用会重新读取配置）
-    from core import llm_client as llm_client_module
-    llm_client_module._client_cache.clear()
-    llm_client_module._client = None
+    from core.llm_client import reset_llm_clients
+    reset_llm_clients()
     llm_client_module._json_client = None
     return {"ok": True}
 
@@ -225,9 +223,8 @@ def update_llm_config_legacy(req: LLMConfigUpdateLegacy):
     if req.json_model and provider_id in json_model_key_map:
         write_env(json_model_key_map[provider_id], req.json_model)
 
-    from core import llm_client as llm_client_module
-    llm_client_module._client_cache.clear()
-    llm_client_module._client = None
+    from core.llm_client import reset_llm_clients
+    reset_llm_clients()
     llm_client_module._json_client = None
     return {"ok": True}
 
@@ -404,16 +401,17 @@ def update_app_config(req: AppConfigUpdate):
 
 # =============================================
 # R15: 滑动窗口配置（UI 可手动调整）
+# R21-P2-30: WINDOW_CONFIG_FILE 改从 core.sliding_window 单一来源导入
 # =============================================
 import os as _os
-WINDOW_CONFIG_FILE = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__))), "data", "window_config.json")
+from core.sliding_window import WINDOW_CONFIG_FILE as _WCF
 
 
 def load_window_config() -> dict:
     """从 data/window_config.json 读取滑动窗口配置。"""
     try:
-        if _os.path.exists(WINDOW_CONFIG_FILE):
-            with open(WINDOW_CONFIG_FILE, "r", encoding="utf-8") as f:
+        if _os.path.exists(_WCF):
+            with open(_WCF, "r", encoding="utf-8") as f:
                 return json.load(f)
     except Exception:
         pass
@@ -422,8 +420,8 @@ def load_window_config() -> dict:
 
 def save_window_config(cfg: dict) -> None:
     """写入 data/window_config.json。"""
-    _os.makedirs(_os.path.dirname(WINDOW_CONFIG_FILE), exist_ok=True)
-    with open(WINDOW_CONFIG_FILE, "w", encoding="utf-8") as f:
+    _os.makedirs(_os.path.dirname(_WCF), exist_ok=True)
+    with open(_WCF, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 

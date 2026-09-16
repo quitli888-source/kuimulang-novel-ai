@@ -206,6 +206,17 @@ def get_json_client() -> OpenAI:
     return _json_client
 
 
+# R21-P2-22: 跨模块操作全局变量的封装
+def reset_llm_clients() -> None:
+    """R21-P2-22: 统一重置所有 LLM 客户端缓存 + 全局单例。
+    供 config_api.py 在切换供应商/修改配置后调用，避免每个调用点都直接操作全局变量。
+    """
+    global _client, _json_client, _client_cache
+    _client = None
+    _json_client = None
+    _client_cache.clear()
+
+
 def call_llm(
     system_prompt: str,
     user_prompt: str,

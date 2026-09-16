@@ -22,14 +22,11 @@ def _load_user_window_config() -> dict:
     """
     R15: 读取 data/window_config.json 作为用户 UI 配置。
     返回 {"window_size": int, "rolling_every": int, "milestone_every": int}（缺字段则省略）。
+    R21-P2-30: 路径常量 WINDOW_CONFIG_FILE 同时被 sliding_window.py 和 config_api.py 共用。
     """
     try:
-        # 项目根目录的 data/window_config.json
-        # __file__ = backend/core/sliding_window.py => ../../..
-        project_root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-        config_file = _os.path.join(project_root, "data", "window_config.json")
-        if _os.path.exists(config_file):
-            with open(config_file, "r", encoding="utf-8") as f:
+        if _os.path.exists(WINDOW_CONFIG_FILE):
+            with open(WINDOW_CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = _json.load(f)
                 out = {}
                 for k in ("window_size", "rolling_every", "milestone_every"):
@@ -42,6 +39,12 @@ def _load_user_window_config() -> dict:
     except Exception:
         pass
     return {}
+
+
+# R21-P2-30: 单一来源 —— backend/core/sliding_window.py 与 backend/api/config_api.py 共享
+# project_root = 3 层 dirname（sliding_window.py 在 backend/core/）
+_PROJECT_ROOT = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+WINDOW_CONFIG_FILE = _os.path.join(_PROJECT_ROOT, "data", "window_config.json")
 
 
 class SlidingWindow:

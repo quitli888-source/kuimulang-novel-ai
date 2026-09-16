@@ -208,16 +208,21 @@ class MemoryReviewer:
         return results
     
     def _promote_memory(self, promotion: Dict):
-        """提升记忆条目"""
-        # 实现记忆条目的移动逻辑
-        # 这里需要根据具体的存储实现来编写
-        pass
-    
+        """R21-P2-27: 提升记忆条目 —— 暂未实现，调用方必须 catch NotImplementedError。
+        之前是空 pass，会让 apply_memory_changes '成功' 但什么都不做，造成 silent 数据丢失。
+        """
+        raise NotImplementedError(
+            "_promote_memory 尚未实现。请在 MemoryManager 中实现 promote 操作"
+            "（将临时/局部记忆提升到全局记忆）后调用此方法。"
+        )
+
     def _cleanup_memory(self, cleanup: Dict):
-        """清理记忆条目"""
-        # 实现记忆条目的清理逻辑
-        # 这里需要根据具体的存储实现来编写
-        pass
+        """R21-P2-27: 清理记忆条目 —— 暂未实现。
+        """
+        raise NotImplementedError(
+            "_cleanup_memory 尚未实现。请在 MemoryManager 中实现 cleanup 操作"
+            "（删除过期/废弃的记忆条目）后调用此方法。"
+        )
 
 
 # 全局记忆审查器实例
