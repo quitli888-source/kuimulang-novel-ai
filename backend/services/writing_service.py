@@ -216,7 +216,8 @@ class WritingService:
         # R5-P0-3: 把 cost_tracker 绑定到当前 work + 还原持久化 history（双轨合并）
         try:
             from core.cost_tracker import get_tracker
-            tracker = get_tracker()
+            # R20-P1-16: 传入 work_id 以获取该 work 专属 tracker（避免多作品并发互相覆盖）
+            tracker = get_tracker(work_id=self.work_id)
             # 注意：若 writing_service 在 restart 路径下已 _save_initial_state 清空过 data，
             # 此时 data["cost_summary"] 已被新初始值覆盖（_save_initial_state 不写 cost_summary），
             # 但 attach_work 的去重逻辑保证安全。
@@ -919,7 +920,8 @@ class WritingService:
                     from core.cost_tracker import should_prompt_for_cost
                     if should_prompt_for_cost(work_id=self.work_id):
                         from core.cost_tracker import get_tracker
-                        summary = get_tracker().get_summary()
+                        # R20-P1-16: 传入 work_id 获取该 work 专属 tracker
+                        summary = get_tracker(work_id=self.work_id).get_summary()
                         await self._request_confirm(
                             f"cost_limit_{i}",
                             f"💰 已花费约 ¥{summary['estimated_cost_rmb']:.2f}（{summary['total_calls']} 次调用）\n\n是否继续创作？"
@@ -1232,12 +1234,14 @@ class WritingService:
             from core.cost_tracker import get_tracker
             # 强制 flush cost_tracker 落盘，避免 R17 节流策略导致重启后丢数据
             try:
-                get_tracker().force_flush()
+                # R20-P1-16: 传入 work_id 走 per-work tracker
+                get_tracker(work_id=self.work_id).force_flush()
             except Exception:
                 pass
             # 同步当前进程的 cost_tracker 累计（含 calls 列表）到 data，便于 uvicorn 重启后
             # works.py get_work 能 attach_work() 还原历史（双轨持久化合并 source of truth）。
-            self.data["cost_summary"] = get_tracker().get_summary()
+            # R20-P1-16: 传入 work_id 走 per-work tracker（多作品并发不互相覆盖）
+            self.data["cost_summary"] = get_tracker(work_id=self.work_id).get_summary()
         except Exception:
             # tracker 不可用时保留已有值
             pass

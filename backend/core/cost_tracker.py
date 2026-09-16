@@ -300,28 +300,50 @@ class CostTracker:
         self._start_time = time.time()
 
 
-# 全局单例
+# 全局单例（向后兼容；同时支持 R20-P1-16 per-work 隔离）
 _tracker = None
+# R20-P1-16: per-work cost_tracker 隔离，避免多作品并发时 attach_work 覆盖 _persist_work_id
+_trackers: dict[str, CostTracker] = {}
 
 
-def get_tracker() -> CostTracker:
-    """获取全局成本追踪器"""
+def get_tracker(work_id: Optional[str] = None) -> CostTracker:
+    """R20-P1-16: 获取成本追踪器。
+    - 传 work_id 时返回该 work 的 tracker（自动创建）
+    - 不传 work_id 时返回全局共享 tracker（向后兼容，单作品场景可用）
+    """
     global _tracker
+    if work_id is not None:
+        if work_id not in _trackers:
+            _trackers[work_id] = CostTracker()
+        return _trackers[work_id]
+    # 不传 work_id：全局单例（向后兼容）
     if _tracker is None:
         _tracker = CostTracker()
     return _tracker
 
 
-def reset_tracker():
-    """重置全局成本追踪器"""
+def reset_tracker(work_id: Optional[str] = None):
+    """R20-P1-16: 重置追踪器。
+    - 传 work_id 时只清该 work
+    - 不传时清全局 + 所有 per-work
+    """
     global _tracker
+    if work_id is not None:
+        _trackers.pop(work_id, None)
+        return
     _tracker = CostTracker()
+    _trackers.clear()
+
+
+def get_all_trackers() -> dict[str, CostTracker]:
+    """R20-P1-16: 获取所有 per-work tracker（用于跨作品监控）。"""
+    return dict(_trackers)
 
 
 # ---- R3-P1-6: 模块级便捷函数 ----
 def should_prompt_for_cost(work_id: Optional[str] = None, threshold: Optional[float] = None) -> bool:
-    """模块级便捷函数：调用全局 tracker 的 should_prompt_for_cost。"""
-    return get_tracker().should_prompt_for_cost(work_id=work_id, threshold=threshold)
+    """模块级便捷函数：调用对应 work 的 tracker 的 should_prompt_for_cost。"""
+    return get_tracker(work_id=work_id).should_prompt_for_cost(work_id=work_id, threshold=threshold)
 
 
 # ---- R7-P0-3: 流式调用 usage 兜底估算 ----
