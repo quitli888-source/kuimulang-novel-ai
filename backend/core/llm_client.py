@@ -18,29 +18,6 @@ from core.config import (
 )
 from core.error_handler import LLMError, NetworkError, SystemError
 
-# ---- 全局客户端 ----
-_client = None        # 正文写作客户端
-_json_client = None   # JSON任务客户端（可能与上面相同）
-
-
-def get_client() -> OpenAI:
-    """获取默认正文写作 LLM 客户端（全局模式）"""
-    global _client
-    if _client is None:
-        cfg = get_llm_config()
-        _client = OpenAI(api_key=cfg.api_key, base_url=cfg.base_url)
-    return _client
-
-
-def get_json_client() -> OpenAI:
-    """获取默认 JSON 任务专用客户端（全局模式）"""
-    global _json_client
-    if _json_client is None:
-        cfg = get_llm_config()
-        _json_client = OpenAI(api_key=cfg.api_key, base_url=cfg.base_url)
-    return _json_client
-
-
 # ---- temperature 安全修正 ----
 def _safe_temperature(temp: float, model: str) -> float:
     """

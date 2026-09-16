@@ -60,6 +60,8 @@ class SSEEmitter:
         self._recent_events: dict[int, str] = {}
         # 丢事件计数（供监控 / 调试）
         self.dropped_count: int = 0
+        # R16: 心跳 id 偏移量（毫秒时间戳 - offset 避免与正常 event id 冲突；不写入 _recent_events）
+        self._hb_counter_offset: int = 0
 
     def _next_event_id(self) -> int:
         self._event_seq += 1
@@ -253,8 +255,8 @@ async def sse_stream(request: Request, work_id: str = ""):
                     yield f"data: {payload}\n\n"
                     last_heartbeat = time.time()
                 except asyncio.TimeoutError:
-                    # 发送心跳（R3-P0-5: 心跳携带 last_event_id 与 process 级最大 id 供前端对齐）
-                    hb_event_id = _emitter._next_event_id()
+                    # 发送心跳（R16: 心跳使用独立 id 命名空间，不污染 _event_seq）
+                    # 避免断线重连时前端用 Last-Event-ID 收到一堆心跳补发
                     heartbeat = json.dumps({
                         "type": EventType.HEARTBEAT,
                         "data": {
@@ -262,9 +264,10 @@ async def sse_stream(request: Request, work_id: str = ""):
                             "dropped_count": _emitter.dropped_count,
                         },
                         "ts": time.time(),
-                        "id": hb_event_id,
+                        # 心跳 id 用负数命名空间（-1, -2, ...）避免与正常事件 id 冲突
+                        "id": f"hb-{int(time.time() * 1000) - _emitter._hb_counter_offset}",
                     }, ensure_ascii=False)
-                    _emitter._record_recent(hb_event_id, heartbeat)
+                    # 心跳不进入 _recent_events 补发队列（前端不需要补发心跳）
                     yield f"data: {heartbeat}\n\n"
                     last_heartbeat = time.time()
         except GeneratorExit:

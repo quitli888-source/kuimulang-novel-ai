@@ -87,22 +87,42 @@ class VectorStore:
 
     # ---------- 公开 API ----------
     def add(self, part_num: int, text: str, embedding: Optional[List[float]] = None) -> bool:
-        """写入一个 Part 的文本与 embedding。
-        embedding 为 None 时降级为 hash-based 假向量。
-        返回是否真的写入（disabled 时为 False）。
+        """
+        R16: 改为 lazy build — 写入时不再立即算 embedding。
+        - 如果调用方传了 embedding，直接存
+        - 否则只存 text，embedding 在首次 query() 时按需计算并缓存到 _store[pn]['embedding']
+        这样 100 Part × 600 chunk 的高频 add 不会重复跑 SHA-256。
         """
         if not self.enabled:
             return False
         if not isinstance(text, str) or not text:
             return False
-        if embedding is None:
-            embedding = self._embed(text)
-        # 维度对齐
-        if len(embedding) != self.embedding_dim:
-            embedding = self._resize(embedding, self.embedding_dim)
-        self._store[int(part_num)] = {"text": text, "embedding": embedding}
+        pn = int(part_num)
+        if embedding is not None and len(embedding) == self.embedding_dim:
+            self._store[pn] = {"text": text, "embedding": embedding}
+        elif embedding is not None:
+            self._store[pn] = {"text": text, "embedding": self._resize(embedding, self.embedding_dim)}
+        else:
+            # 不立即算 embedding，置 None，query() 时 lazy 计算
+            self._store[pn] = {"text": text, "embedding": None}
         self._stats["add_count"] += 1
         return True
+
+    def _ensure_embedding(self, pn: int) -> Optional[List[float]]:
+        """R16: 懒加载 — 首次 query 某 Part 时算 embedding 并缓存。"""
+        item = self._store.get(pn)
+        if item is None:
+            return None
+        emb = item.get("embedding")
+        if emb is not None:
+            return emb
+        # lazy compute
+        text = item.get("text") or ""
+        emb = self._embed(text)
+        if len(emb) != self.embedding_dim:
+            emb = self._resize(emb, self.embedding_dim)
+        item["embedding"] = emb
+        return emb
 
     def query(self, query_text: str, top_k: int = 3, exclude_part_num: Optional[int] = None) -> List[Tuple[int, float]]:
         """检索 top_k 相关 Part，返回 [(part_num, similarity), ...]，按相似度降序。
@@ -124,7 +144,11 @@ class VectorStore:
         for part_num, item in self._store.items():
             if exclude_part_num is not None and int(part_num) == int(exclude_part_num):
                 continue
-            sim = _cosine(q_emb, item["embedding"])
+            # R16: 懒加载 embedding（首次 query 算一次并缓存到 _store[pn]['embedding']）
+            doc_emb = self._ensure_embedding(int(part_num))
+            if doc_emb is None:
+                continue
+            sim = _cosine(q_emb, doc_emb)
             scores.append((int(part_num), sim))
         scores.sort(key=lambda x: x[1], reverse=True)
         self._stats["query_count"] += 1
