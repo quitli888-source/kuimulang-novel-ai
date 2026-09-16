@@ -39,6 +39,14 @@ PRESET_PROVIDERS = [
         json_model="abab6.5s-chat",
     ),
     LLMProvider(
+        id="minimax_m3",
+        name="MiniMax-M3（MiniMax.cn 新版）",
+        api_key_name="MINIMAX_M3_API_KEY",
+        base_url="https://api.minimax.cn/v1",
+        model="MiniMax-M3",
+        json_model="abab6.5s-chat",
+    ),
+    LLMProvider(
         id="deepseek",
         name="DeepSeek",
         api_key_name="DEEPSEEK_API_KEY",

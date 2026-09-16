@@ -1,5 +1,5 @@
 {
-  "active_provider_id": "step",
+  "active_provider_id": "minimax_m3",
   "per_agent_enabled": false,
   "agent_providers": {
     "plot_planner": "step",

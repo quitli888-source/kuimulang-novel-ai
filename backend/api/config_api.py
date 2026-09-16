@@ -32,6 +32,7 @@ def list_providers():
     model_key_map = {
         "step": ("STEP_MODEL", "STEP_JSON_MODEL"),
         "minimax": ("MINIMAX_MODEL", "MINIMAX_JSON_MODEL"),
+        "minimax_m3": ("MINIMAX_M3_MODEL", "MINIMAX_M3_JSON_MODEL"),
         "deepseek": ("DEEPSEEK_MODEL", "DEEPSEEK_JSON_MODEL"),
         "openai": ("OPENAI_MODEL", "OPENAI_JSON_MODEL"),
         "siliconflow": ("SILICONFLOW_MODEL", "SILICONFLOW_JSON_MODEL"),
@@ -103,6 +104,7 @@ def update_provider_config(provider_id: str, req: ProviderConfigUpdate):
     model_key_map = {
         "step": "STEP_MODEL",
         "minimax": "MINIMAX_MODEL",
+        "minimax_m3": "MINIMAX_M3_MODEL",
         "deepseek": "DEEPSEEK_MODEL",
         "openai": "OPENAI_MODEL",
         "siliconflow": "SILICONFLOW_MODEL",
@@ -112,6 +114,7 @@ def update_provider_config(provider_id: str, req: ProviderConfigUpdate):
     json_model_key_map = {
         "step": "STEP_JSON_MODEL",
         "minimax": "MINIMAX_JSON_MODEL",
+        "minimax_m3": "MINIMAX_M3_JSON_MODEL",
         "deepseek": "DEEPSEEK_JSON_MODEL",
         "openai": "OPENAI_JSON_MODEL",
         "siliconflow": "SILICONFLOW_JSON_MODEL",
@@ -232,6 +235,7 @@ def update_llm_config_legacy(req: LLMConfigUpdateLegacy):
     key_map = {
         "step": "STEP_API_KEY",
         "minimax": "MINIMAX_API_KEY",
+        "minimax_m3": "MINIMAX_M3_API_KEY",
         "deepseek": "DEEPSEEK_API_KEY",
         "openai": "OPENAI_API_KEY",
         "siliconflow": "SILICONFLOW_API_KEY",
@@ -240,6 +244,7 @@ def update_llm_config_legacy(req: LLMConfigUpdateLegacy):
     model_key_map = {
         "step": "STEP_MODEL",
         "minimax": "MINIMAX_MODEL",
+        "minimax_m3": "MINIMAX_M3_MODEL",
         "deepseek": "DEEPSEEK_MODEL",
         "openai": "OPENAI_MODEL",
         "siliconflow": "SILICONFLOW_MODEL",
@@ -248,6 +253,7 @@ def update_llm_config_legacy(req: LLMConfigUpdateLegacy):
     json_model_key_map = {
         "step": "STEP_JSON_MODEL",
         "minimax": "MINIMAX_JSON_MODEL",
+        "minimax_m3": "MINIMAX_M3_JSON_MODEL",
         "deepseek": "DEEPSEEK_JSON_MODEL",
         "openai": "OPENAI_JSON_MODEL",
         "siliconflow": "SILICONFLOW_JSON_MODEL",
@@ -256,6 +262,7 @@ def update_llm_config_legacy(req: LLMConfigUpdateLegacy):
     base_url_key_map = {
         "step": "STEP_BASE_URL",
         "minimax": "MINIMAX_BASE_URL",
+        "minimax_m3": "MINIMAX_M3_BASE_URL",
         "deepseek": "DEEPSEEK_BASE_URL",
         "openai": "OPENAI_BASE_URL",
         "siliconflow": "SILICONFLOW_BASE_URL",
