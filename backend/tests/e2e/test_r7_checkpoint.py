@@ -8,49 +8,28 @@ import os
 import sys
 import time
 import types
-
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
-sys.path.insert(0, os.path.join(ROOT, "backend"))
-
-os.environ.setdefault(
-    "STEP_API_KEY",
-    "2AUHLIl7GnTbiSC0G9EwAX5OJQuKcA2XDk8vbvArNISugDJUnXw0fyDnJACyFR6e7",
-)
-
-# 关闭向量检索（避免其他路径影响）
-os.environ["ENABLE_VECTOR_RAG"] = "0"
-
-# Patch llm_client.call_llm 让 stream chunk 跳过 choices=[] 的 chunk
+ROOT = os.path.abspath(os.path.join(HERE, '..', '..', '..'))
+sys.path.insert(0, os.path.join(ROOT, 'backend'))
+os.environ.setdefault('STEP_API_KEY', '2AUHLIl7GnTbiSC0G9EwAX5OJQuKcA2XDk8vbvArNISugDJUnXw0fyDnJACyFR6e7')
+os.environ['ENABLE_VECTOR_RAG'] = '0'
 import core.llm_client as llm_client_mod
 _original_call_llm = llm_client_mod.call_llm
 
-
-def _safe_call_llm(system_prompt, user_prompt, temperature=0.7, max_tokens=4000,
-                   agent="default", stream=False, stream_callback=None):
+def _safe_call_llm(system_prompt, user_prompt, temperature=0.7, max_tokens=4000, agent='default', stream=False, stream_callback=None):
     """对 stream 路径跳过 choices=[] 的 chunk（stepfun 偶发）；非 stream 走原函数。"""
     if not stream:
-        return _original_call_llm(
-            system_prompt, user_prompt, temperature, max_tokens,
-            agent, stream, stream_callback,
-        )
-
+        return _original_call_llm(system_prompt, user_prompt, temperature, max_tokens, agent, stream, stream_callback)
     import time as _t
     from core.config import get_llm_config_for_agent
     from openai import OpenAI
     cfg = get_llm_config_for_agent(agent)
     client = OpenAI(api_key=cfg.api_key, base_url=cfg.base_url)
     temp = llm_client_mod._safe_temperature(temperature, cfg.model)
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
+    messages = [{'role': 'system', 'content': system_prompt}, {'role': 'user', 'content': user_prompt}]
     call_start = _t.time()
-    response = client.chat.completions.create(
-        model=cfg.model, messages=messages, temperature=temp,
-        max_tokens=max_tokens, stream=True,
-    )
-    content = ""
+    response = client.chat.completions.create(model=cfg.model, messages=messages, temperature=temp, max_tokens=max_tokens, stream=True)
+    content = ''
     last_chunk = None
     for chunk in response:
         last_chunk = chunk
@@ -64,39 +43,25 @@ def _safe_call_llm(system_prompt, user_prompt, temperature=0.7, max_tokens=4000,
     content = content.strip()
     content = llm_client_mod._strip_think_tags(content)
     call_duration = (_t.time() - call_start) * 1000
-
-    # 复用 cost_tracker 路径
     from core.cost_tracker import get_tracker as _gt, estimate_tokens_from_text as _ett
     tracker = _gt()
-    usage = last_chunk.usage if (last_chunk is not None and getattr(last_chunk, "usage", None) is not None) else None
+    usage = last_chunk.usage if last_chunk is not None and getattr(last_chunk, 'usage', None) is not None else None
     if usage is not None:
-        tracker.record(
-            model=cfg.model, agent=agent, is_json=False,
-            prompt_tokens=usage.prompt_tokens or 0,
-            completion_tokens=usage.completion_tokens or 0,
-            total_tokens=usage.total_tokens or 0,
-            duration_ms=call_duration,
-        )
+        tracker.record(model=cfg.model, agent=agent, is_json=False, prompt_tokens=usage.prompt_tokens or 0, completion_tokens=usage.completion_tokens or 0, total_tokens=usage.total_tokens or 0, duration_ms=call_duration)
     else:
-        pt = _ett(system_prompt + "\n" + user_prompt)
+        pt = _ett(system_prompt + '\n' + user_prompt)
         ct = _ett(content)
-        tracker.record(
-            model=cfg.model, agent=agent, is_json=False,
-            prompt_tokens=pt, completion_tokens=ct,
-            total_tokens=pt + ct, duration_ms=call_duration, estimated=True,
-        )
+        tracker.record(model=cfg.model, agent=agent, is_json=False, prompt_tokens=pt, completion_tokens=ct, total_tokens=pt + ct, duration_ms=call_duration, estimated=True)
     return content
-
-
 llm_client_mod.call_llm = _safe_call_llm
-sys.modules["core.llm_client"].call_llm = _safe_call_llm
-
-
+sys.modules['core.llm_client'].call_llm = _safe_call_llm
 from core.agents.part_writer_agent import PartWriterAgent
 from core.sliding_window import SlidingWindow
-
+from core.logger import get_logger
+logger = get_logger('test_r7_checkpoint')
 
 class MockState:
+
     def __init__(self, characters, world_setting, part_outline, foreshadowing, window):
         self.characters = characters
         self.world_setting = world_setting
@@ -105,120 +70,79 @@ class MockState:
         self.window = window
         self.parts = {}
         self.part_summaries = {}
-        self.current_plot_state = ""
+        self.current_plot_state = ''
         self.character_state_track = {}
 
     def get_part_context(self, part_num):
-        return self.window.build(
-            part_num,
-            characters=self.characters,
-            world_setting=self.world_setting,
-            outline=self.part_outline[part_num - 1] if part_num <= len(self.part_outline) else None,
-        )
-
+        return self.window.build(part_num, characters=self.characters, world_setting=self.world_setting, outline=self.part_outline[part_num - 1] if part_num <= len(self.part_outline) else None)
 
 def main():
-    print("=" * 70)
-    print("【R7-T5】Chunk Checkpoint 真实验证")
-    print("=" * 70)
-
-    characters = [
-        {"name": "林枫", "role": "主角", "identity": "前刑警", "core_trait": "执拗、敏锐",
-         "motivation": "追查三年前的搭档失踪案", "secret": "他收到过搭档的匿名警告"},
-    ]
-    world_setting = "江南雨城，警署与地下势力相互渗透。三年前一场雨夜搭档失踪案悬而未决。"
-    part_outline = [
-        {"phase": "开端", "title": "雨夜重逢", "core_event": "林枫推开尘封的书房门",
-         "emotion_target": "悬疑与不安", "key_dialogue": "你终于来了",
-         "end_hook": "墙上红字指向下一个地点", "pacing": "慢起",
-         "causality": "承前：搭档失踪悬案",
-         "word_count": 1500,  # 较小目标，期望 1-2 chunk 完成（CHUNK_WORDS=3500）
-        },
-    ]
+    logger.info('=' * 70)
+    logger.info('【R7-T5】Chunk Checkpoint 真实验证')
+    logger.info('=' * 70)
+    characters = [{'name': '林枫', 'role': '主角', 'identity': '前刑警', 'core_trait': '执拗、敏锐', 'motivation': '追查三年前的搭档失踪案', 'secret': '他收到过搭档的匿名警告'}]
+    world_setting = '江南雨城，警署与地下势力相互渗透。三年前一场雨夜搭档失踪案悬而未决。'
+    part_outline = [{'phase': '开端', 'title': '雨夜重逢', 'core_event': '林枫推开尘封的书房门', 'emotion_target': '悬疑与不安', 'key_dialogue': '你终于来了', 'end_hook': '墙上红字指向下一个地点', 'pacing': '慢起', 'causality': '承前：搭档失踪悬案', 'word_count': 1500}]
     foreshadowing = []
     window = SlidingWindow(window_size=3)
     state = MockState(characters, world_setting, part_outline, foreshadowing, window)
-
     writer = PartWriterAgent()
-
-    # 1) 单元验证：set_checkpoint_callback / checkpoint_callback 字段
-    print("\n--- 单元验证: checkpoint_callback 接口 ---")
+    logger.info('\n--- 单元验证: checkpoint_callback 接口 ---')
     captured = []
     writer.set_checkpoint_callback(lambda p, c, t: captured.append((p, c, len(t))))
-    print(f"  callback set: {writer.checkpoint_callback is not None}")
+    logger.info(f'  callback set: {writer.checkpoint_callback is not None}')
     assert writer.checkpoint_callback is not None
-    writer.checkpoint_callback(99, 0, "hello world")
-    print(f"  captured after manual call: {captured}")
-    assert captured == [(99, 0, 11)], "checkpoint callback 签名 (part_num, chunk_idx, accumulated_text) 必须正确"
-
-    # 2) 真实写 Part 1，记录每次 chunk 回调
+    writer.checkpoint_callback(99, 0, 'hello world')
+    logger.info(f'  captured after manual call: {captured}')
+    assert captured == [(99, 0, 11)], 'checkpoint callback 签名 (part_num, chunk_idx, accumulated_text) 必须正确'
     captured.clear()
     writer.set_checkpoint_callback(lambda p, c, t: captured.append((p, c, len(t))))
-
-    print("\n--- 真实调 writer.execute(state, part_num=1) ---")
+    logger.info('\n--- 真实调 writer.execute(state, part_num=1) ---')
     t0 = time.time()
     result = writer.execute(state, 1)
     elapsed = time.time() - t0
-
-    print(f"  耗时 {elapsed:.1f}s")
-    print(f"  result success: {result.get('success')}")
-    print(f"  result word_count: {result.get('word_count')}")
-    print(f"  result chunk_count: {result.get('chunk_count')}")
-    print(f"  content length: {len(result.get('content', ''))}")
-
-    # 3) 验证 checkpoint 回调被触发
-    print("\n--- 验证 checkpoint 回调 ---")
-    print(f"  captured (part_num, chunk_idx, len(text)) calls:")
+    logger.info(f'  耗时 {elapsed:.1f}s')
+    logger.info(f"  result success: {result.get('success')}")
+    logger.info(f"  result word_count: {result.get('word_count')}")
+    logger.info(f"  result chunk_count: {result.get('chunk_count')}")
+    logger.info(f"  content length: {len(result.get('content', ''))}")
+    logger.info('\n--- 验证 checkpoint 回调 ---')
+    logger.info(f'  captured (part_num, chunk_idx, len(text)) calls:')
     for entry in captured:
-        print(f"    {entry}")
-
-    # 4) 验证每次回调 captured text 长度单调递增
-    print("\n--- 验证 chunk 累计（长度单调递增） ---")
+        logger.info(f'    {entry}')
+    logger.info('\n--- 验证 chunk 累计（长度单调递增） ---')
     lengths = [c[2] for c in captured]
-    monotonic = all(lengths[i] <= lengths[i + 1] for i in range(len(lengths) - 1))
-    print(f"  lengths = {lengths}")
-    print(f"  单调递增: {monotonic}")
-
-    # 5) 断言
-    print("\n--- R7-T5 Assertions ---")
+    monotonic = all((lengths[i] <= lengths[i + 1] for i in range(len(lengths) - 1)))
+    logger.info(f'  lengths = {lengths}')
+    logger.info(f'  单调递增: {monotonic}')
+    logger.info('\n--- R7-T5 Assertions ---')
     results = []
-
-    r1 = result.get("success") is True
-    print(f"  [{'OK' if r1 else 'FAIL'}] writer.execute 成功: {r1}")
-    results.append({"name": "writer_success", "ok": r1})
-
-    r2 = result.get("word_count", 0) > 0
-    print(f"  [{'OK' if r2 else 'FAIL'}] word_count > 0: {result.get('word_count')}")
-    results.append({"name": "word_count_positive", "ok": r2, "actual": result.get("word_count")})
-
+    r1 = result.get('success') is True
+    logger.info(f"  [{('OK' if r1 else 'FAIL')}] writer.execute 成功: {r1}")
+    results.append({'name': 'writer_success', 'ok': r1})
+    r2 = result.get('word_count', 0) > 0
+    logger.info(f"  [{('OK' if r2 else 'FAIL')}] word_count > 0: {result.get('word_count')}")
+    results.append({'name': 'word_count_positive', 'ok': r2, 'actual': result.get('word_count')})
     r3 = len(captured) >= 1
-    print(f"  [{'OK' if r3 else 'FAIL'}] 至少触发 1 次 checkpoint 回调: {len(captured)}")
-    results.append({"name": "checkpoint_fired", "ok": r3, "actual": len(captured)})
-
+    logger.info(f"  [{('OK' if r3 else 'FAIL')}] 至少触发 1 次 checkpoint 回调: {len(captured)}")
+    results.append({'name': 'checkpoint_fired', 'ok': r3, 'actual': len(captured)})
     r4 = monotonic
-    print(f"  [{'OK' if r4 else 'FAIL'}] 累计长度单调递增: {monotonic}")
-    results.append({"name": "monotonic_accumulation", "ok": r4})
-
-    r5 = all(c[0] == 1 for c in captured)
-    print(f"  [{'OK' if r5 else 'FAIL'}] 所有回调 part_num == 1: {r5}")
-    results.append({"name": "part_num_consistent", "ok": r5})
-
-    # 6) 最终把 Part 1 写入 state.parts[str(1)]（模拟 writing_service 的逻辑）
-    state.parts["1"] = result.get("content", "")
-    summary_text = result.get("content", "")[:200] + "..."
-    state.part_summaries["1"] = summary_text
-    print(f"\n--- state.parts[str(1)] 已写入: {len(state.parts['1'])} 字 ---")
-
-    all_pass = all(x["ok"] for x in results)
-
-    print("\n" + "=" * 70)
+    logger.info(f"  [{('OK' if r4 else 'FAIL')}] 累计长度单调递增: {monotonic}")
+    results.append({'name': 'monotonic_accumulation', 'ok': r4})
+    r5 = all((c[0] == 1 for c in captured))
+    logger.info(f"  [{('OK' if r5 else 'FAIL')}] 所有回调 part_num == 1: {r5}")
+    results.append({'name': 'part_num_consistent', 'ok': r5})
+    state.parts['1'] = result.get('content', '')
+    summary_text = result.get('content', '')[:200] + '...'
+    state.part_summaries['1'] = summary_text
+    logger.info(f"\n--- state.parts[str(1)] 已写入: {len(state.parts['1'])} 字 ---")
+    all_pass = all((x['ok'] for x in results))
+    logger.info('\n' + '=' * 70)
     if all_pass:
-        print(f"【R7-T5 PASS】Chunk Checkpoint 真实验证全部通过（{len(captured)} 次回调）")
+        logger.info(f'【R7-T5 PASS】Chunk Checkpoint 真实验证全部通过（{len(captured)} 次回调）')
     else:
-        print(f"【R7-T5 FAIL】 {sum(1 for x in results if not x['ok'])} / {len(results)} 项断言失败")
-    print("=" * 70)
+        logger.info(f"【R7-T5 FAIL】 {sum((1 for x in results if not x['ok']))} / {len(results)} 项断言失败")
+    logger.info('=' * 70)
     return 0 if all_pass else 1
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     sys.exit(main())

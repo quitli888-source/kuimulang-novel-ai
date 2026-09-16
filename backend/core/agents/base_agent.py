@@ -4,20 +4,18 @@ V5.1改动：实现标准化的Agent接口，支持进度跟踪、错误处理�
 """
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, Callable
-
+from core.logger import get_logger
+logger = get_logger('base_agent')
 
 class BaseAgent(ABC):
     """Agent基类 - 所有Agent继承此类"""
-
-    name: str = "未命名Agent"
-    description: str = ""
-    version: str = "1.0.0"
+    name: str = '未命名Agent'
+    description: str = ''
+    version: str = '1.0.0'
 
     def __init__(self):
-        self.system_prompt = ""
+        self.system_prompt = ''
         self.progress_callback: Optional[Callable[[int, str], None]] = None
-        # R7-P1-5: chunk 级 checkpoint 回调（PartWriterAgent 每完成一个 chunk 触发）
-        # 签名：callable(part_num: int, chunk_idx: int, accumulated_text: str) -> None
         self.checkpoint_callback: Optional[Callable[[int, int, str], None]] = None
 
     @abstractmethod
@@ -58,20 +56,20 @@ class BaseAgent(ABC):
             try:
                 self.progress_callback(progress, message)
             except Exception as e:
-                self.log_error(f"更新进度失败: {e}")
-        print(f"[Agent] {self.name} - {progress}%: {message}")
+                self.log_error(f'更新进度失败: {e}')
+        logger.info(f'[Agent] {self.name} - {progress}%: {message}')
 
     def log_start(self):
-        print(f"[Agent] {self.name} 开始执行")
-        self.update_progress(0, "开始执行")
+        logger.info(f'[Agent] {self.name} 开始执行')
+        self.update_progress(0, '开始执行')
 
     def log_done(self, summary: str):
-        print(f"[Agent] {self.name} 完成 - {summary}")
-        self.update_progress(100, f"执行完成: {summary}")
+        logger.info(f'[Agent] {self.name} 完成 - {summary}')
+        self.update_progress(100, f'执行完成: {summary}')
 
     def log_error(self, error: str):
-        print(f"[Agent] {self.name} 错误: {error}")
-        self.update_progress(100, f"执行失败: {error}")
+        logger.info(f'[Agent] {self.name} 错误: {error}')
+        self.update_progress(100, f'执行失败: {error}')
 
     def validate_input(self, state, **kwargs) -> bool:
         """
@@ -90,12 +88,7 @@ class BaseAgent(ABC):
         Returns:
             Dict[str, Any]: Agent信息
         """
-        return {
-            "name": self.name,
-            "description": self.description,
-            "version": self.version
-        }
-
+        return {'name': self.name, 'description': self.description, 'version': self.version}
 
 class AgentRegistry:
     """
