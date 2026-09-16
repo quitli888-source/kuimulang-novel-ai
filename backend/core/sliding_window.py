@@ -14,24 +14,67 @@
   返回完整的 prompt 上下文字符串。
 """
 from typing import Optional
+import os as _os
+import json as _json
+
+
+def _load_user_window_config() -> dict:
+    """
+    R15: 读取 data/window_config.json 作为用户 UI 配置。
+    返回 {"window_size": int, "rolling_every": int, "milestone_every": int}（缺字段则省略）。
+    """
+    try:
+        # 项目根目录的 data/window_config.json
+        # __file__ = backend/core/sliding_window.py => ../../..
+        project_root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+        config_file = _os.path.join(project_root, "data", "window_config.json")
+        if _os.path.exists(config_file):
+            with open(config_file, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+                out = {}
+                for k in ("window_size", "rolling_every", "milestone_every"):
+                    if k in data:
+                        try:
+                            out[k] = int(data[k])
+                        except (TypeError, ValueError):
+                            pass
+                return out
+    except Exception:
+        pass
+    return {}
 
 
 class SlidingWindow:
     """真正的滑动窗口上下文管理器。"""
 
-    # 摘要级别参数（按 Part 数量聚合）
+    # 默认参数（按 Part 数量聚合）
     # R8-P1-4: ROLLING_EVERY 5 → 3；SUMMARY_L2_LEN 500 → 800。
     # 理由：3 Part 真实 E2E 场景下 R7 看不到二级滚动摘要；Part 3 写完立刻生成
     # "Part 1-2 的 800 字聚合"，Part 4 写作时 Logic Agent 就能对照远端一致性。
-    ROLLING_EVERY = 3       # 每 3 个 Part 生成一次二级滚动摘要（R8: 5 → 3）
-    MILESTONE_EVERY = 20    # 每 20 个 Part 生成一次里程碑摘要
-    SUMMARY_L1_LEN = 200    # 一级摘要目标长度（字）
-    SUMMARY_L2_LEN = 800    # 二级滚动摘要目标长度（字）（R8: 500 → 800）
-    SUMMARY_L3_LEN = 2000   # 三级里程碑摘要目标长度（字）
+    # R15: 改为类默认值 DEFAULT_*，__init__ 可覆盖（支持 UI 手动调整）
+    DEFAULT_WINDOW_SIZE = 6       # R12: 3 → 6
+    DEFAULT_ROLLING_EVERY = 3    # R8: 5 → 3
+    DEFAULT_MILESTONE_EVERY = 20
+    SUMMARY_L1_LEN = 200         # 一级摘要目标长度（字）
+    SUMMARY_L2_LEN = 800         # 二级滚动摘要目标长度（字）（R8: 500 → 800）
+    SUMMARY_L3_LEN = 2000        # 三级里程碑摘要目标长度（字）
 
-    def __init__(self, window_size: int = 6):
+    def __init__(
+        self,
+        window_size: Optional[int] = None,
+        rolling_every: Optional[int] = None,
+        milestone_every: Optional[int] = None,
+    ):
         # R12: window_size 3→6，覆盖更长上下文，减小长程一致性衰减
-        self.window_size = window_size
+        # R15: 改为实例属性，支持 UI 手动调整（从前是类常量 self.ROLLING_EVERY）
+        # 优先级：显式参数 > data/window_config.json > 环境变量 > 类默认值
+        _file_defaults = _load_user_window_config()
+        _ws = window_size if window_size is not None else (_file_defaults.get("window_size") or self.DEFAULT_WINDOW_SIZE)
+        _re = rolling_every if rolling_every is not None else (_file_defaults.get("rolling_every") or self.DEFAULT_ROLLING_EVERY)
+        _me = milestone_every if milestone_every is not None else (_file_defaults.get("milestone_every") or self.DEFAULT_MILESTONE_EVERY)
+        self.window_size = _ws
+        self.rolling_every = _re
+        self.milestone_every = _me
         # 最近 K 个 Part 的原文
         self.parts: dict = {}               # {part_num: text}
         # 一级摘要（200 字）
@@ -47,12 +90,12 @@ class SlidingWindow:
 
     # ----------------- 触发判断 -----------------
     def should_create_rolling_summary(self, part_num: int) -> bool:
-        """判断当前 Part 是否需要生成二级滚动摘要（每 5 Part 一次）。"""
-        return part_num > 0 and part_num % self.ROLLING_EVERY == 0
+        """判断当前 Part 是否需要生成二级滚动摘要（每 rolling_every 个 Part 一次）。"""
+        return part_num > 0 and part_num % self.rolling_every == 0
 
     def should_create_milestone(self, part_num: int) -> bool:
-        """判断当前 Part 是否需要生成里程碑摘要（每 20 Part 一次）。"""
-        return part_num > 0 and part_num % self.MILESTONE_EVERY == 0
+        """判断当前 Part 是否需要生成里程碑摘要（每 milestone_every 个 Part 一次）。"""
+        return part_num > 0 and part_num % self.milestone_every == 0
 
     # ----------------- 写入 / 滚动 -----------------
     def add_part(self, part_num: int, text: str, summary: str) -> None:
@@ -94,6 +137,127 @@ class SlidingWindow:
     def add_milestone(self, milestone_num: int, milestone_text: str) -> None:
         """外部生成里程碑后注入窗口。"""
         self.milestones[milestone_num] = milestone_text
+
+    # ----------------- R15: 自动生成 rolling/milestone -----------------
+    def maybe_generate_rolling_summary(self, part_num: int, *, world_setting: str = "") -> dict:
+        """
+        R15: 若 part_num 命中 rolling 触发点，自动调 LLM 生成二级滚动摘要。
+        从 writing_service._phase3_writing 抽出来，所有路径（WritingService + PartWriterAgent
+        直调）都会触发。
+        Returns: {"generated": bool, "text": str, "char_count": int}
+        """
+        if not self.should_create_rolling_summary(part_num):
+            return {"generated": False, "text": "", "char_count": 0}
+
+        # 幂等：如果已经生成过，跳过
+        if part_num in self.rolling_summaries and self.rolling_summaries[part_num]:
+            return {"generated": False, "text": self.rolling_summaries[part_num],
+                    "char_count": len(self.rolling_summaries[part_num]), "already_exists": True}
+
+        # 取最近 rolling_every 个 Part 的一级摘要
+        recent_keys = sorted([p for p in self.summaries.keys() if p < part_num])[-self.rolling_every:]
+        if not recent_keys:
+            return {"generated": False, "text": "", "char_count": 0, "reason": "no_summaries_yet"}
+
+        recent_text = "\n".join(
+            f"Part {p}: {self.summaries[p]}" for p in recent_keys
+        )
+
+        # Lazy import 避免循环依赖
+        try:
+            from core.llm_client import call_llm
+            rolling = call_llm(
+                system_prompt=(
+                    "你是长篇小说剧情压缩助手。"
+                    "将下面若干个 Part 的剧情概要压缩为一段 800 字以内的连贯剧情段，"
+                    "保留关键人物、冲突、伏笔、角色位置/状态/伤势变化，"
+                    "输出纯叙事文本，不要分点。"
+                ),
+                user_prompt=recent_text,
+                temperature=0.3,
+                max_tokens=1200,
+                agent="rolling_summary",
+            )
+            rolling_text = (rolling or "")[:self.SUMMARY_L2_LEN]
+
+            if not rolling_text.strip():
+                # Fallback: 拼接一级摘要前 100 字
+                fallback = "\n".join(
+                    f"Part {p}: {self.summaries[p][:100]}" for p in recent_keys
+                )
+                rolling_text = fallback[:self.SUMMARY_L2_LEN]
+
+            self.add_rolling_summary(part_num, rolling_text)
+            return {"generated": True, "text": rolling_text,
+                    "char_count": len(rolling_text), "triggered_at": recent_keys}
+        except Exception as e:
+            return {"generated": False, "text": "", "char_count": 0, "error": str(e)[:200]}
+
+    def maybe_generate_milestone(self, part_num: int, *, world_setting: str = "") -> dict:
+        """
+        R15: 若 part_num 命中 milestone 触发点，自动调 LLM 生成里程碑摘要。
+        Returns: {"generated": bool, "text": str, "char_count": int, "milestone_num": int}
+        """
+        if not self.should_create_milestone(part_num):
+            return {"generated": False, "text": "", "char_count": 0}
+
+        milestone_num = part_num // self.milestone_every
+
+        # 幂等
+        if milestone_num in self.milestones and self.milestones[milestone_num]:
+            return {"generated": False, "text": self.milestones[milestone_num],
+                    "char_count": len(self.milestones[milestone_num]),
+                    "milestone_num": milestone_num, "already_exists": True}
+
+        recent_keys = sorted([p for p in self.summaries.keys() if p < part_num])[-self.milestone_every:]
+        if len(recent_keys) < self.milestone_every:
+            return {"generated": False, "text": "", "char_count": 0, "reason": "not_enough_parts"}
+
+        recent_text = "\n".join(
+            f"Part {p}: {self.summaries[p]}" for p in recent_keys
+        )
+
+        char_state_lines = [f"- {name}: {st}" for name, st in (self.character_state or {}).items()]
+        foreshadow_lines = [
+            f"- {f.get('id', '')}: {f.get('content', '')}"
+            for f in (self.foreshadowing or [])
+        ]
+
+        milestone_input = (
+            recent_text
+            + (f"\n【世界观】{world_setting}" if world_setting else "")
+            + ("\n【角色状态】\n" + "\n".join(char_state_lines) if char_state_lines else "")
+            + ("\n【伏笔】\n" + "\n".join(foreshadow_lines) if foreshadow_lines else "")
+        )
+
+        try:
+            from core.llm_client import call_llm
+            milestone = call_llm(
+                system_prompt=(
+                    "你是长篇小说剧情压缩助手。"
+                    f"将下面 {self.milestone_every} 个 Part 的剧情概要压缩为 2000 字以内的全局脉络段，"
+                    "涵盖主线、支线、关键转折、角色弧光，输出纯叙事文本，不要分点。"
+                ),
+                user_prompt=milestone_input,
+                temperature=0.3,
+                max_tokens=2500,
+                agent="milestone_summary",
+            )
+            milestone_text = (milestone or "")[:self.SUMMARY_L3_LEN]
+
+            if not milestone_text.strip():
+                fallback = "\n".join(
+                    f"Part {p}: {self.summaries[p][:100]}" for p in recent_keys
+                )
+                milestone_text = fallback[:self.SUMMARY_L3_LEN]
+
+            self.add_milestone(milestone_num, milestone_text)
+            return {"generated": True, "text": milestone_text,
+                    "char_count": len(milestone_text),
+                    "milestone_num": milestone_num, "triggered_at": recent_keys}
+        except Exception as e:
+            return {"generated": False, "text": "", "char_count": 0,
+                    "milestone_num": milestone_num, "error": str(e)[:200]}
 
     def update_foreshadowing(self, foreshadowing: list) -> None:
         if foreshadowing:

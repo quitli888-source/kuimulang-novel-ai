@@ -123,13 +123,13 @@ def main():
     # 10. SlidingWindow ROLLING_EVERY 5→3
     print("\n[10] SlidingWindow ROLLING_EVERY")
     from core.sliding_window import SlidingWindow
-    assert SlidingWindow.ROLLING_EVERY == 3, f"ROLLING_EVERY 应为 3，实际 {SlidingWindow.ROLLING_EVERY}"
+    assert SlidingWindow.DEFAULT_ROLLING_EVERY == 3, f"DEFAULT_ROLLING_EVERY 应为 3，实际 {SlidingWindow.DEFAULT_ROLLING_EVERY}"
     assert SlidingWindow.SUMMARY_L2_LEN == 800, f"SUMMARY_L2_LEN 应为 800，实际 {SlidingWindow.SUMMARY_L2_LEN}"
     sw = SlidingWindow(window_size=3)
     assert sw.should_create_rolling_summary(3) is True
     assert sw.should_create_rolling_summary(6) is True
     assert sw.should_create_rolling_summary(2) is False
-    print(f"  [OK] ROLLING_EVERY={SlidingWindow.ROLLING_EVERY}, SUMMARY_L2_LEN={SlidingWindow.SUMMARY_L2_LEN}")
+    print(f"  [OK] DEFAULT_ROLLING_EVERY={SlidingWindow.DEFAULT_ROLLING_EVERY}, SUMMARY_L2_LEN={SlidingWindow.SUMMARY_L2_LEN}")
     print(f"  [OK] should_create_rolling_summary(3)=True, (6)=True, (2)=False")
 
     print("\n" + "=" * 60)

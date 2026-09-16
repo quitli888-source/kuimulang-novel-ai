@@ -237,6 +237,38 @@
             </div>
           </n-tab-pane>
 
+          <!-- R15: 滑动窗口配置（UI 手动调整） -->
+          <n-tab-pane name="window" tab="滑动窗口">
+            <div class="section">
+              <div class="section-title">滑动窗口与摘要触发参数</div>
+              <div style="color:#888;font-size:13px;margin-bottom:16px;">
+                控制 PartWriter 在创作时保留多少个最近 Part 的原文、每隔几个 Part 生成二级滚动摘要/三级里程碑摘要。
+                当前配置来源：<b>{{ windowConfig.source || '加载中' }}</b>
+              </div>
+              <n-form label-placement="left" label-width="160">
+                <n-form-item label="Window Size（最近 K 个 Part 原文）">
+                  <n-input-number v-model:value="windowConfig.window_size" :min="2" :max="20" :step="1" />
+                  <span style="margin-left:12px;color:#888;">默认 {{ windowConfig.defaults?.window_size || 6 }}（范围 2~20）</span>
+                </n-form-item>
+                <n-form-item label="Rolling Every（每 N Part 生成二级摘要）">
+                  <n-input-number v-model:value="windowConfig.rolling_every" :min="2" :max="10" :step="1" />
+                  <span style="margin-left:12px;color:#888;">默认 {{ windowConfig.defaults?.rolling_every || 3 }}（范围 2~10）</span>
+                </n-form-item>
+                <n-form-item label="Milestone Every（每 N Part 生成三级里程碑）">
+                  <n-input-number v-model:value="windowConfig.milestone_every" :min="5" :max="100" :step="1" />
+                  <span style="margin-left:12px;color:#888;">默认 {{ windowConfig.defaults?.milestone_every || 20 }}（范围 5~100）</span>
+                </n-form-item>
+                <n-form-item>
+                  <n-button type="primary" @click="saveWindowConfig" :loading="windowSaving">💾 保存滑动窗口配置</n-button>
+                  <n-button style="margin-left:12px" @click="resetWindowConfig">重置为默认值</n-button>
+                </n-form-item>
+              </n-form>
+              <div v-if="windowConfig.last_result" :class="windowConfig.last_ok ? 'msg-ok' : 'msg-err'" style="margin-top:12px;padding:8px 12px;border-radius:6px;">
+                {{ windowConfig.last_result }}
+              </div>
+            </div>
+          </n-tab-pane>
+
           <!-- 创作模式 -->
           <n-tab-pane name="mode" tab="创作模式">
             <div class="section">
@@ -269,6 +301,18 @@ const llmConfig = ref({ api_key: '', base_url: '', model: '', json_model: '' })
 const agentConfigs = ref({})
 const starting = ref(false)
 const savingLLM = ref(false)
+
+// R15: 滑动窗口配置
+const windowConfig = ref({
+  window_size: 6,
+  rolling_every: 3,
+  milestone_every: 20,
+  defaults: { window_size: 6, rolling_every: 3, milestone_every: 20 },
+  source: 'loading',
+  last_result: '',
+  last_ok: true,
+})
+const windowSaving = ref(false)
 
 // 多供应商支持
 const providers = ref([])
@@ -372,14 +416,27 @@ function handleTemplateSelect(t) {
 onMounted(async () => {
   try {
     console.log('🚀 开始加载配置...')
-    const [tplRes, llmRes, agentRes, appRes, providersRes, llmCfgRes] = await Promise.all([
+    const [tplRes, llmRes, agentRes, appRes, providersRes, llmCfgRes, winCfgRes] = await Promise.all([
       api.get('/config/templates'),
       api.get('/config/llm'),
       api.get('/config/agents'),
       api.get('/config/app'),
       api.get('/config/providers'),
       api.get('/config/llm-config'),
+      api.get('/config/sliding-window'),
     ])
+    // R15: 加载滑动窗口配置
+    if (winCfgRes?.data) {
+      windowConfig.value = {
+        ...windowConfig.value,
+        window_size: winCfgRes.data.window_size,
+        rolling_every: winCfgRes.data.rolling_every,
+        milestone_every: winCfgRes.data.milestone_every,
+        defaults: winCfgRes.data.defaults || windowConfig.value.defaults,
+        source: winCfgRes.data.source || 'unknown',
+      }
+      console.log('📐 滑动窗口配置加载完成:', windowConfig.value)
+    }
     
     console.log('📦 配置数据加载完成')
     
@@ -578,6 +635,53 @@ async function saveCustomTemplate() {
   } catch (error) {
     console.error('❌ 保存自定义模板失败:', error)
     alert('保存自定义模板失败: ' + (error.response?.data?.detail || error.message))
+  }
+}
+
+// R15: 滑动窗口配置 保存 / 重置
+async function saveWindowConfig() {
+  windowSaving.value = true
+  try {
+    const resp = await api.put('/config/sliding-window', {
+      window_size: Number(windowConfig.value.window_size),
+      rolling_every: Number(windowConfig.value.rolling_every),
+      milestone_every: Number(windowConfig.value.milestone_every),
+    })
+    windowConfig.value.last_ok = true
+    windowConfig.value.last_result = `✅ 保存成功：window_size=${resp.data.config.window_size}, rolling_every=${resp.data.config.rolling_every}, milestone_every=${resp.data.config.milestone_every}`
+    windowConfig.value.source = 'user_file'
+    console.log('💾 滑动窗口配置保存:', resp.data.config)
+    alert(`✅ 滑动窗口配置已保存！\n下次启动创作时生效。`)
+  } catch (error) {
+    windowConfig.value.last_ok = false
+    windowConfig.value.last_result = `❌ 保存失败: ${error.response?.data?.detail || error.message}`
+    console.error('❌ 滑动窗口配置保存失败:', error)
+    alert('保存失败: ' + (error.response?.data?.detail || error.message))
+  } finally {
+    windowSaving.value = false
+  }
+}
+
+async function resetWindowConfig() {
+  if (!confirm('确认重置为默认值？（删除 data/window_config.json）')) return
+  windowSaving.value = true
+  try {
+    await api.post('/config/sliding-window/reset', {})
+    // 重置后重新加载
+    const resp = await api.get('/config/sliding-window')
+    windowConfig.value = {
+      ...windowConfig.value,
+      ...resp.data,
+      last_ok: true,
+      last_result: '✅ 已重置为默认值',
+    }
+    console.log('🔄 滑动窗口配置已重置')
+  } catch (error) {
+    windowConfig.value.last_ok = false
+    windowConfig.value.last_result = '❌ 重置失败: ' + (error.response?.data?.detail || error.message)
+    alert('重置失败: ' + (error.response?.data?.detail || error.message))
+  } finally {
+    windowSaving.value = false
   }
 }
 

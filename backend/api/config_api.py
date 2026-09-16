@@ -453,3 +453,99 @@ def update_app_config(req: AppConfigUpdate):
         import traceback
         traceback.print_exc()
         raise HTTPException(500, f"Internal Server Error: {str(e)}")
+
+
+# =============================================
+# R15: 滑动窗口配置（UI 可手动调整）
+# =============================================
+import os as _os
+WINDOW_CONFIG_FILE = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__))), "data", "window_config.json")
+
+
+def load_window_config() -> dict:
+    """从 data/window_config.json 读取滑动窗口配置。"""
+    try:
+        if _os.path.exists(WINDOW_CONFIG_FILE):
+            with open(WINDOW_CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def save_window_config(cfg: dict) -> None:
+    """写入 data/window_config.json。"""
+    _os.makedirs(_os.path.dirname(WINDOW_CONFIG_FILE), exist_ok=True)
+    with open(WINDOW_CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
+class SlidingWindowConfigUpdate(BaseModel):
+    window_size: int
+    rolling_every: int
+    milestone_every: int
+
+
+@router.get("/sliding-window")
+def get_sliding_window_config():
+    """
+    返回滑动窗口当前配置。
+    从 .env / data/window_config.json / 类默认值三层 fallback 读取。
+    """
+    from core.sliding_window import SlidingWindow
+
+    file_cfg = load_window_config()
+    return {
+        "window_size": int(file_cfg.get("window_size") or _os.environ.get("SLIDING_WINDOW_SIZE") or SlidingWindow.DEFAULT_WINDOW_SIZE),
+        "rolling_every": int(file_cfg.get("rolling_every") or _os.environ.get("SLIDING_ROLLING_EVERY") or SlidingWindow.DEFAULT_ROLLING_EVERY),
+        "milestone_every": int(file_cfg.get("milestone_every") or _os.environ.get("SLIDING_MILESTONE_EVERY") or SlidingWindow.DEFAULT_MILESTONE_EVERY),
+        "source": (
+            "user_file" if file_cfg else
+            "env" if _os.environ.get("SLIDING_WINDOW_SIZE") else
+            "class_default"
+        ),
+        "defaults": {
+            "window_size": SlidingWindow.DEFAULT_WINDOW_SIZE,
+            "rolling_every": SlidingWindow.DEFAULT_ROLLING_EVERY,
+            "milestone_every": SlidingWindow.DEFAULT_MILESTONE_EVERY,
+        },
+    }
+
+
+@router.put("/sliding-window")
+def update_sliding_window_config(req: SlidingWindowConfigUpdate):
+    """
+    UI 用户手动调整滑动窗口参数。
+    写入 data/window_config.json，下次 SlidingWindow() 实例化时读取。
+    范围校验：
+      - window_size: 2 ~ 20
+      - rolling_every: 2 ~ 10
+      - milestone_every: 5 ~ 100
+    """
+    # 入参校验
+    if not (2 <= req.window_size <= 20):
+        raise HTTPException(400, f"window_size 必须在 2~20 之间，当前 {req.window_size}")
+    if not (2 <= req.rolling_every <= 10):
+        raise HTTPException(400, f"rolling_every 必须在 2~10 之间，当前 {req.rolling_every}")
+    if not (5 <= req.milestone_every <= 100):
+        raise HTTPException(400, f"milestone_every 必须在 5~100 之间，当前 {req.milestone_every}")
+
+    new_cfg = {
+        "window_size": int(req.window_size),
+        "rolling_every": int(req.rolling_every),
+        "milestone_every": int(req.milestone_every),
+    }
+    save_window_config(new_cfg)
+    print(f"[PUT] 滑动窗口配置已更新: {new_cfg}")
+    return {"ok": True, "config": new_cfg}
+
+
+@router.post("/sliding-window/reset")
+def reset_sliding_window_config():
+    """重置为类默认值（删除 data/window_config.json）。"""
+    try:
+        if _os.path.exists(WINDOW_CONFIG_FILE):
+            _os.remove(WINDOW_CONFIG_FILE)
+        return {"ok": True, "message": "已重置为类默认值"}
+    except Exception as e:
+        raise HTTPException(500, str(e))

@@ -175,6 +175,35 @@ class PartWriterAgent(BaseAgent):
             except Exception as ef_err:
                 print(f"[PartWriterAgent] R8-P0-1 事实抽取失败（不影响主流程）: {ef_err}")
 
+            # R15: PartWriterAgent 自己把 Part 写入窗口（之前依赖外部脚本调用 add_part，现在任何路径都生效）
+            if state is not None and hasattr(state, "window") and state.window is not None:
+                window = state.window
+                # 1) 写原文 + 一级摘要
+                try:
+                    if part_num not in window.summaries:
+                        window.add_part(part_num, full_text, full_text[:window.SUMMARY_L1_LEN])
+                except Exception as add_err:
+                    print(f"[PartWriterAgent] R15 window.add_part 异常: {add_err}")
+
+                # 2) 触发 rolling summary + milestone
+                world_setting = getattr(state, "world_setting", "") or ""
+                try:
+                    roll_result = window.maybe_generate_rolling_summary(part_num, world_setting=world_setting)
+                    if roll_result.get("generated"):
+                        print(f"[PartWriterAgent] R15 Part {part_num} 触发 rolling 摘要（{roll_result['char_count']} 字）")
+                    elif roll_result.get("error"):
+                        print(f"[PartWriterAgent] R15 rolling 生成失败: {roll_result['error']}")
+                except Exception as roll_err:
+                    print(f"[PartWriterAgent] R15 rolling 异常（不影响主流程）: {roll_err}")
+                try:
+                    mile_result = window.maybe_generate_milestone(part_num, world_setting=world_setting)
+                    if mile_result.get("generated"):
+                        print(f"[PartWriterAgent] R15 Part {part_num} 触发 milestone #{mile_result['milestone_num']}（{mile_result['char_count']} 字）")
+                    elif mile_result.get("error"):
+                        print(f"[PartWriterAgent] R15 milestone 生成失败: {mile_result['error']}")
+                except Exception as mile_err:
+                    print(f"[PartWriterAgent] R15 milestone 异常（不影响主流程）: {mile_err}")
+
             summary = f"Part {part_num}「{outline.get('title', '')}」\n字数: {word_count}字 (目标: {target_words}, 片段数: {chunk_count})"
             self.log_done(summary)
 
