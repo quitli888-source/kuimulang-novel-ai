@@ -238,35 +238,23 @@
           </n-tab-pane>
 
           <!-- R15: 滑动窗口配置（UI 手动调整） -->
+          <!-- R23-P1-15: 提取到独立 sub-component，ConfigPanel 仅传 props + emit -->
           <n-tab-pane name="window" tab="滑动窗口">
-            <div class="section">
-              <div class="section-title">滑动窗口与摘要触发参数</div>
-              <div style="color:#888;font-size:13px;margin-bottom:16px;">
-                控制 PartWriter 在创作时保留多少个最近 Part 的原文、每隔几个 Part 生成二级滚动摘要/三级里程碑摘要。
-                当前配置来源：<b>{{ windowConfig.source || '加载中' }}</b>
-              </div>
-              <n-form label-placement="left" label-width="160">
-                <n-form-item label="Window Size（最近 K 个 Part 原文）">
-                  <n-input-number v-model:value="windowConfig.window_size" :min="2" :max="20" :step="1" />
-                  <span style="margin-left:12px;color:#888;">默认 {{ windowConfig.defaults?.window_size || 6 }}（范围 2~20）</span>
-                </n-form-item>
-                <n-form-item label="Rolling Every（每 N Part 生成二级摘要）">
-                  <n-input-number v-model:value="windowConfig.rolling_every" :min="2" :max="10" :step="1" />
-                  <span style="margin-left:12px;color:#888;">默认 {{ windowConfig.defaults?.rolling_every || 3 }}（范围 2~10）</span>
-                </n-form-item>
-                <n-form-item label="Milestone Every（每 N Part 生成三级里程碑）">
-                  <n-input-number v-model:value="windowConfig.milestone_every" :min="5" :max="100" :step="1" />
-                  <span style="margin-left:12px;color:#888;">默认 {{ windowConfig.defaults?.milestone_every || 20 }}（范围 5~100）</span>
-                </n-form-item>
-                <n-form-item>
-                  <n-button type="primary" @click="saveWindowConfig" :loading="windowSaving">💾 保存滑动窗口配置</n-button>
-                  <n-button style="margin-left:12px" @click="resetWindowConfig">重置为默认值</n-button>
-                </n-form-item>
-              </n-form>
-              <div v-if="windowConfig.last_result" :class="windowConfig.last_ok ? 'msg-ok' : 'msg-err'" style="margin-top:12px;padding:8px 12px;border-radius:6px;">
-                {{ windowConfig.last_result }}
-              </div>
-            </div>
+            <WindowConfigTab
+              :windowSize="windowConfig.window_size"
+              :rollingEvery="windowConfig.rolling_every"
+              :milestoneEvery="windowConfig.milestone_every"
+              :defaults="windowConfig.defaults"
+              :source="windowConfig.source"
+              :saving="windowSaving"
+              :lastResult="windowConfig.last_result"
+              :lastOk="windowConfig.last_ok"
+              @update:windowSize="v => windowConfig.window_size = v"
+              @update:rollingEvery="v => windowConfig.rolling_every = v"
+              @update:milestoneEvery="v => windowConfig.milestone_every = v"
+              @save="saveWindowConfig"
+              @reset="resetWindowConfig"
+            />
           </n-tab-pane>
 
           <!-- 创作模式 -->
@@ -289,6 +277,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import api from '@/api'
 import LayoutSidebar from '@/components/Layout/Sidebar.vue'
+import WindowConfigTab from '@/components/config/WindowConfigTab.vue'
 
 const router = useRouter()
 const route = useRoute()
