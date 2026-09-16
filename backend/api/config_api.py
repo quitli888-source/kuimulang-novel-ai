@@ -84,16 +84,11 @@ def update_provider_config(provider_id: str, req: ProviderConfigUpdate):
     - JSON模型名称（所有供应商均可修改）
     - Base URL（仅自定义LLM）
     """
-    key_map = {
-        "step": "STEP_API_KEY",
-        "minimax": "MINIMAX_API_KEY",
-        "deepseek": "DEEPSEEK_API_KEY",
-        "openai": "OPENAI_API_KEY",
-        "siliconflow": "SILICONFLOW_API_KEY",
-        "custom": "CUSTOM_LLM_API_KEY",
-    }
-    if provider_id not in key_map:
+    # R19-P1-10: 改用 core.llm_providers.PROVIDER_ENV_KEYS 单一来源
+    from core.llm_providers import PROVIDER_ENV_KEYS
+    if provider_id not in PROVIDER_ENV_KEYS:
         raise HTTPException(400, f"未知供应商: {provider_id}")
+    key_map = {pid: meta["api_key"] for pid, meta in PROVIDER_ENV_KEYS.items()}
 
     # 写入API Key
     if req.api_key:
@@ -101,34 +96,18 @@ def update_provider_config(provider_id: str, req: ProviderConfigUpdate):
         print(f"[PUT] 供应商 {provider_id} API Key已更新")
 
     # 对于所有供应商，都支持写入模型配置
-    model_key_map = {
-        "step": "STEP_MODEL",
-        "minimax": "MINIMAX_MODEL",
-        "minimax_m3": "MINIMAX_M3_MODEL",
-        "deepseek": "DEEPSEEK_MODEL",
-        "openai": "OPENAI_MODEL",
-        "siliconflow": "SILICONFLOW_MODEL",
-        "custom": "CUSTOM_LLM_MODEL",
-    }
+    # R19-P1-10: 改用 core.llm_providers.PROVIDER_ENV_KEYS（避免重复 dict）
+    model_key_map = {pid: meta["model"] for pid, meta in PROVIDER_ENV_KEYS.items()}
+    json_model_key_map = {pid: meta["json_model"] for pid, meta in PROVIDER_ENV_KEYS.items()}
 
-    json_model_key_map = {
-        "step": "STEP_JSON_MODEL",
-        "minimax": "MINIMAX_JSON_MODEL",
-        "minimax_m3": "MINIMAX_M3_JSON_MODEL",
-        "deepseek": "DEEPSEEK_JSON_MODEL",
-        "openai": "OPENAI_JSON_MODEL",
-        "siliconflow": "SILICONFLOW_JSON_MODEL",
-        "custom": "CUSTOM_LLM_JSON_MODEL",
-    }
-    
     if req.model and provider_id in model_key_map:
         write_env(model_key_map[provider_id], req.model)
         print(f"[PUT] 供应商 {provider_id} 模型已更新为: {req.model}")
-    
+
     if req.json_model and provider_id in json_model_key_map:
         write_env(json_model_key_map[provider_id], req.json_model)
         print(f"[PUT] 供应商 {provider_id} JSON模型已更新为: {req.json_model}")
-    
+
     # 对于自定义LLM，还需要写入Base URL
     if provider_id == "custom" and req.base_url:
         write_env("CUSTOM_LLM_BASE_URL", req.base_url)
@@ -231,43 +210,11 @@ def update_llm_config_legacy(req: LLMConfigUpdateLegacy):
     cfg = load_llm_config()
     provider_id = cfg.active_provider_id
 
-    # R2: 与 update_provider_config 保持字典结构一致；step 通道补齐
-    key_map = {
-        "step": "STEP_API_KEY",
-        "minimax": "MINIMAX_API_KEY",
-        "minimax_m3": "MINIMAX_M3_API_KEY",
-        "deepseek": "DEEPSEEK_API_KEY",
-        "openai": "OPENAI_API_KEY",
-        "siliconflow": "SILICONFLOW_API_KEY",
-        "custom": "CUSTOM_LLM_API_KEY",
-    }
-    model_key_map = {
-        "step": "STEP_MODEL",
-        "minimax": "MINIMAX_MODEL",
-        "minimax_m3": "MINIMAX_M3_MODEL",
-        "deepseek": "DEEPSEEK_MODEL",
-        "openai": "OPENAI_MODEL",
-        "siliconflow": "SILICONFLOW_MODEL",
-        "custom": "CUSTOM_LLM_MODEL",
-    }
-    json_model_key_map = {
-        "step": "STEP_JSON_MODEL",
-        "minimax": "MINIMAX_JSON_MODEL",
-        "minimax_m3": "MINIMAX_M3_JSON_MODEL",
-        "deepseek": "DEEPSEEK_JSON_MODEL",
-        "openai": "OPENAI_JSON_MODEL",
-        "siliconflow": "SILICONFLOW_JSON_MODEL",
-        "custom": "CUSTOM_LLM_JSON_MODEL",
-    }
-    base_url_key_map = {
-        "step": "STEP_BASE_URL",
-        "minimax": "MINIMAX_BASE_URL",
-        "minimax_m3": "MINIMAX_M3_BASE_URL",
-        "deepseek": "DEEPSEEK_BASE_URL",
-        "openai": "OPENAI_BASE_URL",
-        "siliconflow": "SILICONFLOW_BASE_URL",
-        "custom": "CUSTOM_LLM_BASE_URL",
-    }
+    # R19-P1-10: 与 update_provider_config 保持字典结构一致；改用 PROVIDER_ENV_KEYS
+    key_map = {pid: meta["api_key"] for pid, meta in PROVIDER_ENV_KEYS.items()}
+    model_key_map = {pid: meta["model"] for pid, meta in PROVIDER_ENV_KEYS.items()}
+    json_model_key_map = {pid: meta["json_model"] for pid, meta in PROVIDER_ENV_KEYS.items()}
+    base_url_key_map = {pid: meta["base_url"] for pid, meta in PROVIDER_ENV_KEYS.items()}
 
     if req.api_key and provider_id in key_map:
         write_env(key_map[provider_id], req.api_key)

@@ -147,3 +147,61 @@ class ActiveLLMConfig:
     @classmethod
     def from_dict(cls, d: dict) -> "ActiveLLMConfig":
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
+# =============================================
+# R19-P1-10: PROVIDER_ENV_KEYS 单一来源 —— 供 config_api.py 多处使用
+# =============================================
+PROVIDER_ENV_KEYS: dict = {
+    # provider_id -> {"api_key": str, "model": str, "json_model": str, "base_url": str}
+    "step": {
+        "api_key": "STEP_API_KEY",
+        "model": "STEP_MODEL",
+        "json_model": "STEP_JSON_MODEL",
+        "base_url": "STEP_BASE_URL",
+    },
+    "minimax": {
+        "api_key": "MINIMAX_API_KEY",
+        "model": "MINIMAX_MODEL",
+        "json_model": "MINIMAX_JSON_MODEL",
+        "base_url": "MINIMAX_BASE_URL",
+    },
+    "minimax_m3": {
+        "api_key": "MINIMAX_M3_API_KEY",
+        "model": "MINIMAX_M3_MODEL",
+        "json_model": "MINIMAX_M3_JSON_MODEL",
+        "base_url": "MINIMAX_M3_BASE_URL",
+    },
+    "deepseek": {
+        "api_key": "DEEPSEEK_API_KEY",
+        "model": "DEEPSEEK_MODEL",
+        "json_model": "DEEPSEEK_JSON_MODEL",
+        "base_url": "DEEPSEEK_BASE_URL",
+    },
+    "openai": {
+        "api_key": "OPENAI_API_KEY",
+        "model": "OPENAI_MODEL",
+        "json_model": "OPENAI_JSON_MODEL",
+        "base_url": "OPENAI_BASE_URL",
+    },
+    "siliconflow": {
+        "api_key": "SILICONFLOW_API_KEY",
+        "model": "SILICONFLOW_MODEL",
+        "json_model": "SILICONFLOW_JSON_MODEL",
+        "base_url": "SILICONFLOW_BASE_URL",
+    },
+    "custom": {
+        "api_key": "CUSTOM_LLM_API_KEY",
+        "model": "CUSTOM_LLM_MODEL",
+        "json_model": "CUSTOM_LLM_JSON_MODEL",
+        "base_url": "CUSTOM_LLM_BASE_URL",
+    },
+}
+
+
+def get_env_key(provider_id: str, field: str) -> str:
+    """R19-P1-10: 统一查询 —— 获取 provider 的某个 env key 名。
+    provider_id 不存在或 field 不在 PROVIDER_ENV_KEYS 中 → 返回空字符串（向后兼容）。
+    """
+    keys = PROVIDER_ENV_KEYS.get(provider_id, {})
+    return keys.get(field, "")

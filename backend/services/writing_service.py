@@ -377,15 +377,25 @@ class WritingService:
             print("[WritingService] run() 结束")
 
     async def _check_pause(self):
-        """检查暂停信号"""
+        """检查暂停信号
+
+        R19-P1-17: 用 flag.wait() 替代 sleep(0.5) 轮询 —— 事件唤醒零延迟，不浪费 CPU。
+        """
         flag = _pause_flags.get(self.work_id)
         if flag and flag.is_set():
             flag.clear()
             _writing_state[self.work_id]["paused"] = True
             await self.emitter.emit(EventType.LOG, {"message": "⏸ 已暂停，等待恢复...", "work_id": self.work_id}, work_id=self.work_id)
-            # 等待resume信号
-            while _pause_flags.get(self.work_id) and not _pause_flags[self.work_id].is_set():
-                await asyncio.sleep(0.5)
+            # R19-P1-17: asyncio.Event.wait() 替代轮询 sleep —— resume 时 flag.set() 立即唤醒
+            while _pause_flags.get(self.work_id) is flag:
+                try:
+                    await asyncio.wait_for(flag.wait(), timeout=None)
+                except asyncio.TimeoutError:
+                    continue
+                if not flag.is_set():
+                    # 防止 spurious wakeup：再次确认 flag 仍为 set 状态
+                    continue
+                break
             _writing_state[self.work_id]["paused"] = False
             await self.emitter.emit(EventType.LOG, {"message": "▶ 继续创作...", "work_id": self.work_id}, work_id=self.work_id)
 
