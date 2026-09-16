@@ -30,6 +30,20 @@ VALID_CATEGORIES = {
 }
 
 
+# R25-P2-20: 提到模块级常量（避免 render_for_prompt 每次调用都重建 dict）
+_CATEGORY_LABELS: dict = {
+    "character": "【角色状态/身份】",
+    "location": "【地点】",
+    "object": "【物品】",
+    "event": "【已发生事件】",
+    "trait": "【性格/特质】",
+    "relationship": "【角色关系】",
+    "world_rule": "【世界观硬规则】",
+    "foreshadow": "【伏笔】",
+    "knowledge": "【角色信息边界】",
+}
+
+
 @dataclass
 class Fact:
     """单条已确立事实。"""
@@ -193,17 +207,8 @@ class EstablishedFacts:
         for cat in order:
             facts_in_cat = sorted(grouped[cat], key=lambda x: x.part_num, reverse=True)
             facts_in_cat = facts_in_cat[:max_per_category]
-            cat_label = {
-                "character": "【角色状态/身份】",
-                "location": "【地点】",
-                "object": "【物品】",
-                "event": "【已发生事件】",
-                "trait": "【性格/特质】",
-                "relationship": "【角色关系】",
-                "world_rule": "【世界观硬规则】",
-                "foreshadow": "【伏笔】",
-                "knowledge": "【角色信息边界】",
-            }.get(cat, f"【{cat}】")
+            # R25-P2-20: 提到模块级常量（避免 render_for_prompt 每次调用都重建 dict）
+            cat_label = _CATEGORY_LABELS.get(cat, f"【{cat}】")
             lines.append(cat_label)
             for f in facts_in_cat:
                 txt = (f.text or "").strip()

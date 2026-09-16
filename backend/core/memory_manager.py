@@ -26,8 +26,10 @@ class MemoryManager:
 
     def __init__(self):
         self.config = get_app_config()
-        memory_dir = getattr(self.config, 'memory_dir', None)
-        self.memory_dir = Path(memory_dir or Path.cwd() / '.tomato_novel' / 'memory')
+        # R25-P2-32: 删 getattr 兜底（AppConfig 没有 memory_dir 字段，永远走 fallback），
+        # 改为直接用 config.MEMORY_DIR（已有定义）
+        from core.config import MEMORY_DIR
+        self.memory_dir = MEMORY_DIR
         try:
             self.memory_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
@@ -120,6 +122,7 @@ class MemoryManager:
 
     def get_managed_memory(self) -> str:
         """获取全局记忆"""
+        # R25-P2-26: get_memory_files 已有 @lru_cache，单实例内多次调用不重爬
         files = self.get_memory_files()
         return self.get_memory_content(files, MemoryType.MANAGED)
 
