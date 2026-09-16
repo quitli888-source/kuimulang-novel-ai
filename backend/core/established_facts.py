@@ -81,24 +81,32 @@ class EstablishedFacts:
     """
     facts: List[Fact] = field(default_factory=list)
 
+    # ---- R22-P2-23: (subject, predicate) → list[Fact index] 索引 ----
+    # 添加事实时一次性 O(1) 写入索引；冲突查找从 O(N) 变 O(1)
+    _sp_index: dict = field(default_factory=dict, repr=False, compare=False)
+
     # ----------------- 增删查 -----------------
     def add(self, fact: Fact) -> None:
         """添加一条事实。
 
         冲突处理：若 (subject, predicate) 已有非空事实，标记旧事实为 superseded_by 新 id。
+        R22-P2-23: 用 _sp_index 索引替代 O(N) 线性扫描。
         """
         if not fact or not fact.id:
             return
         if fact.subject and fact.predicate:
-            for old in self.facts:
-                if (
-                    old.subject == fact.subject
-                    and old.predicate == fact.predicate
-                    and not old.superseded_by
-                ):
+            key = (fact.subject, fact.predicate)
+            existing_indices = self._sp_index.get(key, [])
+            for idx in existing_indices:
+                old = self.facts[idx]
+                if not old.superseded_by:
                     old.superseded_by = fact.id
                     break
+        # 写入索引（在 append 之后，idx 就是 self.facts 的新长度 - 1）
         self.facts.append(fact)
+        if fact.subject and fact.predicate:
+            key = (fact.subject, fact.predicate)
+            self._sp_index.setdefault(key, []).append(len(self.facts) - 1)
 
     def add_many(self, facts: Iterable[Fact]) -> int:
         """批量添加，返回成功条数。"""
@@ -237,15 +245,23 @@ class EstablishedFacts:
         }
 
     def from_dict(self, d: dict) -> None:
-        """从 dict 加载；保留现有 facts 不预清空（外部决定是否先 clear）。"""
+        """从 dict 加载；保留现有 facts 不预清空（外部决定是否先 clear）。
+        R22-P2-23: 加载后重建 _sp_index 索引（dataclass 默认值不会随 from_dict 自动重建）。
+        """
         if not isinstance(d, dict):
             return
         raw = d.get("facts") or []
-        for item in raw:
+        self._sp_index.clear()  # 重建
+        for idx, item in enumerate(raw):
             if not isinstance(item, dict):
                 continue
             try:
-                self.facts.append(Fact.from_dict(item))
+                f = Fact.from_dict(item)
+                self.facts.append(f)
+                if f.subject and f.predicate:
+                    self._sp_index.setdefault(
+                        (f.subject, f.predicate), []
+                    ).append(idx)
             except Exception:
                 # 单条解析失败不影响整体
                 continue
