@@ -3,7 +3,8 @@
 V6改动：使用SQLite替代JSON文件存储作品数据，提升性能和可靠性
 R5-P1-2.1: 改为模块级 / 实例级长连接 + threading.RLock 保护，
           避免每次 CRUD 都 sqlite3.connect/close（50 Part 任务约省 2-3s）。
-          注意：单 worker only；多 worker 部署需每 worker 独立 _conn。
+R17-P0-4: ⚠️ 警告：单 worker only；多 worker 部署需每 worker 独立 _conn。
+          启动时会自动检测并 print 警告（见 main.py 启动逻辑）。
 """
 import json
 import sqlite3

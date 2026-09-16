@@ -1334,16 +1334,51 @@ class WritingService:
             await self.emitter.emit(EventType.PART_COMPLETE, {"part": part_num, "words": 0, "work_id": self.work_id}, work_id=self.work_id)
 
     def _save(self):
-        """保存作品数据（R5-P0-3: cost_tracker 当前 summary 含 calls 列表写回 data）"""
+        """保存作品数据（R5-P0-3: cost_tracker 当前 summary 含 calls 列表写回 data）
+
+        R17-P0-3: 高频写盘优化 —— 每次 _save 仍同步阻塞（向后兼容），
+        但调用方可选用 _save_async() 在后台线程池中写盘，不阻塞事件循环。
+        """
         try:
             from core.cost_tracker import get_tracker
+            # 强制 flush cost_tracker 落盘，避免 R17 节流策略导致重启后丢数据
+            try:
+                get_tracker().force_flush()
+            except Exception:
+                pass
             # 同步当前进程的 cost_tracker 累计（含 calls 列表）到 data，便于 uvicorn 重启后
             # works.py get_work 能 attach_work() 还原历史（双轨持久化合并 source of truth）。
             self.data["cost_summary"] = get_tracker().get_summary()
         except Exception:
             # tracker 不可用时保留已有值
             pass
-        self.work_path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            self.work_path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            print(f"[WritingService] _save 失败: {e}")
+
+    async def _save_async(self):
+        """R17-P0-3: 异步版 _save —— 高频 checkpoint 路径使用，不阻塞 asyncio event loop。
+
+        - 通过 asyncio.to_thread() 把 json.dumps + write_text 放到默认 executor
+        - 调用方 await _save_async() 即可（写入完成后才返回）
+        """
+        try:
+            from core.cost_tracker import get_tracker
+            try:
+                get_tracker().force_flush()
+            except Exception:
+                pass
+            self.data["cost_summary"] = get_tracker().get_summary()
+        except Exception:
+            pass
+        path = self.work_path
+        data_snapshot = json.dumps(self.data, ensure_ascii=False, indent=2)
+        # asyncio.to_thread 走默认 ThreadPoolExecutor，不阻塞 event loop
+        try:
+            await asyncio.to_thread(path.write_text, data_snapshot, encoding="utf-8")
+        except Exception as e:
+            print(f"[WritingService] _save_async 失败: {e}")
 
     def _save_initial_state(self):
         """R5-P0-1: 仅在 restart 路径下使用 —— 不经过 cost_tracker 的简易落盘。"""

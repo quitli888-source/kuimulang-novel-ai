@@ -44,6 +44,11 @@ def start_backend():
         os.chdir(BACKEND_DIR)
         print(f"📁 工作目录: {os.getcwd()}")
 
+        # R17-P0-4: 警告 —— 当前 data_service.py SQLite 长连接不支持多 worker
+        # 多 worker 部署会出现 SQLite 锁错误 / 数据竞争 / 跨进程数据发散
+        print("⚠️  注意：当前 SQLite 长连接仅支持单 worker（--workers=1）")
+        print("   如需多 worker 部署，请把 data_service.py 改为短连接 + WAL 模式")
+
         uvicorn.run(
             "main:app",
             host="127.0.0.1",

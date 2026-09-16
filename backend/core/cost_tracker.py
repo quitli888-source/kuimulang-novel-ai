@@ -11,8 +11,11 @@ R5-P0-3: attach_work 新签名 (work_id, work_cost_summary) —— 反序列化 
          cost_summary.calls 叠加到 self.calls（重启后 history 恢复）；
          _persist_path 改为 WORKS_DIR（与 works.py:{work_id}.json 同侧）。
          get_summary() 返回值增加 'calls' 字段（用于 restart 合并 source of truth）。
+R17-P0-2: 节流写盘（每 N 条/T 秒 flush 一次）+ fcntl.flock 防多 worker 冲突；
+         estimated=True 记录不写入磁盘（避免 600+ 估算污染持久化历史）。
 """
 import json
+import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -22,32 +25,37 @@ class CostTracker:
     """全局LLM调用成本追踪器"""
 
     # 估算单价（每百万token，人民币）
-    # 可根据实际使用的模型调整
     MODEL_PRICING = {
         "step-3.7-flash": {
             "input": 0.15,
             "output": 0.6,
             "_note": "Step-3.7-Flash 市场参考价（按官方公开口径估算），待官方定价更新",
-        },                                                          # Step-3.7-Flash (默认模型)
-        "deepseek-v3.2": {"input": 1.0, "output": 2.0},       # DeepSeek V3
-        "MiniMax-Text-01": {"input": 1.0, "output": 4.0},     # MiniMax
-        "gpt-4o-mini": {"input": 0.15, "output": 0.6},       # GPT-4o-mini
-        "gpt-4o": {"input": 2.5, "output": 10.0},            # GPT-4o
+        },
+        "deepseek-v3.2": {"input": 1.0, "output": 2.0},
+        "MiniMax-Text-01": {"input": 1.0, "output": 4.0},
+        "MiniMax-M3": {"input": 0.15, "output": 0.6},
+        "gpt-4o-mini": {"input": 0.15, "output": 0.6},
+        "gpt-4o": {"input": 2.5, "output": 10.0},
         "default": {"input": 1.0, "output": 2.0},
     }
 
-    # R3-P1-6: 默认成本熔断阈值（元）。可在调用 should_prompt_for_cost 时覆盖。
     DEFAULT_COST_THRESHOLD_RMB = 50.0
 
+    # R17: 节流写盘参数
+    FLUSH_EVERY_N_RECORDS = 20       # 每 20 条真实（estimated=False）调用触发 flush
+    FLUSH_EVERY_N_SECONDS = 30.0     # 或每 30 秒兜底
+    PERSIST_ESTIMATED = False        # 估算记录不入盘（仅 in-memory 显示）
+
     def __init__(self):
-        self.calls = []  # [{timestamp, model, agent, is_json, prompt_tokens, completion_tokens, total_tokens, duration_ms}]
+        self.calls = []
         self._start_time = time.time()
-        # R4-P1-7: 当前绑定的 work_id + 持久化文件路径
         self._persist_work_id: Optional[str] = None
         self._persist_path: Optional[Path] = None
-        # R5-P0-3: work JSON 中持久化的 cost_summary 聚合字段（不含 calls），
-        # 用于 works.py:get_work 合并（重启瞬间 in-memory=0 时 history 不丢）
         self._persisted_summary: dict = {}
+        # R17: 节流计数器
+        self._last_flush_ts: float = time.time()
+        self._last_flush_count: int = 0
+        self._dirty: bool = False  # 标记有未落盘的真实调用
 
     def attach_work(
         self,
@@ -88,8 +96,6 @@ class CostTracker:
         if isinstance(work_cost_summary, dict):
             calls = work_cost_summary.get("calls")
             if isinstance(calls, list) and calls:
-                # 去重：以 (timestamp, model, agent, prompt_tokens, completion_tokens)
-                # 五元组作为签名，避免重复叠加同一调用
                 existing_keys = {
                     (
                         c.get("timestamp"),
@@ -110,8 +116,6 @@ class CostTracker:
                         c.get("agent"),
                         c.get("prompt_tokens"),
                         c.get("completion_tokens"),
-                        # R7-P0-3: estimated 字段不参与去重（保持向后兼容：旧 json 无此字段）
-                        # 仅在 estimated=True 且字段已存在时区分（防止双 attach 重复叠加）
                     )
                     if sig in existing_keys:
                         continue
@@ -120,8 +124,10 @@ class CostTracker:
                     added += 1
                 if added:
                     print(f"[cost_tracker] attach_work 从 work_cost_summary 恢复 {added} 条历史")
-            # 同时把 work_cost_summary 里的 summary 字段视为"已持久化基线"，
-            # 用于 works.py:get_work 时合并（避免重启瞬间 in-memory=0 覆盖 history）
+                # R17: attach 时若已有新调用进来过，把 _last_flush_count 校准到当前数量，避免立刻 flush
+                self._last_flush_count = len([
+                    c for c in self.calls if not c.get("estimated")
+                ])
             self._persisted_summary = {
                 k: v for k, v in work_cost_summary.items() if k != "calls"
             }
@@ -130,7 +136,9 @@ class CostTracker:
                prompt_tokens: int, completion_tokens: int,
                total_tokens: int, duration_ms: float,
                estimated: bool = False):
-        """记录一次LLM调用。R7-P0-3: estimated=True 表示 token 数是基于文本长度估算（非 provider 上报）。"""
+        """记录一次LLM调用。R7-P0-3: estimated=True 表示 token 数是基于文本长度估算（非 provider 上报）。
+        R17-P0-2: 估算记录不入盘（避免污染持久化历史）；真实记录节流写盘（每 20 条或 30s）。
+        """
         self.calls.append({
             "timestamp": round(time.time() - self._start_time, 1),
             "model": model,
@@ -142,22 +150,54 @@ class CostTracker:
             "duration_ms": round(duration_ms, 0),
             "estimated": bool(estimated),
         })
-        # R4-P1-7: 增量落盘（best-effort，失败不影响主流程）
-        self._flush_to_disk()
+
+        # R17: 估算记录不入盘（落盘数据是"真实 provider 上报"的 source of truth）
+        if estimated and not self.PERSIST_ESTIMATED:
+            return
+
+        # R17: 节流 — 每 N 条真实记录或每 T 秒兜底触发 flush
+        self._dirty = True
+        real_added = self.calls.count(None) if False else (  # 简化计数
+            len([c for c in self.calls if not c.get("estimated")])
+        )
+        if (real_added - self._last_flush_count >= self.FLUSH_EVERY_N_RECORDS
+                or time.time() - self._last_flush_ts >= self.FLUSH_EVERY_N_SECONDS):
+            self._flush_to_disk()
 
     def _flush_to_disk(self) -> None:
-        """R4-P1-7: 把当前 self.calls 序列化为 JSON 写到 _persist_path。"""
-        if not self._persist_path:
+        """R4-P1-7: 把当前 self.calls 序列化为 JSON 写到 _persist_path。
+        R17: 加 fcntl.flock 文件锁防多 worker 冲突；估算记录不写入磁盘。
+        """
+        if not self._persist_path or not self._dirty:
             return
         try:
-            self._persist_path.write_text(
-                json.dumps(self.calls, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            # R17: 过滤掉估算记录（避免污染持久化历史）
+            persist_calls = [c for c in self.calls if not c.get("estimated")] if not self.PERSIST_ESTIMATED else list(self.calls)
+
+            # R17: fcntl.flock 文件锁（Linux/macOS）；Windows 退化为普通写入
+            payload = json.dumps(persist_calls, ensure_ascii=False, indent=2)
+            try:
+                import fcntl
+                with open(self._persist_path, "w", encoding="utf-8") as f:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                    try:
+                        f.write(payload)
+                    finally:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            except (ImportError, AttributeError):
+                # Windows：直接写
+                self._persist_path.write_text(payload, encoding="utf-8")
+
+            self._last_flush_ts = time.time()
+            self._last_flush_count = len(persist_calls)
+            self._dirty = False
         except Exception as e:
             # 写盘失败静默：成本是辅助数据，不应阻塞创作主流程
-            # TODO(R5): 多 worker 部署时加 fcntl.flock 文件锁
-            pass
+            print(f"[cost_tracker] _flush_to_disk 失败（不影响主流程）: {e}")
+
+    def force_flush(self) -> None:
+        """R17: 强制立即 flush（用于 Part 写完 / 任务结束 / 关键 checkpoint）"""
+        self._flush_to_disk()
 
     def get_summary(self) -> dict:
         """获取统计摘要
