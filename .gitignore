@@ -19,6 +19,7 @@ dist-ssr/
 .vscode/*
 !.vscode/extensions.json
 .idea
+.DS_Store
 *.suo
 *.ntvs*
 *.njsproj
@@ -34,21 +35,7 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-# System files
-.DS_Store
-Thumbs.db
-
-# Test coverage
-coverage/
-*.lcov
-
-# Data files (keep structure, ignore content)
-data/works/*.json
-data/memory/*.json
-!data/works/.gitkeep
-!data/memory/.gitkeep
-
-# Python cache
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -56,6 +43,7 @@ __pycache__/
 .Python
 build/
 develop-eggs/
+dist/
 downloads/
 eggs/
 .eggs/
@@ -68,28 +56,14 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
 
-# Virtual environment
+# Project specific
+data/works/*.cost.json
+data/works/*.json
+!data/works/.gitkeep
+*.pdf
+.python-version
+.venv
 venv/
-ENV/
 env/
-.venv/
-
-# IDE
-.idea/
-*.iml
-*.ipr
-*.iws
-.project
-.classpath
-.settings/
-
-# PyInstaller
-*.manifest
-*.manifest.bak
-
-# Confidential files
-*.pem
-*.key
-credentials.json
-secrets.json
