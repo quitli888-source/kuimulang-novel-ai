@@ -80,14 +80,9 @@ class EmotionReviewAgent(BaseAgent):
 
     @staticmethod
     def _sorted_part_nums(state) -> list:
-        """R7-P0-2: 把 state.part_summaries.keys() 统一转 int 排序。"""
-        keys = []
-        for k in (state.part_summaries or {}).keys():
-            try:
-                keys.append(int(k))
-            except (TypeError, ValueError):
-                continue
-        return sorted(keys)
+        """R18-P1-9: 委托给 core.agents._helpers.sorted_part_nums。"""
+        from core.agents._helpers import sorted_part_nums as _spn
+        return _spn(state)
 
     def execute(self, state, part_num: int, part_text: str) -> dict:
         self.log_start()
