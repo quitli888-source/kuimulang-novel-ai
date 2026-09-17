@@ -14,36 +14,49 @@ class StartWritingRequest(BaseModel):
     work_id: str
     restart: bool = False
 
-@router.post('/start')
-async def start_writing(req: StartWritingRequest, background_tasks: BackgroundTasks):
-    """启动创作流程（异步）
+class PauseRequest(BaseModel):
+    work_id: str
 
-    R5-P0-1: 增加可选 restart 字段。当 restart=True 时，把 phase 强制重置为
-    'init' 并清空 parts/part_summaries，让 WritingService 从 Phase1 起跑。
-    """
-    logger.info(f'[API] /writing/start 被调用, work_id={req.work_id}, restart={req.restart}')
-    work_path = get_work_file(req.work_id)
-    if not work_path.exists():
-        logger.info(f'[API] 作品不存在: {work_path}')
-        raise HTTPException(404, '作品不存在')
-    logger.info(f'[API] 作品存在，准备启动创作服务')
-    emitter = get_emitter()
+class RunRequest(BaseModel):
+    """P2-58: 合并 start + resume 为单一 /run 端点，restart / resume 由 body 控制。"""
+    work_id: str
+    restart: bool = False
+    resume: bool = False
 
+
+async def _launch_run(work_id: str, emitter, *, restart: bool = False, resume: bool = False):
+    """P2-58: start / resume 共用的 BackgroundTask 工厂 —— 消除两份闭包重复。"""
     async def run():
-        logger.info(f'[BackgroundTask] 创作任务开始执行')
-        service = WritingService(req.work_id, emitter, restart=req.restart)
+        service = WritingService(work_id, emitter, restart=restart, resume=resume)
         try:
             await service.run()
-            logger.info(f'[BackgroundTask] 创作任务完成')
         except Exception as e:
             logger.info(f'[BackgroundTask] 创作任务出错: {e}')
             await emitter.emit(EventType.ERROR, {'message': str(e)})
-    background_tasks.add_task(run)
-    logger.info(f'[API] 创作任务已添加到background_tasks')
-    return {'status': 'started', 'work_id': req.work_id, 'restart': req.restart}
+    return run
 
-class PauseRequest(BaseModel):
-    work_id: str
+
+@router.post('/run')
+async def run_writing(req: RunRequest, background_tasks: BackgroundTasks):
+    """P2-58: 合并 /writing/start 与 /writing/resume —— 单一 /run 端点，
+    body 携带 restart / resume flag。保留旧端点作为兼容 shim。
+    """
+    logger.info(f'[API] /writing/run 被调用, work_id={req.work_id}, restart={req.restart}, resume={req.resume}')
+    work_path = get_work_file(req.work_id)
+    if not work_path.exists():
+        raise HTTPException(404, '作品不存在')
+    emitter = get_emitter()
+    run = await _launch_run(req.work_id, emitter, restart=req.restart, resume=req.resume)
+    background_tasks.add_task(run)
+    mode = 'restart' if req.restart else ('resume' if req.resume else 'start')
+    return {'status': mode, 'work_id': req.work_id}
+
+
+@router.post('/start')
+async def start_writing(req: StartWritingRequest, background_tasks: BackgroundTasks):
+    """P2-58: 兼容 shim —— 转发到 /run（保持旧前端调用方工作）。"""
+    new_req = RunRequest(work_id=req.work_id, restart=req.restart, resume=False)
+    return await run_writing(new_req, background_tasks)
 
 @router.post('/pause')
 def pause_writing(req: PauseRequest):
@@ -56,24 +69,9 @@ def pause_writing(req: PauseRequest):
 
 @router.post('/resume/{work_id}')
 async def resume_writing(work_id: str, background_tasks: BackgroundTasks):
-    """恢复创作
-
-    R5-P0-1: 该端点用于断点恢复 —— WritingService(resume=True) 读 phase 自动短路
-    Phase1+2，从上次 phase3_part{N} 之后继续。前端 handleResume('continue') 必须调本端点。
-    """
-    work_path = get_work_file(work_id)
-    if not work_path.exists():
-        raise HTTPException(404, '作品不存在')
-    emitter = get_emitter()
-
-    async def run():
-        service = WritingService(work_id, emitter, resume=True)
-        try:
-            await service.run()
-        except Exception as e:
-            await emitter.emit(EventType.ERROR, {'message': str(e)})
-    background_tasks.add_task(run)
-    return {'status': 'resumed', 'work_id': work_id}
+    """P2-58: 兼容 shim —— 转发到 /run（resume=True）。"""
+    new_req = RunRequest(work_id=work_id, restart=False, resume=True)
+    return await run_writing(new_req, background_tasks)
 
 @router.get('/status/{work_id}')
 def get_writing_status(work_id: str):

@@ -5,6 +5,7 @@ V4改动：
 - 错误处理不再默认通过，改为降级评分+标记P0
 """
 from core.agents.base_agent import BaseAgent
+from core.agents._helpers import sorted_part_nums  # P2-65
 from core.llm_client import call_llm_json
 from core.prompt_loader import load_prompt
 
@@ -68,12 +69,6 @@ class ConsistencyReviewAgent(BaseAgent):
     name = "角色一致性检查Agent"
     description = "检查角色在多个Part之间的一致性"
 
-    @staticmethod
-    def _sorted_part_nums(state) -> list:
-        """R18-P1-9: 委托给 core.agents._helpers.sorted_part_nums。"""
-        from core.agents._helpers import sorted_part_nums as _spn
-        return _spn(state)
-
     def execute(self, state, part_num: int, part_text: str) -> dict:
         """
         检查当前Part的角色一致性。
@@ -107,7 +102,7 @@ class ConsistencyReviewAgent(BaseAgent):
 
         # R7-P0-2: 用 int keys 排序后比较
         prev_summaries = ""
-        for p_num in self._sorted_part_nums(state):
+        for p_num in sorted_part_nums(state):
             if p_num < part_num:
                 prev_summaries += f"Part {p_num}: {state.part_summaries[str(p_num)]}\n"
 

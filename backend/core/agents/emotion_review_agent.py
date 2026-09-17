@@ -5,6 +5,7 @@ V4改动：
 - 错误处理不再默认通过，改为降级评分+标记P0
 """
 from core.agents.base_agent import BaseAgent
+from core.agents._helpers import sorted_part_nums  # P2-65
 from core.llm_client import call_llm_json
 from core.prompt_loader import load_prompt
 
@@ -78,12 +79,6 @@ class EmotionReviewAgent(BaseAgent):
     name = "情感评估Agent"
     description = "评估Part情感共鸣和情绪曲线"
 
-    @staticmethod
-    def _sorted_part_nums(state) -> list:
-        """R18-P1-9: 委托给 core.agents._helpers.sorted_part_nums。"""
-        from core.agents._helpers import sorted_part_nums as _spn
-        return _spn(state)
-
     def execute(self, state, part_num: int, part_text: str) -> dict:
         self.log_start()
 
@@ -93,7 +88,7 @@ class EmotionReviewAgent(BaseAgent):
         prev_context = ""
         if part_num > 1 and state.part_summaries:
             prev_context = "【前文情感脉络】\n"
-            for p_num in self._sorted_part_nums(state):
+            for p_num in sorted_part_nums(state):
                 if p_num < part_num:
                     prev_context += f"Part {p_num}: {state.part_summaries[str(p_num)]}\n"
 

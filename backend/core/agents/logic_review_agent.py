@@ -11,6 +11,7 @@ V5 改动（R8 合并 P0-1 + P0-2 + P1-2）：
 """
 import re
 from core.agents.base_agent import BaseAgent
+from core.agents._helpers import sorted_part_nums  # P2-65: 取代 _sorted_part_nums 薄包装
 from core.llm_client import call_llm_json
 from core.prompt_loader import load_prompt
 
@@ -128,11 +129,7 @@ class LogicReviewAgent(BaseAgent):
     description = "检查情节逻辑和前文一致性（V5：结构化事实基线 + 短 JSON 输出）"
     version = "5.0.0"
 
-    @staticmethod
-    def _sorted_part_nums(state) -> list:
-        """R18-P1-9: 委托给 core.agents._helpers.sorted_part_nums（避免三 Agent 重复定义）。"""
-        from core.agents._helpers import sorted_part_nums as _spn
-        return _spn(state)
+    # P2-65: 删除 _sorted_part_nums 薄包装；调用点直接用 sorted_part_nums(state)
 
     def execute(self, state, part_num: int, part_text: str) -> dict:
         self.log_start()
@@ -149,7 +146,7 @@ class LogicReviewAgent(BaseAgent):
         prev_context = ""
         if part_num > 1 and state.part_summaries:
             prev_context = "【前文摘要】\n"
-            for p_num in self._sorted_part_nums(state):
+            for p_num in sorted_part_nums(state):
                 if p_num < part_num:
                     prev_context += f"Part {p_num}: {state.part_summaries[str(p_num)]}\n"
 
