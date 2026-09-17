@@ -113,10 +113,11 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '@/api'
-import { useWritingStore, SSE_STATUS } from '@/stores/writing'
+import { useWritingStore } from '@/stores/writing'
+import { useWritingSse } from '@/composables/useWritingSse'  // P0-43
 import LayoutSidebar from '@/components/Layout/Sidebar.vue'
 import ProgressBar from '@/components/ProgressBar.vue'
 
@@ -159,66 +160,23 @@ function phaseDone(id) {
   return order.indexOf(id) < order.indexOf(store.currentPhase)
 }
 
-// ---- SSE 连接管理（R4-P0-1: view 直接管理 EventSource，指数退避重连） ----
-let eventSource = null
-const reconnectState = {
-  attempts: 0,
-  maxDelayMs: 30000,
-  baseDelayMs: 1000,
-  timer: null,
-  stopped: false,
-}
+// ---- P0-43: SSE 连接管理改为 useWritingSse composable ----
+// 生命周期绑定组件 scope（onScopeDispose 自动清理），
+// 避免原写法 let eventSource = null 在 script setup 顶层每次组件 setup 都重置引用
+const sse = useWritingSse(workId, handleEvent, {
+  onStatusChange: (s) => store.setSSEStatus(s),
+  onError: (msg) => store.addLog({ msg, type: 'error' }),
+  onReconnectScheduled: (attempts, delay) => {
+    store.addLog({ msg: `SSE将在 ${(delay / 1000).toFixed(1)}s 后第 ${attempts} 次重连`, type: 'info' })
+  },
+})
 
 function connectSSE() {
-  if (reconnectState.stopped) return
-  // 关闭旧连接
-  try { if (eventSource) eventSource.close() } catch (e) { /* ignore */ }
-
-  store.setSSEStatus(SSE_STATUS.CONNECTING)
-  eventSource = new EventSource(`/api/sse/stream?work_id=${workId}`)
-
-  eventSource.onopen = () => {
-    reconnectState.attempts = 0
-    store.setSSEStatus(SSE_STATUS.CONNECTED)
-  }
-
-  eventSource.onerror = () => {
-    if (reconnectState.stopped) return
-    store.setSSEStatus(SSE_STATUS.ERROR)
-    store.addLog({ msg: 'SSE连接错误，准备重连...', type: 'error' })
-
-    try { eventSource.close() } catch (e) { /* ignore */ }
-
-    reconnectState.attempts += 1
-    const delay = Math.min(
-      reconnectState.maxDelayMs,
-      reconnectState.baseDelayMs * Math.pow(2, reconnectState.attempts - 1)
-    )
-    store.addLog({ msg: `SSE将在 ${(delay / 1000).toFixed(1)}s 后第 ${reconnectState.attempts} 次重连`, type: 'info' })
-    reconnectState.timer = setTimeout(connectSSE, delay)
-  }
-
-  eventSource.onmessage = (e) => {
-    try {
-      const ev = JSON.parse(e.data)
-      handleEvent(ev)
-    } catch (err) {
-      console.error('[WritingProgress] Failed to parse SSE event:', err)
-    }
-  }
+  sse.connect()
 }
 
 function closeSSE() {
-  reconnectState.stopped = true
-  if (reconnectState.timer) {
-    clearTimeout(reconnectState.timer)
-    reconnectState.timer = null
-  }
-  if (eventSource) {
-    try { eventSource.close() } catch (e) { /* ignore */ }
-    eventSource = null
-  }
-  store.setSSEStatus(SSE_STATUS.DISCONNECTED)
+  sse.close()
 }
 
 onMounted(async () => {
@@ -242,8 +200,9 @@ onMounted(async () => {
     // 估算总 Part 数：来自 part_outline 或 cfg 默认 50
     totalParts.value = (workData.value.part_outline && workData.value.part_outline.length) || 50
     // 同步初始 currentPhase / currentPart 到 store
+    // P0-42: 改走 store action —— 避免直接 mutate state 破坏 Pinia 封装
     store.setPhase(savedPhase)
-    store.currentPart = n
+    store.setCurrentPart(n)
     showResumeDialog.value = true
   }
 
@@ -252,9 +211,8 @@ onMounted(async () => {
   connectSSE()
 })
 
-onUnmounted(() => {
-  closeSSE()
-})
+// P0-43: SSE 由 composable 内部 onScopeDispose 自动清理；这里不再需要 onUnmounted
+// 但保留 closeSSE() 供外部按钮调用（如手动断开重连）。
 
 // R4-P0-1: handleEvent 直接调 store action（不再维护视图内 ref）
 // R7-P1-6: 新增 event_type 渲染（log / progress 事件携带 event_type 字段）

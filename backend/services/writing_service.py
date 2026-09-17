@@ -122,6 +122,22 @@ _writing_state: dict = {}
 _pause_flags: dict = {}
 _confirm_flags: dict = {}
 
+# P0-45: per-work 锁 —— 防止两个 WritingService 实例并发 mutate 同一 work_id 的状态。
+# asyncio 是单线程，但跨 BackgroundTasks / 多次 start 仍可能交替 mutate。
+import threading
+_writing_state_locks: dict = {}  # work_id -> threading.Lock
+_writing_state_locks_guard = threading.Lock()
+
+
+def _get_state_lock(work_id: str) -> threading.Lock:
+    """P0-45: 按 work_id 取/建一个 threading.Lock 保护 _writing_state 写入。"""
+    with _writing_state_locks_guard:
+        lock = _writing_state_locks.get(work_id)
+        if lock is None:
+            lock = threading.Lock()
+            _writing_state_locks[work_id] = lock
+        return lock
+
 class WritingState:
 
     def __init__(self, work_id: str):
@@ -153,7 +169,8 @@ class WritingService:
             self.data.pop('review_report', None)
             self.data.pop('character_state_track', None)
             self._save_initial_state()
-        _writing_state[work_id] = {'phase': 'idle', 'current_part': 0, 'total_parts': self.cfg.part_count, 'running': False, 'paused': False}
+        with _get_state_lock(work_id):
+            _writing_state[work_id] = {'phase': 'idle', 'current_part': 0, 'total_parts': self.cfg.part_count, 'running': False, 'paused': False}
         _pause_flags[work_id] = asyncio.Event()
         _confirm_flags[work_id] = {'event': asyncio.Event(), 'result': ''}
         self.progress_callback = progress_manager.get_progress_callback(work_id, 'WritingService')

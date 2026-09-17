@@ -181,7 +181,8 @@ def call_llm(system_prompt: str, user_prompt: str, temperature: float=0.7, max_t
             else:
                 response = client.chat.completions.create(model=model_name, messages=messages, temperature=temp, max_tokens=max_tokens)
                 content = response.choices[0].message.content.strip()
-                last_chunk = None
+                # P0-44: 删除 last_chunk = None —— stream=False 路径下 usage 取自 response，
+                # last_chunk 仅 stream=True 路径才有意义，赋值后再读 = dead branch
             content = _strip_think_tags(content)
             call_duration = (time.time() - call_start) * 1000
             logger.info(f'    [LLM] API调用成功，耗时: {call_duration:.2f}ms')

@@ -275,8 +275,14 @@ export const useWritingStore = defineStore('writing', {
     reset() {
       this.workData = { title: '', parts: {}, part_outline: [] }
       this.currentPhase = ''
-      this.currentPart = 0
       this.completedParts = []
+      this.setCurrentPart(0)  // P0-42: 走 action 走封装
+    },
+
+    // P0-42: 集中 setter —— 维护 store 内部不变式（如清空 completedParts）
+    setCurrentPart(n) {
+      this.currentPart = n
+    },
       this.logs = []
       this.progress = 0
       this.progressMessage = '准备开始创作'
