@@ -11,7 +11,6 @@ V6.1 改动：
   （最近 K 个 Part 原文 + 远端 Part 的三级摘要）
 """
 import json
-from pathlib import Path
 from core.config import MEMORY_DIR
 from core.sliding_window import SlidingWindow
 from core.established_facts import EstablishedFacts

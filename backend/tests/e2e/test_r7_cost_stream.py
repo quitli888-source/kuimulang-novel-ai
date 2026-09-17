@@ -69,7 +69,6 @@ def _safe_call_llm(system_prompt, user_prompt, temperature=0.7, max_tokens=4000,
         logger.info(f'    [PATCHED] 估算: prompt={prompt_tokens} completion={completion_tokens} (跳过 empty choices={empty_choices_count} 个)')
     return content
 llm_client_mod.call_llm = _safe_call_llm
-import importlib
 from core.logger import get_logger
 logger = get_logger('test_r7_cost_stream')
 sys.modules['core.llm_client'].call_llm = _safe_call_llm

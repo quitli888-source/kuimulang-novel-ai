@@ -2,7 +2,6 @@
 番茄小说AI创作系统 V5 - AI辅助改写服务
 支持选中文字 → 润色/扩写/缩写
 """
-import asyncio
 from core.config import get_app_config, read_env
 from core.llm_client import get_client
 

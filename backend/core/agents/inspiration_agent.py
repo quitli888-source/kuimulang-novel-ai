@@ -4,7 +4,6 @@
 V3改动：
 - Prompt外部化到 prompts/inspiration.txt
 """
-import json
 from core.agents.base_agent import BaseAgent
 from core.llm_client import call_llm_json
 from core.prompt_loader import load_prompt

@@ -10,7 +10,6 @@ R5-P3-5.3: test_cost_persist.py —— 验证 cost_tracker 重启合并 + 双轨
 
 既支持 pytest 也支持直接 python 跑。
 """
-import json
 import sys
 import tempfile
 from pathlib import Path

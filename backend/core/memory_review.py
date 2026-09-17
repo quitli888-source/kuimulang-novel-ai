@@ -3,10 +3,9 @@
 借鉴ClaudeCode的记忆审查设计
 """
 import json
-from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict
 
-from core.memory_manager import memory_manager, MemoryType
+from core.memory_manager import memory_manager
 from core.llm_client import call_llm
 
 

@@ -27,7 +27,7 @@ from contextlib import asynccontextmanager
 
 from api import works, config_api, writing, rewrite, sse
 from core.config import init_app_config
-from core.exceptions import AppException, global_exception_handler
+from core.exceptions import AppException  # noqa: F401  (AppException 本身由本模块的 exception_handler 引用)
 
 # PyInstaller 打包后的路径处理
 if getattr(sys, 'frozen', False):

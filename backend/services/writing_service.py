@@ -3,17 +3,15 @@
 封装V4的核心创作逻辑，支持SSE进度推送和暂停恢复
 V5.1改动：集成进度管理器，实现实时创作进度推送
 V5.2改动：实现完整的手动确认模式
+R27-P1-7: 各阶段实现搬到 services/writing_phase_runners.py
 """
 import json
-import time
 import asyncio
-from pathlib import Path
-from typing import Optional
 from api.sse import SSEEmitter, EventType
 from api.works import get_work_file
-from core.config import get_app_config, MEMORY_DIR
+from core.config import get_app_config
 from core.progress_manager import progress_manager
-from core.error_handler import error_handler, ErrorType
+from core.error_handler import error_handler
 from core.memory_manager import get_all_memory
 from core.sliding_window import SlidingWindow
 from core.logger import get_logger

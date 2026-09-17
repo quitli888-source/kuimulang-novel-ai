@@ -10,7 +10,6 @@ import json
 import re
 import time
 import os
-from functools import lru_cache
 from openai import OpenAI
 from core.config import get_llm_config_for_agent, get_llm_config
 from core.error_handler import LLMError, NetworkError, SystemError

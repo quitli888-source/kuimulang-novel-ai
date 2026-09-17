@@ -5,7 +5,6 @@
 支持 {变量名} 占位符替换（从 config 读取变量值）。
 如果外部文件不存在，回退到代码内嵌的默认Prompt（f-string已替换）。
 """
-from pathlib import Path
 from core.config import PROMPT_DIR, TARGET_WORD_COUNT, PART_COUNT, PART_WORD_MIN, PART_WORD_MAX
 
 

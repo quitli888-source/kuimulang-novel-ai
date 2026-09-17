@@ -7,7 +7,6 @@ import json
 import sys
 import time
 import tempfile
-import os
 from pathlib import Path
 from core.logger import get_logger
 logger = get_logger('test_smoke')

@@ -2,12 +2,10 @@
 番茄小说AI创作系统 V5 - 配置管理API
 前端配置 → 自动同步写入 .env / data/llm_config.json
 """
-import os
 import json
-from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from core.config import get_app_config, DEFAULT_TEMPLATES, write_env, read_env, delete_env, LLMConfig, AgentConfigs, WritingTemplate, ENV_FILE, BASE_DIR, get_all_providers, load_llm_config, save_llm_config, get_llm_config_for_agent
+from core.config import get_app_config, DEFAULT_TEMPLATES, write_env, read_env, delete_env, get_all_providers, load_llm_config, save_llm_config, get_llm_config_for_agent
 from core.llm_providers import ActiveLLMConfig
 router = APIRouter()
 

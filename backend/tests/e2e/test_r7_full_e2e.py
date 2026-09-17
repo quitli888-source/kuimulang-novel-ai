@@ -11,7 +11,6 @@ import os
 import sys
 import json
 import time
-import types
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, '..', '..', '..'))
 sys.path.insert(0, os.path.join(ROOT, 'backend'))

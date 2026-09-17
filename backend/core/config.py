@@ -2,8 +2,6 @@
 番茄小说AI创作系统 V5 - 配置管理
 支持从.env文件读取和写入，支持前端实时同步
 """
-import os
-import re
 import json
 import sys
 from pathlib import Path

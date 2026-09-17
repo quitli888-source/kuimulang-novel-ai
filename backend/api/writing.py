@@ -1,9 +1,6 @@
 """
 番茄小说AI创作系统 V5 - 创作控制API
 """
-import asyncio
-import json
-from pathlib import Path
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from .sse import get_emitter, EventType

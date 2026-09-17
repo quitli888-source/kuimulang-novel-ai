@@ -11,7 +11,6 @@ import os
 import sys
 import json
 import time
-import types
 os.environ['ENABLE_VECTOR_RAG'] = '1'
 os.environ.setdefault('STEP_API_KEY', '2AUHLIl7GnTbiSC0G9EwAX5OJQuKcA2XDk8vbvArNISugDJUnXw0fyDnJACyFR6e7')
 HERE = os.path.dirname(os.path.abspath(__file__))

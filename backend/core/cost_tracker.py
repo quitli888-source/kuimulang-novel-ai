@@ -15,7 +15,6 @@ R17-P0-2: 节流写盘（每 N 条/T 秒 flush 一次）+ fcntl.flock 防多 wor
          estimated=True 记录不写入磁盘（避免 600+ 估算污染持久化历史）。
 """
 import json
-import os
 import time
 from pathlib import Path
 from typing import Optional

@@ -2,7 +2,6 @@
 番茄小说AI创作系统 V5 - 多层级记忆管理系统
 借鉴ClaudeCode的记忆管理设计
 """
-import os
 import re
 from pathlib import Path
 from typing import List, Dict, Optional, Set, Any

@@ -14,8 +14,6 @@ R7-P0-4: 轻量级向量检索 RAG 双轨（hash-based 假向量 + 可选 embedd
 
 本模块故意保持纯函数式接口（不阻塞主流程；失败永远 silent-fallback）。
 """
-from __future__ import annotations
-
 import hashlib
 import math
 import os
