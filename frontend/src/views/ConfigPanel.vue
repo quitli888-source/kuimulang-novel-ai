@@ -12,85 +12,17 @@
 
       <div class="content">
         <n-tabs type="line" animated>
-          <!-- 创作模板 -->
+          <!-- 创作模板 (P1-15: 拆分为 TemplateSection.vue) -->
           <n-tab-pane name="template" tab="创作模板">
-            <div class="section">
-              <div class="section-title">选择模板</div>
-              <div class="template-grid">
-                <div
-                  v-for="t in templates"
-                  :key="t.name"
-                  class="template-card"
-                  :class="{ active: selectedTemplate === t.name }"
-                  @click="handleTemplateSelect(t)"
-                >
-                  <div class="tpl-name">{{ t.name }}</div>
-                  <div class="tpl-info">{{ getTemplateDisplayInfo(t) }}</div>
-                </div>
-              </div>
-              
-              <!-- 自定义模板配置 -->
-              <transition name="fade">
-                <div v-if="selectedTemplate === '自定义'" key="custom-config" class="custom-template-config">
-                  <div class="section-title" style="margin-top:24px">📝 自定义配置</div>
-                  <n-form label-placement="left" label-width="100">
-                    <n-form-item label="目标字数">
-                      <n-input-number 
-                        v-model:value="customTargetWords" 
-                        :min="1000" 
-                        :max="500000" 
-                        :step="1000" 
-                        placeholder="请输入目标字数（建议10,000-100,000）"
-                        clearable
-                        size="large"
-                        style="width: 100%"
-                      />
-                    </n-form-item>
-                    <n-form-item label="Part数量">
-                      <n-input-number 
-                        v-model:value="customPartCount" 
-                        :min="1" 
-                        :max="50" 
-                        :step="1" 
-                        placeholder="请输入Part数量（建议3-20）"
-                        clearable
-                        size="large"
-                        style="width: 100%"
-                      />
-                    </n-form-item>
-                    <n-alert type="info" style="margin-bottom:16px">
-                      预计每Part字数：{{ customTargetWords && customPartCount ? Math.round(customTargetWords / customPartCount).toLocaleString() : 0 }} 字
-                    </n-alert>
-                    <n-button type="primary" @click="saveCustomTemplate" block size="large">
-                      💾 保存自定义配置
-                    </n-button>
-                  </n-form>
-                </div>
-              </transition>
-
-              <!-- 当前选中模板信息 -->
-              <div v-if="selectedTemplate && selectedTemplate !== '自定义'" class="current-template-info">
-                <n-card size="small" :bordered="false" style="margin-top:20px; background:#f0f9ff;">
-                  <template #header>
-                    <span style="font-weight:600">✅ 当前选择：{{ selectedTemplate }}</span>
-                  </template>
-                  <div class="info-grid">
-                    <div class="info-item">
-                      <span class="info-label">目标字数</span>
-                      <span class="info-value">{{ currentTemplateInfo.target_words?.toLocaleString() || '0' }} 字</span>
-                    </div>
-                    <div class="info-item">
-                      <span class="info-label">Part数量</span>
-                      <span class="info-value">{{ currentTemplateInfo.part_count || 0 }} Part</span>
-                    </div>
-                    <div class="info-item">
-                      <span class="info-label">每Part范围</span>
-                      <span class="info-value">{{ currentTemplateInfo.part_word_min || 0 }}-{{ currentTemplateInfo.part_word_max || 0 }} 字</span>
-                    </div>
-                  </div>
-                </n-card>
-              </div>
-            </div>
+            <TemplateSection
+              :templates="templates"
+              :selected-template="selectedTemplate"
+              :custom-target-words="customTargetWords"
+              :custom-part-count="customPartCount"
+              :current-template-info="currentTemplateInfo"
+              @select="handleTemplateSelect"
+              @saveCustom="saveCustomTemplate"
+            />
           </n-tab-pane>
 
           <!-- LLM配置 -->
@@ -277,6 +209,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import api from '@/api'
 import LayoutSidebar from '@/components/Layout/Sidebar.vue'
+import TemplateSection from '@/components/config/TemplateSection.vue'
 import WindowConfigTab from '@/components/config/WindowConfigTab.vue'
 
 const router = useRouter()

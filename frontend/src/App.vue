@@ -1,5 +1,5 @@
 <template>
-  <n-config-provider :theme-overrides="themeOverrides">
+  <n-config-provider :theme-overrides="mergedThemeOverrides">
     <n-message-provider>
       <div class="app-background">
         <!-- 背景特效层 -->
@@ -39,7 +39,9 @@ import { useTheme } from '@/composables/useTheme'
 
 const { currentTheme } = useTheme()
 
-const themeOverrides = computed(() => ({
+// P3-35: 拆分为 palette / typography / components / per-component 块
+// 每块独立 computed，naive-ui 只在对应 slice 变化时重做 diff。
+const paletteOverrides = computed(() => ({
   common: {
     primaryColor: currentTheme.value.colors.primary,
     primaryColorHover: currentTheme.value.colors.primaryHover,
@@ -73,6 +75,10 @@ const themeOverrides = computed(() => ({
     fontSizeLarge: currentTheme.value.typography.fontSizeLarge,
     lineHeight: currentTheme.value.typography.lineHeight,
   },
+}))
+
+// P3-35: per-component 块单独 computed —— naive-ui 只在对应 slice 变化时重做 diff
+const componentOverrides = computed(() => ({
   Button: {
     borderRadiusMedium: currentTheme.value.components.borderRadius,
     borderRadiusSmall: currentTheme.value.components.borderRadiusSm,
@@ -133,6 +139,12 @@ const themeOverrides = computed(() => ({
     color: currentTheme.value.colors.surface,
     textColor: currentTheme.value.colors.textPrimary,
   },
+}))
+
+// P3-35: shallow merge palette + component —— 各自 computed 独立追踪依赖
+const mergedThemeOverrides = computed(() => ({
+  ...paletteOverrides.value,
+  ...componentOverrides.value,
 }))
 </script>
 

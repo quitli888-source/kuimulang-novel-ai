@@ -72,15 +72,18 @@ class ProgressManager:
             "timestamp": time.time()
         }
 
-        # 推送进度事件
-        self.emitter.emit_sync(EventType.LOG, {
-            "level": "info",
-            "message": message,
-            "agent": agent,
-            "progress": progress,
-            "event_type": event_type,
-            "work_id": session_id,
-        }, work_id=session_id)
+        # P2-25: 不再每次都无条件 emit LOG — 让前端按 event_type 分流渲染。
+        # 只在显式 event_type='milestone' / 'error' / 'checkpoint' 时发 LOG；
+        # 普通进度消息只走 progress 事件（每 10% 或 100%）。
+        if event_type in ('milestone', 'error', 'checkpoint', 'phase_change'):
+            self.emitter.emit_sync(EventType.LOG, {
+                "level": "info",
+                "message": message,
+                "agent": agent,
+                "progress": progress,
+                "event_type": event_type,
+                "work_id": session_id,
+            }, work_id=session_id)
 
         # 每10%推送一次进度事件
         if progress % 10 == 0 or progress == 100:
