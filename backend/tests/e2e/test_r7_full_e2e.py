@@ -100,7 +100,7 @@ def call_judge_llm(system: str, user: str, max_tokens: int=1500) -> str:
             try:
                 return json.loads(text[start:end + 1])
             except json.JSONDecodeError:
-                pass
+                logger.debug('test_r7_full_e2e: silent except (P2-19)', exc_info=True)
         return {'_raw': text, '_parse_failed': True}
 
 def main():

@@ -17,18 +17,18 @@ R7-P0-4: 轻量级向量检索 RAG 双轨（hash-based 假向量 + 可选 embedd
 import hashlib
 import math
 import os
+import functools
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 
-def _hash_embedding(text: str, dim: int = 256) -> List[float]:
-    """基于 SHA-256 的稳定假向量：相同文本 → 相同向量。
-    用于 embedding provider 不可用时的降级路径。
-    """
+@functools.lru_cache(maxsize=2048)
+def _hash_embedding_cached(text: str, dim: int) -> Tuple[float, ...]:
+    """P2-21: 用 lru_cache 缓存 (text, dim) → embedding，避免同一 Part 多次重算。
+    返回 immutable tuple 保证调用方拿到结果后无法意外污染缓存。"""
     if not text:
-        return [0.0] * dim
+        return (0.0,) * dim
     vec = [0.0] * dim
-    # 用滑动窗口让相邻词产生相似向量（粗略近似语义相似度）
     ngrams = set()
     for i in range(0, max(1, len(text) - 1)):
         ngrams.add(text[i:i + 2])
@@ -37,9 +37,13 @@ def _hash_embedding(text: str, dim: int = 256) -> List[float]:
         for i in range(0, min(dim * 4, len(h)), 4):
             slot = int.from_bytes(h[i:i + 4], "big") % dim
             vec[slot] += 1.0
-    # L2 归一化
     norm = math.sqrt(sum(v * v for v in vec)) or 1.0
-    return [v / norm for v in vec]
+    return tuple(v / norm for v in vec)
+
+
+def _hash_embedding(text: str, dim: int = 256) -> List[float]:
+    """P2-21: 公开包装层 —— 内部用 lru_cache 缓存 (text, dim)，对外返回独立 list 防止共享 mutation。"""
+    return list(_hash_embedding_cached(text, dim))
 
 
 def _cosine(a: List[float], b: List[float]) -> float:

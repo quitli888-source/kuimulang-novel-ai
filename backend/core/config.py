@@ -3,6 +3,7 @@
 支持从.env文件读取和写入，支持前端实时同步
 """
 import json
+import os
 import sys
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
@@ -22,7 +23,19 @@ def _resolve_base_dir() -> Path:
     return Path(__file__).resolve().parent.parent.parent
 
 def _resolve_prompt_dir() -> Path:
-    """解析提示词目录（frozen 模式仍指向 _internal/prompts，只读）。"""
+    """解析提示词目录（frozen 模式仍指向 _internal/prompts，只读）。
+
+    P2-31: 允许 PROMPT_DIR 环境变量覆盖 —— 适合 monorepo 部署（backend 单独放在子目录）。
+    启动时校验路径存在；不存在则降级到默认路径并打 warning。
+    """
+    override = os.environ.get('PROMPT_DIR', '').strip()
+    if override:
+        p = Path(override)
+        if p.exists():
+            return p
+        # 不存在也不致命，只是 warning
+        import warnings
+        warnings.warn(f'PROMPT_DIR env {override} 不存在，回退默认路径')
     if getattr(sys, 'frozen', False):
         return Path(sys.executable).parent / '_internal' / 'prompts'
     return Path(__file__).resolve().parent.parent.parent / 'prompts'
@@ -273,7 +286,7 @@ def _dataclass_defaults() -> dict:
                 defaults[f_name] = f_obj.default
                 continue
         except Exception:
-            pass
+            logger.debug('app: silent except (P2-19)', exc_info=True)
         if f_obj.default_factory is not MISSING and f_obj.default_factory is not None:
             try:
                 defaults[f_name] = f_obj.default_factory()
@@ -326,7 +339,7 @@ def migrate_llm_config() -> bool:
             try:
                 _LLM_CONFIG_MIGRATION_FLAG.touch()
             except Exception:
-                pass
+                logger.debug('app: silent except (P2-19)', exc_info=True)
         except Exception as e:
             _logger.info(f'[Config] migrate_llm_config: 写盘失败（不影响主流程）: {e}')
             return False

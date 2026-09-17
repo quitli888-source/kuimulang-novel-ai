@@ -246,7 +246,7 @@ def load_window_config() -> dict:
             with open(_WCF, 'r', encoding='utf-8') as f:
                 return json.load(f)
     except Exception:
-        pass
+        logger.debug('config_api: silent except (P2-19)', exc_info=True)
     return {}
 
 def save_window_config(cfg: dict) -> None:

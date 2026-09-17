@@ -143,7 +143,7 @@ class Phase3Runner:
                     from api.sse import EventType as _Evt
                     _pm.emitter.emit_sync(_Evt.LOG, {'level': 'info', 'message': f'💾 Part {part_num} chunk {chunk_idx} checkpoint 已保存 ({len(accumulated_text)}字)', 'event_type': 'checkpoint_saved', 'part': part_num, 'chunk': chunk_idx, 'words': len(accumulated_text), 'work_id': s.work_id}, work_id=s.work_id)
                 except Exception:
-                    pass
+                    logger.debug('writing_phase_runners: silent except (P2-19)', exc_info=True)
             except Exception as cp_err:
                 logger.info(f'[Phase3Runner] chunk checkpoint 失败（不影响主流程）: {cp_err}')
 
@@ -207,13 +207,13 @@ class Phase3Runner:
                                 for name, st in (temp_state.window.character_state or {}).items():
                                     char_state_lines.append(f'- {name}: {st}')
                             except Exception:
-                                pass
+                                logger.debug('writing_phase_runners: silent except (P2-19)', exc_info=True)
                             foreshadow_lines = []
                             try:
                                 for f_item in temp_state.window.foreshadowing or []:
                                     foreshadow_lines.append(f"- {f_item.get('id', '')}: {f_item.get('content', '')}")
                             except Exception:
-                                pass
+                                logger.debug('writing_phase_runners: silent except (P2-19)', exc_info=True)
                             milestone_input = (recent_text or '(无最近摘要)') + ('\n【世界观】' + (temp_state.world_setting or '') if getattr(temp_state, 'world_setting', '') else '') + ('\n【角色状态】\n' + '\n'.join(char_state_lines) if char_state_lines else '') + ('\n【伏笔】\n' + '\n'.join(foreshadow_lines) if foreshadow_lines else '')
                             milestone = call_llm(system_prompt='你是长篇小说剧情压缩助手。将下面 20 个 Part 的剧情概要压缩为 2000 字以内的全局脉络段，涵盖主线、支线、关键转折、角色弧光，输出纯叙事文本，不要分点。', user_prompt=milestone_input, temperature=0.3, max_tokens=2500, agent='milestone_summary')
                             milestone_text = (milestone or '')[:2000]

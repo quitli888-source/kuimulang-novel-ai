@@ -116,7 +116,7 @@ def test_run_with_resume_does_not_invoke_phase1_agents(tmp_path):
             try:
                 svc.cfg.confirm_mode = False
             except Exception:
-                pass
+                logger.debug('test_resume: silent except (P2-19)', exc_info=True)
             try:
                 await svc._phase3_writing(start_from=41)
             except Exception as run_err:

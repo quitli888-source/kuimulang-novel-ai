@@ -406,10 +406,10 @@ class WritingService:
             try:
                 get_tracker(work_id=self.work_id).force_flush()
             except Exception:
-                pass
+                logger.debug('writing_service: silent except (P2-19)', exc_info=True)
             self.data['cost_summary'] = get_tracker(work_id=self.work_id).get_summary()
         except Exception:
-            pass
+            logger.debug('writing_service: silent except (P2-19)', exc_info=True)
         try:
             self.work_path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding='utf-8')
         except Exception as e:
@@ -426,10 +426,10 @@ class WritingService:
             try:
                 get_tracker().force_flush()
             except Exception:
-                pass
+                logger.debug('writing_service: silent except (P2-19)', exc_info=True)
             self.data['cost_summary'] = get_tracker().get_summary()
         except Exception:
-            pass
+            logger.debug('writing_service: silent except (P2-19)', exc_info=True)
         path = self.work_path
         data_snapshot = json.dumps(self.data, ensure_ascii=False, indent=2)
         try:

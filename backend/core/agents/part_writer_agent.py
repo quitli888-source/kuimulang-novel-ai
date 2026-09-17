@@ -226,7 +226,7 @@ class PartWriterAgent(BaseAgent):
             try:
                 new_ef.from_dict(ef if isinstance(ef, dict) else {})
             except Exception:
-                pass
+                logger.debug('part_writer_agent: silent except (P2-19)', exc_info=True)
             state.established_facts = new_ef
             ef = new_ef
         already_extracted = any((getattr(f, 'part_num', None) == part_num for f in ef.facts))
@@ -250,12 +250,12 @@ class PartWriterAgent(BaseAgent):
                 rule_facts = derive_facts_layered(state, part_num, part_text)
                 added = ef.add_many(rule_facts)
             except Exception as _:
-                pass
+                logger.debug('part_writer_agent: silent except (P2-19)', exc_info=True)
         if added:
             try:
                 self.update_progress(90, f'📑 Part {part_num} 已抽取 {added} 条事实写入 established_facts')
             except Exception:
-                pass
+                logger.debug('part_writer_agent: silent except (P2-19)', exc_info=True)
         return added
 
     def _get_foreshadow_for_part(self, state, part_num: int) -> str:

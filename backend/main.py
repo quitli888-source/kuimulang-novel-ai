@@ -15,7 +15,7 @@ if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, OSError):
-        pass
+        pass  # P2-19: silent fallback (no logger in module)
 
 from pathlib import Path
 from typing import Dict

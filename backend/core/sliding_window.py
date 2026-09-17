@@ -35,10 +35,10 @@ def _load_user_window_config() -> dict:
                         try:
                             out[k] = int(data[k])
                         except (TypeError, ValueError):
-                            pass
+                            logger.debug('sliding_window: silent except (P2-19)', exc_info=True)
                 return out
     except Exception:
-        pass
+        logger.debug('sliding_window: silent except (P2-19)', exc_info=True)
     return {}
 _PROJECT_ROOT = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 WINDOW_CONFIG_FILE = _os.path.join(_PROJECT_ROOT, 'data', 'window_config.json')
@@ -241,7 +241,7 @@ class SlidingWindow:
                 if legacy:
                     sections.append(legacy)
             except Exception:
-                pass
+                logger.debug('sliding_window: silent except (P2-19)', exc_info=True)
         if vector_store is not None and vector_query:
             try:
                 hits = vector_store.query(vector_query, top_k=vector_top_k, exclude_part_num=part_num)

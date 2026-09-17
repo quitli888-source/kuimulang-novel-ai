@@ -86,12 +86,12 @@ def _repair_json(raw: str) -> dict:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        pass
+        logger.debug('llm_client: silent except (P2-19)', exc_info=True)
     cleaned = _extract_json(raw)
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
-        pass
+        logger.debug('llm_client: silent except (P2-19)', exc_info=True)
     try:
         fixed = cleaned.replace("'", '"')
         fixed = re.sub('\\bTrue\\b', 'true', fixed)
@@ -99,7 +99,7 @@ def _repair_json(raw: str) -> dict:
         fixed = re.sub('\\bNone\\b', 'null', fixed)
         return json.loads(fixed)
     except json.JSONDecodeError:
-        pass
+        logger.debug('llm_client: silent except (P2-19)', exc_info=True)
     try:
         brace_depth = 0
         last_valid_end = -1
@@ -114,7 +114,7 @@ def _repair_json(raw: str) -> dict:
         if last_valid_end != -1:
             return json.loads(cleaned[:last_valid_end + 1])
     except json.JSONDecodeError:
-        pass
+        logger.debug('llm_client: silent except (P2-19)', exc_info=True)
     raise ValueError(f'JSON修复失败，原始内容（前500字符）: {raw[:500]}')
 _client = None
 _json_client = None
@@ -268,7 +268,7 @@ def call_llm_json(system_prompt: str, user_prompt: str, temperature: float=0.3, 
                 if usage:
                     tracker.record(model=model, agent=agent, is_json=True, prompt_tokens=usage.prompt_tokens or 0, completion_tokens=usage.completion_tokens or 0, total_tokens=usage.total_tokens or 0, duration_ms=call_duration)
             except Exception:
-                pass
+                logger.debug('llm_client: silent except (P2-19)', exc_info=True)
             result = _repair_json(raw)
             return result
         except ValueError as e:

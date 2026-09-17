@@ -201,9 +201,9 @@ async def sse_stream(request: Request, work_id: str=''):
                     yield f'data: {heartbeat}\n\n'
                     last_heartbeat = time.time()
         except GeneratorExit:
-            pass
+            logger.debug('sse: silent except (P2-19)', exc_info=True)
         except Exception:
-            pass
+            logger.debug('sse: silent except (P2-19)', exc_info=True)
         finally:
             _emitter.unsubscribe(queue, work_id)
     return StreamingResponse(event_generator(), media_type='text/event-stream', headers={'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no'})
