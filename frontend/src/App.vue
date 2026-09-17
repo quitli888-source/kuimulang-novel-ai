@@ -2,18 +2,21 @@
   <n-config-provider :theme-overrides="mergedThemeOverrides">
     <n-message-provider>
       <div class="app-background">
-        <!-- 背景特效层 -->
+        <!-- 背景特效层 (P2-24: 10 个粒子 div 改 v-for + CSS 变量) -->
         <div class="particle-bg">
-          <div class="particle"></div>
-          <div class="particle"></div>
-          <div class="particle"></div>
-          <div class="particle"></div>
-          <div class="particle"></div>
-          <div class="particle"></div>
-          <div class="particle"></div>
-          <div class="particle"></div>
-          <div class="particle"></div>
-          <div class="particle"></div>
+          <div
+            v-for="p in PARTICLES"
+            :key="p.i"
+            class="particle"
+            :style="{
+              '--p-x': p.x + '%',
+              '--p-y': p.y + '%',
+              '--p-delay': p.delay + 's',
+              '--p-duration': p.duration + 's',
+              '--p-size': p.size + 'px',
+              '--p-color': p.color,
+            }"
+          />
         </div>
         <div class="grid-bg"></div>
         <div class="glow-orb glow-orb-1"></div>
@@ -146,6 +149,17 @@ const mergedThemeOverrides = computed(() => ({
   ...paletteOverrides.value,
   ...componentOverrides.value,
 }))
+
+// P2-24: 10 个粒子由数据驱动（位置 / 时延 / 颜色 / 大小 全部参数化）
+const PARTICLES = Array.from({ length: 10 }, (_, i) => ({
+  i,
+  x: (i * 11 + 7) % 100,
+  y: (i * 17 + 13) % 100,
+  delay: i * 0.7,
+  duration: 8 + (i % 4) * 2,
+  size: 2 + (i % 3),
+  color: i % 2 === 0 ? 'rgba(99,102,241,0.6)' : 'rgba(168,85,247,0.5)',
+}))
 </script>
 
 <style>
@@ -193,24 +207,18 @@ const mergedThemeOverrides = computed(() => ({
 
 .particle {
   position: absolute;
-  width: 6px;
-  height: 6px;
-  background: var(--color-primary);
+  width: var(--p-size, 6px);
+  height: var(--p-size, 6px);
+  left: var(--p-x, 50%);
+  top: var(--p-y, 50%);
+  background: var(--p-color, var(--color-primary));
   border-radius: 50%;
   opacity: 0.15;
-  animation: float 15s infinite ease-in-out;
+  animation: float var(--p-duration, 15s) infinite ease-in-out;
+  animation-delay: var(--p-delay, 0s);
 }
 
-.particle:nth-child(1) { left: 10%; top: 20%; animation-delay: 0s; animation-duration: 18s; }
-.particle:nth-child(2) { left: 20%; top: 80%; animation-delay: 2s; animation-duration: 20s; }
-.particle:nth-child(3) { left: 30%; top: 40%; animation-delay: 4s; animation-duration: 16s; }
-.particle:nth-child(4) { left: 40%; top: 60%; animation-delay: 1s; animation-duration: 22s; }
-.particle:nth-child(5) { left: 50%; top: 30%; animation-delay: 3s; animation-duration: 19s; }
-.particle:nth-child(6) { left: 60%; top: 70%; animation-delay: 5s; animation-duration: 17s; }
-.particle:nth-child(7) { left: 70%; top: 10%; animation-delay: 2.5s; animation-duration: 21s; }
-.particle:nth-child(8) { left: 80%; top: 50%; animation-delay: 0.5s; animation-duration: 18s; }
-.particle:nth-child(9) { left: 90%; top: 85%; animation-delay: 3.5s; animation-duration: 20s; }
-.particle:nth-child(10) { left: 15%; top: 55%; animation-delay: 1.5s; animation-duration: 23s; }
+/* P2-24: 10 个粒子全部由 .style CSS 变量驱动；删除硬写的 :nth-child 规则 */
 
 @keyframes float {
   0%, 100% { transform: translateY(0) translateX(0) scale(1); opacity: 0.15; }

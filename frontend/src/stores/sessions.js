@@ -5,12 +5,38 @@ import api from '@/api'
 // R4-P1-3: 会话管理 store（2026-09-14）
 //   暴露 sessions 列表 + loadSessions/createSession/deleteSession/switchSession。
 //   后端 6 个端点已在 backend/api/works.py:157-209 就位。
+// P2-33: 增加 localStorage 持久化，与 works.js / writing.js 一致。
 // =====================================================================
+
+const STORAGE_KEY = 'kuimulang-sessions-store'
+
+// 从 localStorage 加载持久化状态（P2-33）
+function loadFromStorage() {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY)
+    if (saved) {
+      const parsed = JSON.parse(saved)
+      return { sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [] }
+    }
+  } catch (e) {
+    console.warn('[SessionsStore] Failed to load from storage:', e)
+  }
+  return { sessions: [] }
+}
+
+// 保存到 localStorage（P2-33）
+function saveToStorage(state) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ sessions: state.sessions }))
+  } catch (e) {
+    console.warn('[SessionsStore] Failed to save to storage:', e)
+  }
+}
 
 export const useSessionsStore = defineStore('sessions', {
   state: () => ({
     // 全局会话列表（跨作品）
-    sessions: [],
+    sessions: loadFromStorage().sessions,
     loading: false,
     error: null,
   }),
@@ -32,6 +58,7 @@ export const useSessionsStore = defineStore('sessions', {
       try {
         const res = await api.get('/works/sessions/list')
         this.sessions = res.data.sessions || []
+        saveToStorage(this.$state)  // P2-33: 持久化
       } catch (e) {
         this.error = e.message || '加载会话失败'
         this.sessions = []
@@ -75,6 +102,7 @@ export const useSessionsStore = defineStore('sessions', {
       try {
         await api.delete(`/works/sessions/${sessionId}`)
         this.sessions = this.sessions.filter(s => s.session_id !== sessionId)
+        saveToStorage(this.$state)  // P2-33: 持久化
         return true
       } catch (e) {
         this.error = e.message || '删除会话失败'
