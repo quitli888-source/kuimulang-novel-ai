@@ -5,6 +5,7 @@ V6改动：安全性加固（受限CORS、全局异常处理、请求限流）
 import sys
 import os
 import time
+import logging
 
 # P2-29: 必须在任何 import 之前设置 Windows 终端编码（解决中文乱码）
 # console.py 里的 os.environ["PYTHONIOENCODING"] 设置时机过晚（晚于其它模块 import），
@@ -39,6 +40,12 @@ else:
     BASE_DIR = Path(__file__).parent.parent
     FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
     BACKEND_DIR = BASE_DIR
+
+
+# P3-74: 在 FastAPI app 构造之前 setup_logging —— 把根 logger 配文件 + 控制台 handler，
+# 此前 setup_logging 只在 logger.py 模块加载时被动调用一次，且未绑给 root logger。
+from core.logger import setup_logging as _setup_logging  # noqa: E402
+_setup_logging('kuaimulang', logging.INFO)
 
 
 @asynccontextmanager

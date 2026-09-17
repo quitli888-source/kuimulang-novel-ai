@@ -30,6 +30,9 @@ PROGRESS_START = 55
 PART_CHUNK_SYSTEM_PROMPT = load_prompt('part_chunk',
     '你是番茄小说平台顶级短篇作家，正在为一部连载小说续写某个 Part 的片段。\n\n## 核心约束（片段级）\n\n1. **只写这一片段，不要总结、不要预告、不要回顾**\n2. **如果提供了【已写片段末尾】，必须从该结尾自然续接**\n3. **结尾必须是完整段落**——不允许在对话中间或动作进行时戛然而止\n\n## 输出格式\n\n只输出本片段的正文。\n不要重复【已写片段末尾】中的最后一句话。\n')
 _FACTS_EXTRACTOR_SYSTEM_PROMPT = load_prompt('established_facts', '你是"小说事实抽取员"。从以下小说片段中提取"已确立的关键事实"。\n\n每条事实用一行："[category] text"\ncategory 限：character / location / object / event / trait / relationship / world_rule / foreshadow / knowledge\n最多提取 15 条最关键的事实。\n输出 JSON: {"facts": [{"category": "...", "text": "...", "quote": "...", "subject": "...", "predicate": "..."}]}\n')
+# P3-70: load_prompt 优先读 prompts/established_facts.txt（已存在且内容更详细），
+# fallback 是上面内嵌的精简版；正常启动走外置文件路径。修改 prompt 直接改 prompts/established_facts.txt，
+# 无需触碰本行代码。
 
 class PartWriterAgent(BaseAgent):
     name = 'Part写作Agent'
