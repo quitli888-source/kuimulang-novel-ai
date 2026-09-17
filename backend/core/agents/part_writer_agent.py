@@ -145,7 +145,7 @@ class PartWriterAgent(BaseAgent):
             for retry_attempt in range(3):
                 cur_max = chunk_max_tokens * (1 + retry_attempt)
                 try:
-                    chunk_text = call_llm(system_prompt=PART_CHUNK_SYSTEM_PROMPT, user_prompt=chunk_user_prompt, temperature=0.85, max_tokens=cur_max, agent=self.name)
+                    chunk_text = call_llm(system_prompt=PART_CHUNK_SYSTEM_PROMPT, user_prompt=chunk_user_prompt, temperature=0.8, max_tokens=cur_max, agent=self.name)
                 except Exception as e:
                     logger.info(f'[PartWriterAgent] Part {part_num} 片段 {chunk_idx} 第 {retry_attempt + 1} 次调用异常: {e}')
                     chunk_text = ''

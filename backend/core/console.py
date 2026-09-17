@@ -3,19 +3,13 @@
 
 统一创建Rich Console实例，解决Windows编码问题。
 所有模块通过 from console import get_console 获取Console。
+
+P2-29: PYTHONIOENCODING / stdout reconfigure 已迁移到 backend/main.py
+最开头（在所有业务模块 import 之前）。此文件保留 stdout reconfigure 作为
+兜底，仅当 main.py 未先被加载时生效；正常启动顺序下不会重复执行。
 """
 import sys
-import os
 import io
-
-# 修复Windows终端编码
-if sys.platform == "win32":
-    os.environ["PYTHONIOENCODING"] = "utf-8"
-    try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except AttributeError:
-        pass
 
 from rich.console import Console
 

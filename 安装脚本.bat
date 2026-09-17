@@ -3,6 +3,15 @@ chcp 65001 > nul
 cd /d "%~dp0"
 title 番茄小说AI创作系统 V5 - 安装程序
 
+rem =============================================
+rem R26-P3-39: 本脚本是 Windows 专用便捷安装器。
+rem 跨平台启动入口是 launcher.py：
+rem   Windows: 双击本脚本，或在命令行运行 "python launcher.py"
+rem   macOS / Linux: python3 launcher.py
+rem 跨平台启动器内部会自动检测 Python/Node、装配路径、
+rem 拉起后端 uvicorn 与前端 vite dev server。
+rem =============================================
+
 echo.
 echo  ========================================
 echo    番茄小说AI创作系统 V5  安装程序

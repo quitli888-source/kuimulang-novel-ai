@@ -1,7 +1,13 @@
 """
-番茄小说AI创作系统 V5 - 启动器
+番茄小说AI创作系统 V5 - 启动器（跨平台：Windows / macOS / Linux）
 自动检测环境、安装依赖、启动后端和前端
 启动后自动打开浏览器
+
+R26-P3-39:
+- Windows:  双击 安装脚本.bat（首次）或 启动图形界面.bat / python launcher.py
+- macOS:    python3 launcher.py
+- Linux:    python3 launcher.py
+- 安装脚本.bat 是 Windows 专用便捷封装，本文件是真正的跨平台入口。
 """
 import sys
 import os

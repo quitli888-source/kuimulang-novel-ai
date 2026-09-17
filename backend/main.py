@@ -3,7 +3,20 @@
 V6改动：安全性加固（受限CORS、全局异常处理、请求限流）
 """
 import sys
+import os
 import time
+
+# P2-29: 必须在任何 import 之前设置 Windows 终端编码（解决中文乱码）
+# console.py 里的 os.environ["PYTHONIOENCODING"] 设置时机过晚（晚于其它模块 import），
+# 必须在 main.py 最开头、任何业务模块 import 之前做完。
+if sys.platform == "win32":
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
 from pathlib import Path
 from typing import Dict
 from fastapi import FastAPI, Request, HTTPException
@@ -99,7 +112,6 @@ ALLOWED_ORIGINS = [
 ]
 
 # 如果需要允许所有域名（不推荐用于生产），可以从环境变量读取
-import os
 if os.getenv("ALLOW_ALL_ORIGINS", "false").lower() == "true":
     ALLOWED_ORIGINS = ["*"]
 
