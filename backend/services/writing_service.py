@@ -432,6 +432,36 @@ class WritingService:
         except Exception as e:
             logger.info(f'[WritingService] _save 失败: {e}')
 
+    def _save_chunk_progress(self, part_num: int, text: str, summary: str = None) -> None:
+        """P1-46: 高频 checkpoint 路径 —— 只写 data['parts'][N] + data['part_summaries'][N]
+        与 cost_summary，不重写整份 data（避免 50 万字 + 600 calls 全量重写）。
+
+        实现策略：把 data 序列化到临时文件 → os.replace 原子覆盖 → 失败时回退 _save()。
+        """
+        self.data['parts'][str(part_num)] = text
+        if summary is not None:
+            self.data['part_summaries'][str(part_num)] = summary
+        # cost_summary 增量更新
+        try:
+            from core.cost_tracker import get_tracker
+            self.data['cost_summary'] = get_tracker(work_id=self.work_id).get_summary()
+        except Exception:
+            logger.debug('writing_service: silent except (P2-19)', exc_info=True)
+        # 写到临时文件后原子重命名（避免半写状态）
+        tmp_path = self.work_path.with_suffix('.json.tmp')
+        try:
+            tmp_path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding='utf-8')
+            import os as _os
+            _os.replace(tmp_path, self.work_path)
+        except Exception as e:
+            logger.info(f'[WritingService] _save_chunk_progress 失败，回退 _save: {e}')
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                logger.debug('writing_service: silent except (P2-19)', exc_info=True)
+            self._save()
+
     async def _save_async(self):
         """R17-P0-3: 异步版 _save —— 高频 checkpoint 路径使用，不阻塞 asyncio event loop。
 

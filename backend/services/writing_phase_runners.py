@@ -135,10 +135,9 @@ class Phase3Runner:
 
         def _on_chunk_complete(part_num: int, chunk_idx: int, accumulated_text: str) -> None:
             try:
-                s.data['parts'][str(part_num)] = accumulated_text
+                # P1-46: 走增量写盘 + 临时文件原子替换（避免 50 万字全量重写）
                 summary = truncate(accumulated_text, n=200, suffix="...")
-                s.data['part_summaries'][str(part_num)] = summary
-                s._save()
+                s._save_chunk_progress(part_num, accumulated_text, summary)
                 try:
                     from core.progress_manager import progress_manager as _pm
                     from api.sse import EventType as _Evt

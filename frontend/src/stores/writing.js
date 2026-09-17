@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import api from '@/api'
+import { safeStorage, debouncedPersist, flushPersist } from '@/utils/safeStorage'
 
 // =====================================================================
 // R4-P0-1 SSE 二合一（2026-09-14）：
@@ -26,34 +27,37 @@ export const WRITING_PHASES = [
 
 const STORAGE_KEY = 'kuimulang-writing-store'
 
-// 从localStorage加载持久化状态
+// P1-54 + P2-62: 用 safeStorage 替代直接 localStorage；持久化走 1s 节流
+
 function loadFromStorage() {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY)
-    if (saved) {
-      return JSON.parse(saved)
-    }
-  } catch (e) {
-    console.warn('[WritingStore] Failed to load from storage:', e)
-  }
-  return null
+  return safeStorage.get(STORAGE_KEY, null)
 }
 
-// 保存到localStorage
+const persist = debouncedPersist(STORAGE_KEY, 1000)
+
+// P1-54: 取代旧的 saveToStorage —— 只持久化关键状态字段，写盘走节流
 function saveToStorage(state) {
-  try {
-    // 只持久化关键状态
-    const toSave = {
-      currentWorkId: state.currentWorkId,
-      currentPhase: state.currentPhase,
-      currentPart: state.currentPart,
-      completedParts: state.completedParts,
-      logs: state.logs.slice(-100), // 只保留最近100条日志
-    }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave))
-  } catch (e) {
-    console.warn('[WritingStore] Failed to save to storage:', e)
+  const toSave = {
+    currentWorkId: state.currentWorkId,
+    currentPhase: state.currentPhase,
+    currentPart: state.currentPart,
+    completedParts: state.completedParts,
+    logs: (state.logs || []).slice(-100),  // 只保留最近 100 条
   }
+  persist(toSave)
+}
+
+// 立即同步落盘（路由切换 / 页面 unload 时调用）
+function saveToStorageNow(state) {
+  const toSave = {
+    currentWorkId: state.currentWorkId,
+    currentPhase: state.currentPhase,
+    currentPart: state.currentPart,
+    completedParts: state.completedParts,
+    logs: (state.logs || []).slice(-100),
+  }
+  flushPersist(STORAGE_KEY)
+  safeStorage.set(STORAGE_KEY, toSave)
 }
 
 export const useWritingStore = defineStore('writing', {
@@ -127,9 +131,13 @@ export const useWritingStore = defineStore('writing', {
   },
 
   actions: {
-    // 持久化状态
+    // P1-54: 节流持久化（1s 内多次调用合并为 1 次 localStorage 写）
     persistState() {
       saveToStorage(this.$state)
+    },
+    // 立即同步落盘（路由切换 / 页面 unload 时调用，绕过节流）
+    persistStateNow() {
+      saveToStorageNow(this.$state)
     },
 
     // 设置当前作品

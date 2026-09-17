@@ -1,40 +1,22 @@
 import { defineStore } from 'pinia'
 import api from '@/api'
+import { safeStorage, debouncedPersist, flushPersist } from '@/utils/safeStorage'
 
 const STORAGE_KEY = 'kuimulang-works-store'
 
-// 从localStorage加载持久化状态
+// P1-50 + P2-62: 用 safeStorage 替代直接 localStorage 调用 + 节流持久化
 function loadFromStorage() {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY)
-    if (saved) {
-      const parsed = JSON.parse(saved)
-      return {
-        works: parsed.works || [],
-        currentWork: parsed.currentWork || null,
-      }
+  const saved = safeStorage.get(STORAGE_KEY, null)
+  if (saved && typeof saved === 'object') {
+    return {
+      works: Array.isArray(saved.works) ? saved.works : [],
+      currentWork: saved.currentWork || null,
     }
-  } catch (e) {
-    console.warn('[WorksStore] Failed to load from storage:', e)
   }
-  return {
-    works: [],
-    currentWork: null,
-  }
+  return { works: [], currentWork: null }
 }
 
-// 保存到localStorage
-function saveToStorage(state) {
-  try {
-    const toSave = {
-      works: state.works,
-      currentWork: state.currentWork,
-    }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave))
-  } catch (e) {
-    console.warn('[WorksStore] Failed to save to storage:', e)
-  }
-}
+const persist = debouncedPersist(STORAGE_KEY, 1000)
 
 export const useWorksStore = defineStore('works', {
   state: () => {
@@ -47,22 +29,20 @@ export const useWorksStore = defineStore('works', {
   },
 
   getters: {
-    // 获取作品总数
     totalWorks: (state) => state.works.length,
-
-    // 获取进行中的作品
     activeWorks: (state) => state.works.filter(w => w.status === 'active'),
-
-    // 根据ID获取作品
-    getWorkById: (state) => (id) => {
-      return state.works.find(w => w.id === id)
-    },
+    getWorkById: (state) => (id) => state.works.find(w => w.id === id),
   },
 
   actions: {
-    // 保存状态到localStorage
+    // P1-50: persistState() 走 1s 节流；多次连续调用合并为 1 次 localStorage 写
     persistState() {
-      saveToStorage(this.$state)
+      persist({ works: this.works, currentWork: this.currentWork })
+    },
+    // P2 兼容：路由切换前立即同步写
+    persistStateNow() {
+      flushPersist(STORAGE_KEY)
+      safeStorage.set(STORAGE_KEY, { works: this.works, currentWork: this.currentWork })
     },
 
     async fetchWorks() {
@@ -97,7 +77,6 @@ export const useWorksStore = defineStore('works', {
       await this.fetchWorks()
     },
 
-    // 清空所有作品数据
     clearAll() {
       this.works = []
       this.currentWork = null
