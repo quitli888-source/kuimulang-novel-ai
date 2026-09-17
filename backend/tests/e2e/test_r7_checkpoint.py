@@ -10,7 +10,8 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, '..', '..', '..'))
 sys.path.insert(0, os.path.join(ROOT, 'backend'))
-os.environ.setdefault('STEP_API_KEY', '2AUHLIl7GnTbiSC0G9EwAX5OJQuKcA2XDk8vbvArNISugDJUnXw0fyDnJACyFR6e7')
+# P0-41: STEP_API_KEY 由 conftest.py fixture 提供；缺失则 pytest.skip
+STEP_API_KEY = os.environ.get('STEP_API_KEY', '')
 os.environ['ENABLE_VECTOR_RAG'] = '0'
 import core.llm_client as llm_client_mod
 _original_call_llm = llm_client_mod.call_llm
