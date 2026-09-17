@@ -185,7 +185,7 @@ def call_llm(system_prompt: str, user_prompt: str, temperature: float=0.7, max_t
             content = _strip_think_tags(content)
             call_duration = (time.time() - call_start) * 1000
             logger.info(f'    [LLM] API调用成功，耗时: {call_duration:.2f}ms')
-            content_preview = content[:100] + '...' if len(content) > 100 else content
+            content_preview = truncate(content, n=100, suffix="...")
             logger.info(f'    [LLM] 返回内容长度: {len(content)} 字符, 预览: {content_preview}')
             try:
                 from core.cost_tracker import get_tracker, estimate_tokens_from_text

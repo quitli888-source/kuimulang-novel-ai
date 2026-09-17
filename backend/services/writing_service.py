@@ -380,7 +380,7 @@ class WritingService:
             else:
                 part_text = part_result if isinstance(part_result, str) else ''
             self.data['parts'][str(part_num)] = part_text
-            summary = part_text[:200] + '...' if len(part_text) > 200 else part_text
+            summary = truncate(part_text, n=200, suffix="...")
             self.data['part_summaries'][str(part_num)] = summary
             self._save()
             try:

@@ -58,6 +58,8 @@ api.interceptors.request.use(
     const abortController = new AbortController()
     config.abortController = abortController
     config.signal = abortController.signal
+    // P1-14: 注册到全局 pending 映射，cancelRequest 真正能 abort
+    _pendingControllers.set(config.requestId, abortController)
 
     // 添加时间戳防止缓存（GET请求）
     if (config.method === 'get') {
@@ -93,6 +95,7 @@ async function executeRequestWithRetry(requestConfig) {
   try {
     const response = await api.request(config)
     resolve(response)
+    return  // P1-14: resolve 后必须 return，避免下方 catch 仍执行
   } catch (error) {
     // 检查是否应该重试
     if (shouldRetry(error) && config.retryCount < maxRetries) {
@@ -128,9 +131,14 @@ api.interceptors.response.use(
       data: response.data,
     })
 
+    _pendingControllers.delete(response.config.requestId)
     return response
   },
   (error) => {
+    // P1-14: 请求结束（成功或失败）清理 pending 映射
+    if (error.config?.requestId) {
+      _pendingControllers.delete(error.config.requestId)
+    }
     // 如果是取消的请求，不显示错误
     if (axios.isCancel(error)) {
       console.log(`[API Cancelled] ${error.config?.url}`)
@@ -188,15 +196,30 @@ api.interceptors.response.use(
   }
 )
 
+// P1-14: 维护 pending requestId → AbortController 映射，真正可取消
+const _pendingControllers = new Map()
+
 // 取消请求的方法
 export function cancelRequest(requestId) {
-  // 可以在需要时维护一个pending请求的map来取消特定请求
-  console.log(`[API Cancel] Request: ${requestId}`)
+  const ctrl = _pendingControllers.get(requestId)
+  if (ctrl) {
+    ctrl.abort()
+    _pendingControllers.delete(requestId)
+    console.log(`[API Cancel] Request aborted: ${requestId}`)
+  } else {
+    console.log(`[API Cancel] No pending request for id: ${requestId}`)
+  }
 }
 
 // 取消所有请求
 export function cancelAllRequests() {
-  console.log('[API Cancel] All pending requests')
+  let cancelled = 0
+  for (const [id, ctrl] of _pendingControllers.entries()) {
+    ctrl.abort()
+    _pendingControllers.delete(id)
+    cancelled++
+  }
+  console.log(`[API Cancel] Aborted ${cancelled} pending requests`)
 }
 
 export default api

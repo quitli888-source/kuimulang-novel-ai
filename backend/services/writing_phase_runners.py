@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from api.sse import EventType
 from core.memory_manager import get_all_memory
+from core.text_utils import truncate
 from core.logger import get_logger
 
 if TYPE_CHECKING:
@@ -135,7 +136,7 @@ class Phase3Runner:
         def _on_chunk_complete(part_num: int, chunk_idx: int, accumulated_text: str) -> None:
             try:
                 s.data['parts'][str(part_num)] = accumulated_text
-                summary = accumulated_text[:200] + '...' if len(accumulated_text) > 200 else accumulated_text
+                summary = truncate(accumulated_text, n=200, suffix="...")
                 s.data['part_summaries'][str(part_num)] = summary
                 s._save()
                 try:
@@ -170,7 +171,7 @@ class Phase3Runner:
                     if not part_text:
                         raise RuntimeError(f'Part {i} 返回为空内容')
                     s.data['parts'][str(i)] = part_text
-                    summary = part_text[:200] + '...' if len(part_text) > 200 else part_text
+                    summary = truncate(part_text, n=200, suffix="...")
                     s.data['part_summaries'][str(i)] = summary
                     try:
                         temp_state.window.add_part(i, part_text, summary)
