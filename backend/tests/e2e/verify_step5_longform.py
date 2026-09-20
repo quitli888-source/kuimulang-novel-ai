@@ -185,6 +185,23 @@ def evaluate_g4(report: dict, parts_expected: int) -> tuple:
     return g4, detail
 
 
+def summarize_consistency_flags(data: dict) -> str:
+    """R4-6: consistency_flags 汇总行（纯函数，可单测；只读观测，不加门禁）。
+
+    flags 由 Phase 3 确定性预检写入 work JSON（退场角色再现 + 伏笔未回收），
+    与 R1-E"只告警不阻断"一致，终判交 Phase 4。
+    """
+    flags = [f for f in (data.get('consistency_flags') or []) if isinstance(f, dict)]
+    if not flags:
+        return '[观测] consistency_flags: 0 条'
+    kind_count: dict = {}
+    for f in flags:
+        k = f.get('type') or ('departed_reappearance' if f.get('character') else 'unknown')
+        kind_count[k] = kind_count.get(k, 0) + 1
+    return (f'[观测] consistency_flags: 共 {len(flags)} 条 {kind_count}'
+            f'（确定性预检告警，只记录不加门禁）')
+
+
 class FakeEmitter:
     async def emit(self, event_type, data, work_id=None):
         pass
@@ -354,6 +371,10 @@ async def main():
               f"首检_p0={g4_detail['first_pass_total_p0']}（预算 {budget_txt}）| "
               f"修复统计: attempted={rs['attempted']} passed={rs['passed']} "
               f"degraded={rs['degraded']} spotfixed={rs['spotfixed']}", flush=True)
+
+    # R4-6: consistency_flags 汇总（只读观测，不加门禁 —— 与 R1-E"只告警不阻断"
+    # 一致，终判交 Phase 4； flags 由 Phase 3 确定性预检写入 work JSON）
+    print(summarize_consistency_flags(data), flush=True)
 
     # 成本
     try:

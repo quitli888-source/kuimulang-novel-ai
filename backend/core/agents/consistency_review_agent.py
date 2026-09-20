@@ -132,6 +132,28 @@ class ConsistencyReviewAgent(BaseAgent):
             prev_text = final_draft[part_num - 1]
             prev_tail = prev_text[-800:]
 
+        # R4-6: 系统预检警告段（consistency_flags：退场再现 + 伏笔未回收，有则展示，
+        # ≤10 行）—— 只加展示段，不动 schema、不动评分逻辑、不动其他分支
+        flags_block = ''
+        flags = getattr(state, 'consistency_flags', None) or []
+        if isinstance(flags, list) and flags:
+            flag_lines = []
+            for fl in flags[:10]:
+                if not isinstance(fl, dict):
+                    continue
+                if fl.get('type') == 'foreshadow_unrevealed':
+                    flag_lines.append(
+                        f"- Part {fl.get('part', '?')} 伏笔[{fl.get('foreshadow_id', '?')}] "
+                        f"未在正文中检出回收关键词（系统确定性复检）")
+                elif fl.get('character'):
+                    flag_lines.append(
+                        f"- Part {fl.get('part', '?')} 已退场角色 {fl.get('character')} 出现 "
+                        f"{fl.get('count', '?')} 次（退场记录: {fl.get('departed_record', '?')}）")
+            if flag_lines:
+                flags_block = ('\n## ⚠ 系统预检警告（确定性复检发现的可疑点，请重点核对；'
+                               '回忆/他人提及形式合法，勿仅因此判 P0）\n'
+                               + '\n'.join(flag_lines) + '\n')
+
         user_prompt = f"""请检查Part {part_num}的角色一致性。
 
 ## 角色档案
@@ -151,7 +173,7 @@ class ConsistencyReviewAgent(BaseAgent):
 - 角色是否前后名字一致
 - 已死/已离开的角色是否再次出现
 - 角色是否知道了不可能知道的信息
-- 角色性格是否突变"""
+- 角色性格是否突变{flags_block}"""
 
         try:
             result = call_llm_json(

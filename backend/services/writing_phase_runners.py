@@ -27,6 +27,44 @@ if TYPE_CHECKING:
 
 logger = get_logger('writing_phase_runners')
 
+# R4-6: 伏笔回收复检关键词截取长度（content 前 N 字做正文子串命中；取 8-12 中值）
+FORESHADOW_KEYWORD_LEN = 10
+# R4-6: content 短于该长度视为无有效关键词（2 字泛词子串误报率高），跳过不复检
+FORESHADOW_MIN_CONTENT_LEN = 4
+
+
+def check_foreshadow_reveal(foreshadowing: list, part_num: int, part_text: str) -> list:
+    """R4-6: 伏笔回收确定性复检（纯函数，零 LLM）。
+
+    对 reveal_part == part_num 的伏笔，取 content 前 FORESHADOW_KEYWORD_LEN 字做
+    part_text 子串命中检查；未命中返回未回收伏笔的 id 列表。只告警不阻断
+    （回忆/他人提及形式合法，终判交 Phase 4）。
+
+    Args:
+        foreshadowing: s.data['foreshadowing']（元素为 dict，容忍脏数据）
+        part_num: 当前 Part 编号
+        part_text: 本 Part 正文
+
+    Returns:
+        未命中伏笔的 id 列表（content 过短/空 foreshadowing/part_text 为空时
+        返回 []，不误报）。
+    """
+    if not foreshadowing or not part_text:
+        return []
+    unrevealed: list = []
+    for f in foreshadowing:
+        if not isinstance(f, dict):
+            continue
+        if f.get('reveal_part') != part_num:
+            continue
+        content = (f.get('content') or '').strip()
+        if len(content) < FORESHADOW_MIN_CONTENT_LEN:
+            continue  # 无有效关键词，跳过（避免 2 字泛词误报）
+        keyword = content[:FORESHADOW_KEYWORD_LEN]
+        if keyword not in part_text:
+            unrevealed.append(f.get('id', ''))
+    return unrevealed
+
 
 class Phase1Runner:
     """灵感解析阶段 —— InspirationAgent + GenreAgent"""
@@ -247,6 +285,20 @@ class Phase3Runner:
                                 s.data['consistency_flags'] = flags
                     except Exception as pre_err:
                         logger.info(f'[Phase3Runner] 退场角色预检失败（不影响主流程）: {pre_err}')
+                    # R4-6: 伏笔回收确定性复检（零 LLM）—— reveal_part == i 的伏笔，
+                    # 取 content 前 FORESHADOW_KEYWORD_LEN 字做正文子串命中检查，
+                    # 未命中追加 consistency_flags 并告警（只告警不阻断，终判交 Phase 4）
+                    try:
+                        for _fid in check_foreshadow_reveal(s.data.get('foreshadowing') or [], i, part_text):
+                            logger.warning(
+                                f'[Phase3Runner] R4-6 预检: Part {i} 伏笔 [{_fid}] 未在正文中检出回收关键词'
+                                f'——仅告警不阻断'
+                            )
+                            flags = list(s.data.get('consistency_flags') or [])
+                            flags.append({'part': i, 'type': 'foreshadow_unrevealed', 'foreshadow_id': _fid})
+                            s.data['consistency_flags'] = flags
+                    except Exception as fs_err:
+                        logger.info(f'[Phase3Runner] R4-6 伏笔回收复检失败（不影响主流程）: {fs_err}')
                     try:
                         temp_state.window.add_part(i, part_text, summary)
                         temp_state.window.update_foreshadowing(s.data.get('foreshadowing', []) or [])
