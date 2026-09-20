@@ -12,6 +12,9 @@ import json
 import time
 import types
 import traceback
+
+import pytest
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, '..', '..', '..'))
 sys.path.insert(0, os.path.join(ROOT, 'backend'))
@@ -117,5 +120,16 @@ def main():
     else:
         logger.info(f"\nR7-T2 FAIL: {summary['failed']} 次失败。")
         return 1
+@pytest.mark.live
+def test_r7_review_part2plus_live(live_llm_key):
+    """R7-T2 pytest 化（R3-S2）: Review Agents Part 2+ 真实验证（不能 mock）。
+
+    本文件无模块级副作用（不做 call_llm 替换），只加薄包装。需真实 API key
+    （live_llm_key 门禁）；未传 --live 时默认 skip。main() 逻辑一字未动，
+    退出码 0 转为 pytest 断言。
+    """
+    assert main() == 0
+
+
 if __name__ == '__main__':
     sys.exit(main())

@@ -16,6 +16,9 @@ import os
 import sys
 import json
 import time
+
+import pytest
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, '..', '..', '..'))
 sys.path.insert(0, os.path.join(ROOT, 'backend'))
@@ -73,10 +76,40 @@ def _safe_call_llm(system_prompt, user_prompt, temperature=0.7, max_tokens=4000,
         tracker.record(model=cfg.model, agent=agent, is_json=False, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, total_tokens=total_tokens, duration_ms=call_duration, estimated=True)
         logger.info(f'    [PATCHED] 估算: prompt={prompt_tokens} completion={completion_tokens} (跳过 empty choices={empty_choices_count} 个)')
     return content
-llm_client_mod.call_llm = _safe_call_llm
+
 from core.logger import get_logger
 logger = get_logger('test_r7_cost_stream')
-sys.modules['core.llm_client'].call_llm = _safe_call_llm
+
+
+# R3-S2: 模块级 call_llm 替换收进 install/restore 函数对（pytest 收集即 import，
+# 模块级赋值会污染整个 session 的全局 call_llm）；由 fixture 显式安装、yield 后恢复。
+
+
+def _install_safe_call_llm():
+    llm_client_mod.call_llm = _safe_call_llm
+    sys.modules['core.llm_client'].call_llm = _safe_call_llm
+
+
+def _restore_call_llm():
+    llm_client_mod.call_llm = _original_call_llm
+    sys.modules['core.llm_client'].call_llm = _original_call_llm
+
+
+@pytest.fixture
+def _patched_call_llm():
+    _install_safe_call_llm()
+    yield _safe_call_llm
+    _restore_call_llm()
+
+
+@pytest.mark.live
+def test_r7_cost_stream_live(live_llm_key, _patched_call_llm):
+    """R7-T3 pytest 化（R3-S2）: 流式 cost_tracker 真实验证（不能 mock）。
+
+    需真实 API key（live_llm_key 门禁）；未传 --live 时默认 skip。薄包装：
+    main() 逻辑一字未动，退出码 0 转为 pytest 断言。
+    """
+    assert main() == 0
 
 def main():
     logger.info('=' * 70)
@@ -162,4 +195,5 @@ def main():
     logger.info('=' * 70)
     return 0 if all_pass else 1
 if __name__ == '__main__':
+    _install_safe_call_llm()
     sys.exit(main())

@@ -11,6 +11,9 @@ import os
 import sys
 import json
 import time
+
+import pytest
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, '..', '..', '..'))
 sys.path.insert(0, os.path.join(ROOT, 'backend'))
@@ -59,8 +62,40 @@ def _safe_call_llm(system_prompt, user_prompt, temperature=0.7, max_tokens=4000,
         ct = _ett(content)
         tracker.record(model=cfg.model, agent=agent, is_json=False, prompt_tokens=pt, completion_tokens=ct, total_tokens=pt + ct, duration_ms=call_duration, estimated=True)
     return content
-llm_client_mod.call_llm = _safe_call_llm
-sys.modules['core.llm_client'].call_llm = _safe_call_llm
+
+
+# R3-S2: 模块级 call_llm 替换收进 install/restore 函数对 —— pytest 收集即 import，
+# 模块级赋值会把整个 session 的全局 call_llm 换成包装器（此前收集 0 项所以无感，
+# pytest 化后立即暴露）。由 fixture 显式安装、yield 后恢复。
+
+
+def _install_safe_call_llm():
+    llm_client_mod.call_llm = _safe_call_llm
+    sys.modules['core.llm_client'].call_llm = _safe_call_llm
+
+
+def _restore_call_llm():
+    llm_client_mod.call_llm = _original_call_llm
+    sys.modules['core.llm_client'].call_llm = _original_call_llm
+
+
+@pytest.fixture
+def _patched_call_llm():
+    _install_safe_call_llm()
+    yield _safe_call_llm
+    _restore_call_llm()
+
+
+@pytest.mark.live
+def test_r7_full_e2e_live(live_llm_key, _patched_call_llm):
+    """R7-T7/T8 pytest 化（R3-S2）: 完整 E2E Part 1-3 + 3 Review Agents + LLM 评分。
+
+    需真实 API key（live_llm_key 门禁经 core.config 判定，.env 有 key 即放行）；
+    未传 --live 时默认 skip。薄包装：main() 逻辑一字未动。
+    """
+    main()
+
+
 from core.agents.part_writer_agent import PartWriterAgent
 from core.agents.logic_review_agent import LogicReviewAgent
 from core.agents.emotion_review_agent import EmotionReviewAgent
@@ -386,4 +421,5 @@ def main():
     logger.info(f'  可读性={readability_score}, 一致性={char_consistency}, 连贯性={coherence_score}')
     logger.info(f"  Cost=¥{summary['estimated_cost_rmb']}")
 if __name__ == '__main__':
+    _install_safe_call_llm()
     main()
