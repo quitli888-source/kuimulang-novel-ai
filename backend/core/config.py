@@ -95,14 +95,44 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def get_task_max_tokens(task: str) -> int:
+    """R2-5: 任务级 token 预算集中入口 —— 生产路径 max_tokens 的唯一来源。
+
+    背景：step-5-preview 等推理模型的 reasoning token 计入 max_tokens，预算不足
+    会被吃光导致 content 空返/短返（Round 1 实证：facts 6000 仍被吃尽 5 次，
+    靠翻倍重试救回；style optimizer 10500 被吃光只剩 431 字）。
+    此前预算散落四处口径不一（chunk 20000 / polish +500 / json 6000 / delta 2000），
+    改一个常量就意外改写其他任务的失败模式。
+
+    Args:
+        task: 'chunk'（PartWriter 片段续写）/ 'polish'（StyleOptimizer 润色）/
+              'json_facts'（facts 抽取 / story_delta）/ 'json_review'（三评审）
+
+    Returns:
+        该任务的 max_tokens（env KML_CHUNK_MAX_TOKENS / KML_POLISH_MAX_TOKENS /
+        KML_JSON_MAX_TOKENS 可调）。
+    """
+    if task == 'chunk':
+        # 片段首试一次给足（≈3.5 倍 CHUNK_WORDS），降低空返重试率；按量计费零成本
+        return _env_int('KML_CHUNK_MAX_TOKENS', 20000)
+    if task == 'polish':
+        # 润色要重写全文：2 倍正文上限 + 2000 余量（5000 字 Part → 12000）
+        return _env_int('KML_POLISH_MAX_TOKENS', PART_WORD_MAX * 2 + 2000)
+    if task in ('json_facts', 'json_review'):
+        # facts 输入含数千字原文、评审 JSON 也可能带 reasoning：默认 8000
+        return _env_int('KML_JSON_MAX_TOKENS', 8000)
+    raise ValueError(f'get_task_max_tokens: 未知 task {task!r}（可选 chunk/polish/json_facts/json_review）')
+
+
 def get_json_max_tokens() -> int:
     """R1-C: JSON 类 LLM 调用（facts 抽取 / 三个 Review Agent）的显式 max_tokens 统一来源。
 
     step-5-preview 等推理模型的 reasoning token 计入 max_tokens，默认 4000 会被
     推理吃光导致 content 空返回（冒烟实证：facts 抽取 1800 → 3 次重试全败）。
-    按量计费下调大上限零成本。env KML_JSON_MAX_TOKENS 可调。
+    R2-5 起为 get_task_max_tokens('json_review') 的薄包装（默认 6000 → 8000），
+    env KML_JSON_MAX_TOKENS 契约不变，既有调用方零改动。
     """
-    return _env_int('KML_JSON_MAX_TOKENS', 6000)
+    return get_task_max_tokens('json_review')
 
 
 def write_env(key: str, value: str):

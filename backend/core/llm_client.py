@@ -15,7 +15,8 @@ from openai import OpenAI
 from core.config import get_llm_config_for_agent, get_llm_config
 from core.error_handler import LLMError, NetworkError, SystemError
 from core.logger import get_logger
-from core.text_utils import truncate, strip_padding_chars
+# R2-8: 删除死导入 strip_padding_chars（全文件未使用；truncate 保留）
+from core.text_utils import truncate
 logger = get_logger('llm_client')
 
 def _safe_temperature(temp: float, model: str) -> float:
@@ -183,21 +184,28 @@ def reset_llm_clients() -> None:
     _json_client = None
     _client_cache.clear()
 
-def call_llm(system_prompt: str, user_prompt: str, temperature: float=0.7, max_tokens: int=4000, agent: str='default', stream: bool=False, stream_callback: callable=None, work_id: Optional[str]=None) -> str:
+def call_llm(system_prompt: str, user_prompt: str, temperature: float=0.7, max_tokens: int=4000, agent: str='default', stream: bool=False, stream_callback: callable=None, work_id: Optional[str]=None, expected_min_len: Optional[int]=None) -> str:
     """调用 LLM 并返回文本结果，自动重试3次。agent参数决定使用哪个供应商的配置。
 
     P1-87: 新增 work_id 参数 —— 透传给 cost_tracker，使 per-work 成本统计准确。
+    R2-3: 新增 expected_min_len 参数 —— 调用方告知"本次输出至少应有多少字"。
+      仅当 finish_reason == 'length' 且 content 短于该值（推理模型 reasoning
+      吃光预算的无歧义签名）时生效：warning 日志区分空返/短返/普通截断三态，
+      并在既有 3 次 attempt 循环内以 max_tokens *= 2 升级重试（与 call_llm_json
+      的翻倍阶梯同构）。默认 None = 现有调用方零行为变化；不会把"模型自然写短"
+      误判为重试（无 length 签名不触发）。
     """
     client, model_name = _get_client_for_agent(agent)
     temp = _safe_temperature(temperature, model_name)
     messages = [{'role': 'system', 'content': system_prompt}, {'role': 'user', 'content': user_prompt}]
+    current_max = max_tokens  # R2-3: 短返升级重试时翻倍，不影响调用方传入值
     for attempt in range(3):
         try:
             call_start = time.time()
-            logger.info(f'    [LLM] 第{attempt + 1}次调用开始: model={model_name}, max_tokens={max_tokens}, agent={agent}, stream={stream}, work_id={work_id}')
+            logger.info(f'    [LLM] 第{attempt + 1}次调用开始: model={model_name}, max_tokens={current_max}, agent={agent}, stream={stream}, work_id={work_id}')
             logger.info(f'    [LLM] messages长度: {len(messages)} 条, 系统提示长度: {len(system_prompt)} 字符')
             if stream and stream_callback:
-                response = client.chat.completions.create(model=model_name, messages=messages, temperature=temp, max_tokens=max_tokens, stream=True)
+                response = client.chat.completions.create(model=model_name, messages=messages, temperature=temp, max_tokens=current_max, stream=True)
                 content = ''
                 last_chunk = None
                 for chunk in response:
@@ -213,7 +221,7 @@ def call_llm(system_prompt: str, user_prompt: str, temperature: float=0.7, max_t
                     last_chunk = chunk
                 content = content.strip()
             else:
-                response = client.chat.completions.create(model=model_name, messages=messages, temperature=temp, max_tokens=max_tokens)
+                response = client.chat.completions.create(model=model_name, messages=messages, temperature=temp, max_tokens=current_max)
                 if not response.choices:
                     raise ValueError(f'LLM 返回空 choices: model={model_name}')
                 message = response.choices[0].message
@@ -224,7 +232,20 @@ def call_llm(system_prompt: str, user_prompt: str, temperature: float=0.7, max_t
                 if finish_reason == 'length':
                     # R4-P1-x: 此前完全不看 finish_reason —— max_tokens 截断的残篇会被当作
                     # 完整输出返回，Part 中间夹半句话。至少留下可观测痕迹。
-                    logger.info(f'    [LLM] 警告: finish_reason=length，输出可能被 max_tokens={max_tokens} 截断')
+                    # R2-3: 区分"空返/短返/普通截断"三态；短返（调用方传了
+                    # expected_min_len 且 content 不足）在 attempt 循环内翻倍重试
+                    # —— Round 1 实证 431 字短返曾静默覆盖 5212 字原文。
+                    if not content:
+                        logger.warning(f'    [LLM] 警告: finish_reason=length 且 content 为空（max_tokens={current_max}，模型可能把预算全部花在 reasoning 上）'
+                                       + (f'，期望最少 {expected_min_len} 字' if expected_min_len else ''))
+                    elif expected_min_len and len(content) < expected_min_len:
+                        logger.warning(f'    [LLM] 警告: finish_reason=length 且输出异常短（{len(content)} 字 < 期望 {expected_min_len} 字，max_tokens={current_max}）')
+                    else:
+                        logger.info(f'    [LLM] 警告: finish_reason=length，输出可能被 max_tokens={current_max} 截断')
+                    if expected_min_len and len(content) < expected_min_len and attempt < 2:
+                        current_max *= 2
+                        logger.info(f'    [LLM] 短返升级重试: max_tokens {current_max // 2} -> {current_max}')
+                        continue
                 # P0-44: 删除 last_chunk = None —— stream=False 路径下 usage 取自 response，
                 # last_chunk 仅 stream=True 路径才有意义，赋值后再读 = dead branch
             content = _strip_think_tags(content)

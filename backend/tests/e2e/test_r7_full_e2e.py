@@ -20,10 +20,11 @@ os.environ.setdefault('ENABLE_VECTOR_RAG', '0')
 import core.llm_client as llm_client_mod
 _original_call_llm = llm_client_mod.call_llm
 
-def _safe_call_llm(system_prompt, user_prompt, temperature=0.7, max_tokens=4000, agent='default', stream=False, stream_callback=None, work_id=None):
+def _safe_call_llm(system_prompt, user_prompt, temperature=0.7, max_tokens=4000, agent='default', stream=False, stream_callback=None, work_id=None, expected_min_len=None):
     if not stream:
         # P2-106: 透传 work_id 到真实 call_llm，让成本计入 per-work tracker
-        return _original_call_llm(system_prompt, user_prompt, temperature, max_tokens, agent, stream, stream_callback, work_id)
+        # R2-3: 透传 expected_min_len（短返升级重试签名；默认 None = 原行为不变）
+        return _original_call_llm(system_prompt, user_prompt, temperature, max_tokens, agent, stream, stream_callback, work_id, expected_min_len)
     import time as _t
     from core.config import get_llm_config_for_agent
     from openai import OpenAI

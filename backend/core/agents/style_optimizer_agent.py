@@ -8,7 +8,7 @@ V4.1改动：
 """
 from core.agents.base_agent import BaseAgent
 from core.llm_client import call_llm
-from core.config import PART_WORD_MAX
+from core.config import PART_WORD_MAX, get_task_max_tokens
 from core.prompt_loader import load_prompt
 from core.logger import get_logger
 from core.text_utils import strip_padding_chars
@@ -47,11 +47,28 @@ class StyleOptimizerAgent(BaseAgent):
             mode_instruction = ''
         effective_max = max(original_len, target_max)
         user_prompt = f"请优化Part {part_num}的语言表达。\n\n## Part信息\n阶段：{outline.get('phase', '')}\n情绪目标：{outline.get('emotion_target', '')}\n结尾钩子：{outline.get('end_hook', '')}\n\n{optimization_notes}{mode_instruction}\n## 字数约束\n原文：{original_len}字\n目标：保持与原文相近的字数（{effective_max}字以内）\n{('可以适当精简' if is_over else '不要删减内容，只优化表达质量')}\n\n## 原文\n{part_text}\n\n请输出优化后的正文。只输出正文，不要任何标注。"
+        # R2-5: 硬编码 effective_max + 500 → 任务级单点 get_task_max_tokens('polish')
+        # （默认 PART_WORD_MAX*2+2000：润色要重写全文，而推理模型的 reasoning token
+        #  计入 max_tokens —— Round 1 实证 10500 被吃光只剩 431 字，直接毁稿）。
+        # R2-3 保险 3 接入方：告知"至少应有原文 30% 的字数"（reasoning 吃预算的
+        # 无歧义签名），finish_reason=length 且不足时由 call_llm 翻倍升级重试。
+        polish_max_tokens = get_task_max_tokens('polish')
+        expected_min_len = int(original_len * 0.3)
         try:
             temp = 0.5 if is_over else 0.7
-            optimized = call_llm(system_prompt=SYSTEM_PROMPT.format(max_words=target_max), user_prompt=user_prompt, temperature=temp, max_tokens=effective_max + 500, agent=self.name, work_id=getattr(state, 'work_id', None))
+            optimized = call_llm(system_prompt=SYSTEM_PROMPT.format(max_words=target_max), user_prompt=user_prompt, temperature=temp, max_tokens=polish_max_tokens, agent=self.name, work_id=getattr(state, 'work_id', None), expected_min_len=expected_min_len)
             # P0 反凑字数：优化器输出强制清洗（minimax-m3 等模型即便有 prompt 约束仍可能堆叠）
             optimized = strip_padding_chars(optimized)
+            # R2-3 保险 2: 短返自检 —— 清洗后仍不足原文 30%（431 字毁稿的签名）时，
+            # 以翻倍 max_tokens 重试一次；仍短则 raise，由 Phase4Runner 的 except
+            # 分支（保险 4）保留原文，绝不拿短稿覆盖原文。
+            if len(optimized) < original_len * 0.3:
+                logger.warning(f'  [短返] Part {part_num}: 优化稿 {len(optimized)} 字 < 原文 {original_len} 字的 30%（max_tokens={polish_max_tokens}），翻倍重试')
+                optimized = strip_padding_chars(call_llm(system_prompt=SYSTEM_PROMPT.format(max_words=target_max), user_prompt=user_prompt, temperature=temp, max_tokens=polish_max_tokens * 2, agent=self.name, work_id=getattr(state, 'work_id', None), expected_min_len=expected_min_len))
+                if len(optimized) < original_len * 0.3:
+                    raise RuntimeError(
+                        f'StyleOptimizer Part {part_num} 短返: 优化稿 {len(optimized)} 字 < 原文 {original_len} 字'
+                        f'（max_tokens={polish_max_tokens * 2} 重试后仍不足 30%），保留原文')
             optimized_len = len(optimized)
             if optimized_len > target_max * 1.2:
                 safe_min = max(target_min, target_max * 0.7) if target_min > 0 else target_max * 0.7

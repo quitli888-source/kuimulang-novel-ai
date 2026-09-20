@@ -25,10 +25,14 @@ import core.llm_client as llm_client_mod
 from core.cost_tracker import get_tracker, estimate_tokens_from_text
 _original_call_llm = llm_client_mod.call_llm
 
-def _safe_call_llm(system_prompt, user_prompt, temperature=0.7, max_tokens=4000, agent='default', stream=False, stream_callback=None):
-    """仅在测试中替换 chunk iteration，跳过 choices=[] 的 chunk（stepfun 偶发）。"""
+def _safe_call_llm(system_prompt, user_prompt, temperature=0.7, max_tokens=4000, agent='default', stream=False, stream_callback=None, work_id=None, expected_min_len=None):
+    """仅在测试中替换 chunk iteration，跳过 choices=[] 的 chunk（stepfun 偶发）。
+
+    R4-P1-x/R2-3: 签名补 work_id + expected_min_len 并透传 —— 与 test_r7_checkpoint
+    同构（此前窄签名会让带 work_id 的生产调用 TypeError，被 except 吞成空内容）。
+    """
     if not stream:
-        return _original_call_llm(system_prompt, user_prompt, temperature, max_tokens, agent, stream, stream_callback)
+        return _original_call_llm(system_prompt, user_prompt, temperature, max_tokens, agent, stream, stream_callback, work_id, expected_min_len)
     import time as _t
     from core.config import get_llm_config_for_agent
     from openai import OpenAI
