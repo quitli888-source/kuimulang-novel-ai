@@ -76,7 +76,7 @@ def _departed_desc(departed_track, name: str) -> str:
     return ''
 
 
-def _promoted_candidates(info: dict) -> list:
+def promoted_candidates(info: dict) -> list:
     """按晋升规则筛出可展示的别名候选（同一 variant ≥2 次或带非空 evidence）。
 
     返回按 variant 去重后的展示条目列表（优先取带证据的首条）。
@@ -106,7 +106,7 @@ def _registered_alias_lines(registry: dict) -> list:
             alias = alias.strip() if isinstance(alias, str) else ''
             if alias:
                 lines.append(f'- 已登记别名：{alias} = {name}')
-        for cand in _promoted_candidates(info):
+        for cand in promoted_candidates(info):
             variant = cand['variant'].strip()
             part_num = cand.get('part_num', '?')
             lines.append(
