@@ -1,23 +1,23 @@
 {
-  "active_provider_id": "minimax_m3",
-  "per_agent_enabled": false,
-  "agent_providers": {
-    "plot_planner": "step",
-    "part_writer": "step",
-    "style_optimizer": "step",
-    "emotion_review": "step",
-    "logic_review": "step",
-    "consistency_review": "step"
-  },
-  "global_temperature": 0.7,
-  "agent_temperatures": {
-    "plot_planner": 0.3,
-    "part_writer": 0.65,
-    "style_optimizer": 0.5,
-    "emotion_review": 0.3,
-    "logic_review": 0.3,
-    "consistency_review": 0.3,
-    "rolling_summary": 0.3,
-    "milestone_summary": 0.3
-  }
+ "active_provider_id": "step",
+ "per_agent_enabled": false,
+ "agent_providers": {
+  "plot_planner": "step",
+  "part_writer": "step",
+  "style_optimizer": "step",
+  "emotion_review": "step",
+  "logic_review": "step",
+  "consistency_review": "step"
+ },
+ "global_temperature": 0.7,
+ "agent_temperatures": {
+  "plot_planner": 0.3,
+  "part_writer": 0.65,
+  "style_optimizer": 0.5,
+  "emotion_review": 0.3,
+  "logic_review": 0.3,
+  "consistency_review": 0.3,
+  "rolling_summary": 0.3,
+  "milestone_summary": 0.3
+ }
 }

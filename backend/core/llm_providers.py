@@ -1,6 +1,9 @@
 """
 番茄小说AI创作系统 V5 - LLM供应商配置
 支持 MiniMax / DeepSeek / OpenAI / SiliconFlow / Step-3.7-Flash
+
+P2-100: 单一来源 (single source of truth) —— PROVIDER_ENV_KEYS + PROVIDER_DISPLAY_META
+合并派生 PRESET_PROVIDERS，避免两端重复维护导致 api_key_name / base_url drift。
 """
 from dataclasses import dataclass, field, asdict
 from typing import Optional
@@ -20,65 +23,108 @@ class LLMProvider:
     enabled: bool = True
 
 
-# 预设供应商列表（供前端下拉框使用）
-PRESET_PROVIDERS = [
-    LLMProvider(
-        id="step",
-        name="Step-3.7-Flash",
-        api_key_name="STEP_API_KEY",
-        base_url="https://api.stepfun.com/step_plan/v1",
-        model="step-3.7-flash",
-        json_model="step-3.7-flash",
-    ),
-    LLMProvider(
-        id="minimax",
-        name="MiniMax（推荐）",
-        api_key_name="MINIMAX_API_KEY",
-        base_url="https://api.minimax.chat/v1",
-        model="MiniMax-Text-01",
-        json_model="abab6.5s-chat",
-    ),
-    LLMProvider(
-        id="minimax_m3",
-        name="MiniMax-M3（MiniMax.cn 新版）",
-        api_key_name="MINIMAX_M3_API_KEY",
-        base_url="https://api.minimax.cn/v1",
-        model="MiniMax-M3",
-        json_model="abab6.5s-chat",
-    ),
-    LLMProvider(
-        id="deepseek",
-        name="DeepSeek",
-        api_key_name="DEEPSEEK_API_KEY",
-        base_url="https://api.deepseek.com/v1",
-        model="deepseek-chat",
-        json_model="deepseek-chat",
-    ),
-    LLMProvider(
-        id="openai",
-        name="OpenAI（GPT系列）",
-        api_key_name="OPENAI_API_KEY",
-        base_url="https://api.openai.com/v1",
-        model="gpt-4o-mini",
-        json_model="gpt-4o-mini",
-    ),
-    LLMProvider(
-        id="siliconflow",
-        name="SiliconFlow（硅基流动）",
-        api_key_name="SILICONFLOW_API_KEY",
-        base_url="https://api.siliconflow.cn/v1",
-        model="Qwen/Qwen2.5-72B-Instruct",
-        json_model="Qwen/Qwen2.5-72B-Instruct",
-    ),
-    LLMProvider(
-        id="custom",
-        name="自定义LLM",
-        api_key_name="CUSTOM_LLM_API_KEY",
-        base_url="",
-        model="",
-        json_model="",
-    ),
-]
+# =============================================
+# 单一来源：env key 名 + 默认 base_url / model / json_model
+# + 单独的 PROVIDER_DISPLAY_META 仅放显示名（与配置无关）
+# =============================================
+# P2-100: 这是 SOLE SOURCE OF TRUTH；PRESET_PROVIDERS 由本表派生。
+PROVIDER_ENV_KEYS: dict = {
+    # provider_id -> {"api_key": str, "model": str, "json_model": str, "base_url": str, "default_model": str, "default_json_model": str, "default_base_url": str}
+    "step": {
+        "api_key": "STEP_API_KEY",
+        "model": "STEP_MODEL",
+        "json_model": "STEP_JSON_MODEL",
+        "base_url": "STEP_BASE_URL",
+        "default_model": "step-5-preview",
+        "default_json_model": "step-5-preview",
+        "default_base_url": "https://api.stepfun.com/step_plan/v1",
+    },
+    "minimax": {
+        "api_key": "MINIMAX_API_KEY",
+        "model": "MINIMAX_MODEL",
+        "json_model": "MINIMAX_JSON_MODEL",
+        "base_url": "MINIMAX_BASE_URL",
+        "default_model": "MiniMax-Text-01",
+        "default_json_model": "abab6.5s-chat",
+        "default_base_url": "https://api.minimax.chat/v1",
+    },
+    "minimax_m3": {
+        "api_key": "MINIMAX_M3_API_KEY",
+        "model": "MINIMAX_M3_MODEL",
+        "json_model": "MINIMAX_M3_JSON_MODEL",
+        "base_url": "MINIMAX_M3_BASE_URL",
+        "default_model": "MiniMax-M3",
+        "default_json_model": "abab6.5s-chat",
+        "default_base_url": "https://api.minimax.cn/v1",
+    },
+    "deepseek": {
+        "api_key": "DEEPSEEK_API_KEY",
+        "model": "DEEPSEEK_MODEL",
+        "json_model": "DEEPSEEK_JSON_MODEL",
+        "base_url": "DEEPSEEK_BASE_URL",
+        "default_model": "deepseek-chat",
+        "default_json_model": "deepseek-chat",
+        "default_base_url": "https://api.deepseek.com/v1",
+    },
+    "openai": {
+        "api_key": "OPENAI_API_KEY",
+        "model": "OPENAI_MODEL",
+        "json_model": "OPENAI_JSON_MODEL",
+        "base_url": "OPENAI_BASE_URL",
+        "default_model": "gpt-4o-mini",
+        "default_json_model": "gpt-4o-mini",
+        "default_base_url": "https://api.openai.com/v1",
+    },
+    "siliconflow": {
+        "api_key": "SILICONFLOW_API_KEY",
+        "model": "SILICONFLOW_MODEL",
+        "json_model": "SILICONFLOW_JSON_MODEL",
+        "base_url": "SILICONFLOW_BASE_URL",
+        "default_model": "Qwen/Qwen2.5-72B-Instruct",
+        "default_json_model": "Qwen/Qwen2.5-72B-Instruct",
+        "default_base_url": "https://api.siliconflow.cn/v1",
+    },
+    "custom": {
+        "api_key": "CUSTOM_LLM_API_KEY",
+        "model": "CUSTOM_LLM_MODEL",
+        "json_model": "CUSTOM_LLM_JSON_MODEL",
+        "base_url": "CUSTOM_LLM_BASE_URL",
+        "default_model": "",
+        "default_json_model": "",
+        "default_base_url": "",
+    },
+}
+
+# 仅放显示名（与配置无关，独立于 PROVIDER_ENV_KEYS）
+PROVIDER_DISPLAY_META: dict = {
+    "step": "Step-3.7-Flash",
+    "minimax": "MiniMax（推荐）",
+    "minimax_m3": "MiniMax-M3（MiniMax.cn 新版）",
+    "deepseek": "DeepSeek",
+    "openai": "OpenAI（GPT系列）",
+    "siliconflow": "SiliconFlow（硅基流动）",
+    "custom": "自定义LLM",
+}
+
+
+def _build_preset_providers() -> list:
+    """从 PROVIDER_ENV_KEYS + PROVIDER_DISPLAY_META 派生 PRESET_PROVIDERS。"""
+    out = []
+    for pid, keys in PROVIDER_ENV_KEYS.items():
+        out.append(LLMProvider(
+            id=pid,
+            name=PROVIDER_DISPLAY_META.get(pid, pid),
+            api_key_name=keys["api_key"],
+            base_url=keys["default_base_url"],
+            model=keys["default_model"],
+            json_model=keys["default_json_model"],
+        ))
+    return out
+
+
+# P2-100: PRESET_PROVIDERS 现在是派生量 —— 加新 provider 只需在 PROVIDER_ENV_KEYS
+#         + PROVIDER_DISPLAY_META 各加一行，无需再维护两份硬编码。
+PRESET_PROVIDERS = _build_preset_providers()
 
 
 def get_provider_from_id(provider_id: str) -> Optional[LLMProvider]:
@@ -89,15 +135,16 @@ def get_provider_from_id(provider_id: str) -> Optional[LLMProvider]:
 
 
 def load_provider_api_key(provider: LLMProvider, read_env_fn) -> LLMProvider:
-    """从.env加载供应商的API Key"""
+    """从.env加载供应商的API Key / base_url / model / json_model
+
+    所有预设 provider 的 base_url / model / json_model 均可被 .env 中对应的
+    *_BASE_URL / *_MODEL / *_JSON_MODEL 覆盖（此前仅 custom 生效，预设 provider 的
+    env 模型覆盖被静默忽略，.env 里切模型无任何效果）。
+    """
     provider.api_key = read_env_fn(provider.api_key_name, "")
-    
-    # 对于自定义LLM，还需要加载base_url、model和json_model
-    if provider.id == "custom":
-        provider.base_url = read_env_fn("CUSTOM_LLM_BASE_URL", "")
-        provider.model = read_env_fn("CUSTOM_LLM_MODEL", "")
-        provider.json_model = read_env_fn("CUSTOM_LLM_JSON_MODEL", "")
-    
+    provider.base_url = read_env_fn(PROVIDER_ENV_KEYS[provider.id]["base_url"], provider.base_url)
+    provider.model = read_env_fn(PROVIDER_ENV_KEYS[provider.id]["model"], provider.model)
+    provider.json_model = read_env_fn(PROVIDER_ENV_KEYS[provider.id]["json_model"], provider.json_model)
     return provider
 
 
@@ -147,56 +194,6 @@ class ActiveLLMConfig:
     @classmethod
     def from_dict(cls, d: dict) -> "ActiveLLMConfig":
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
-
-
-# =============================================
-# R19-P1-10: PROVIDER_ENV_KEYS 单一来源 —— 供 config_api.py 多处使用
-# =============================================
-PROVIDER_ENV_KEYS: dict = {
-    # provider_id -> {"api_key": str, "model": str, "json_model": str, "base_url": str}
-    "step": {
-        "api_key": "STEP_API_KEY",
-        "model": "STEP_MODEL",
-        "json_model": "STEP_JSON_MODEL",
-        "base_url": "STEP_BASE_URL",
-    },
-    "minimax": {
-        "api_key": "MINIMAX_API_KEY",
-        "model": "MINIMAX_MODEL",
-        "json_model": "MINIMAX_JSON_MODEL",
-        "base_url": "MINIMAX_BASE_URL",
-    },
-    "minimax_m3": {
-        "api_key": "MINIMAX_M3_API_KEY",
-        "model": "MINIMAX_M3_MODEL",
-        "json_model": "MINIMAX_M3_JSON_MODEL",
-        "base_url": "MINIMAX_M3_BASE_URL",
-    },
-    "deepseek": {
-        "api_key": "DEEPSEEK_API_KEY",
-        "model": "DEEPSEEK_MODEL",
-        "json_model": "DEEPSEEK_JSON_MODEL",
-        "base_url": "DEEPSEEK_BASE_URL",
-    },
-    "openai": {
-        "api_key": "OPENAI_API_KEY",
-        "model": "OPENAI_MODEL",
-        "json_model": "OPENAI_JSON_MODEL",
-        "base_url": "OPENAI_BASE_URL",
-    },
-    "siliconflow": {
-        "api_key": "SILICONFLOW_API_KEY",
-        "model": "SILICONFLOW_MODEL",
-        "json_model": "SILICONFLOW_JSON_MODEL",
-        "base_url": "SILICONFLOW_BASE_URL",
-    },
-    "custom": {
-        "api_key": "CUSTOM_LLM_API_KEY",
-        "model": "CUSTOM_LLM_MODEL",
-        "json_model": "CUSTOM_LLM_JSON_MODEL",
-        "base_url": "CUSTOM_LLM_BASE_URL",
-    },
-}
 
 
 def get_env_key(provider_id: str, field: str) -> str:
