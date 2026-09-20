@@ -327,13 +327,18 @@ class ConsistencyRepairer:
                     part_num, part_text, pairs, registry, p0,
                     logic_result, consistency_result, state_mock)
                 if note is not None:
+                    # R4-3: 真实首检数随 note 上行（修复通过时 entry 的结果已被
+                    # 重审值替换，聚合器需要它计算 first_pass_p0 预算护栏）
+                    note.setdefault('first_pass_p0', p0)
                     return note
                 logger.info(f'[ConsistencyRepairer] Part {part_num} 定点修复不可用，落回全文重写')
             else:
                 logger.info(f'[ConsistencyRepairer] Part {part_num} 名称类 P0 但配对推导为空（歧义即放弃），走全文重写')
 
-        return await self._rewrite_repair(
+        note = await self._rewrite_repair(
             part_num, part_text, p0, logic_result, consistency_result, state_mock, registry)
+        note.setdefault('first_pass_p0', p0)
+        return note
 
     # ----------------- R4-2: 姓名漂移定点修复 -----------------
 

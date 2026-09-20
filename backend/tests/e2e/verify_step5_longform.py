@@ -92,6 +92,99 @@ def density_check(text: str) -> dict:
     }
 
 
+def first_pass_p0_budget(parts_expected: int):
+    """R4-3（S4）: 首检 P0 率预算 = PARTS // 2（20 Part → 10）。
+
+    - 冒烟（PARTS < 10）不设限、仅记录 —— 小规模跑法首检 P0 天生波动大；
+    - env KML_MAX_FIRST_PASS_P0 可覆盖；显式设 0（或负值）= 关闭护栏；
+    - 取 0.5/Part 的理由：它是"可见劣化即拦"的上限而非达标线 —— 预防侧
+      （名册/facts 对照/伏笔复检）生效的正常跑法首检 P0 应远低于此。
+
+    Returns:
+        int 预算值，或 None 表示不设限（JSON 安全，report.json 落 null）。
+    """
+    raw = os.environ.get('KML_MAX_FIRST_PASS_P0', '')
+    if raw.strip():
+        try:
+            override = int(raw)
+        except (TypeError, ValueError):
+            override = None
+        if override is not None:
+            return None if override <= 0 else override
+    if parts_expected < 10:
+        return None
+    return parts_expected // 2
+
+
+def evaluate_g4(report: dict, parts_expected: int) -> tuple:
+    """R4-3（S4）: G4 连贯性门禁判定（纯函数，可单测；此前内联在 main()）。
+
+    混合案 (c) 口径：终稿语义（residual P0 = 0 且所有 revision_attempted 的
+    Part revision_passed = True 且逻辑均分 ≥ 6 且一致性 pass）+ 首检 P0 率
+    预算护栏（防"修复刷分"—— 重写引入新冲突却靠重审闭嘴进终稿）。
+    三个阈值常量（MAX_TOTAL_P0 / MIN_AVG_LOGIC_SCORE /
+    MIN_CONSISTENCY_PASS_RATE）一个不改；cons_pass / avg_logic 维持现状
+    （修复成功即重审结果进聚合，终稿口径，不引入第二套分数）。
+
+    Args:
+        report: review_report（services/review_aggregator 产物）
+        parts_expected: 期望 Part 数（KML_PARTS）
+
+    Returns:
+        (g4_pass: bool, detail: dict) —— detail 直接进 gates['G4_coherence']。
+    """
+    logic = report.get('logic') or {}
+    cons = report.get('consistency') or {}
+    parts_reviewed = logic.get('parts_count') or cons.get('parts_count') or 0
+    # 首检口径（保留计算与打印，供趋势分析）
+    total_p0 = int(logic.get('p0_count') or 0) + int(cons.get('p0_count') or 0)
+    total_p1 = int(logic.get('p1_count') or 0) + int(cons.get('p1_count') or 0)
+    avg_logic = logic.get('avg_score') or 0
+    cons_pass = bool(cons.get('pass'))
+    cons_rate = 1.0 if cons_pass else 0.0
+    # 终稿口径（R4-3）：residual = 重审残留；旧格式报告无该键时回退聚合 P0 数
+    if 'residual_total_p0' in report:
+        residual_total_p0 = int(report.get('residual_total_p0') or 0)
+    else:
+        residual_total_p0 = total_p0
+    first_pass_total_p0 = int(report.get('first_pass_total_p0') or 0)
+    revision_stats = report.get('revision_stats') or {}
+    budget = first_pass_p0_budget(parts_expected)
+    budget_ok = budget is None or first_pass_total_p0 <= budget
+    revision_converged = (int(revision_stats.get('attempted', 0) or 0)
+                          == int(revision_stats.get('passed', 0) or 0))
+    g4 = (parts_reviewed > 0
+          and residual_total_p0 <= MAX_TOTAL_P0
+          and revision_converged
+          and avg_logic >= MIN_AVG_LOGIC_SCORE
+          and cons_pass
+          and budget_ok)
+    detail = {
+        'pass': g4, 'reviewed_parts': parts_reviewed,
+        'total_p0': total_p0, 'total_p1': total_p1,
+        'avg_logic_score': avg_logic, 'consistency_pass': cons_pass,
+        'first_pass_total_p0': first_pass_total_p0,
+        'residual_total_p0': residual_total_p0,
+        'revision_stats': {
+            'attempted': int(revision_stats.get('attempted', 0) or 0),
+            'passed': int(revision_stats.get('passed', 0) or 0),
+            'degraded': int(revision_stats.get('degraded', 0) or 0),
+            'spotfixed': int(revision_stats.get('spotfixed', 0) or 0),
+        },
+        'first_pass_p0_budget': budget,
+        'thresholds': {'max_total_p0': MAX_TOTAL_P0, 'min_avg_logic_score': MIN_AVG_LOGIC_SCORE,
+                       'min_consistency_pass_rate': MIN_CONSISTENCY_PASS_RATE},
+        'per_part': [
+            {'part': p.get('part'), 'logic_score': p.get('logic_score'),
+             'consistency_score': p.get('consistency_score'),
+             'p0_issues': [str(i)[:80] for i in (p.get('p0_issues') or [])],
+             'p1_issues': [str(i)[:80] for i in (p.get('p1_issues') or [])]}
+            for p in (report.get('parts') or [])
+        ],
+    }
+    return g4, detail
+
+
 class FakeEmitter:
     async def emit(self, event_type, data, work_id=None):
         pass
@@ -246,34 +339,21 @@ async def main():
         gates['G4_coherence'] = {'pass': None, 'skipped': True}
     else:
         report = data.get('review_report') or {}
-        logic = report.get('logic') or {}
-        cons = report.get('consistency') or {}
-        parts_reviewed = logic.get('parts_count') or cons.get('parts_count') or 0
-        total_p0 = int(logic.get('p0_count') or 0) + int(cons.get('p0_count') or 0)
-        total_p1 = int(logic.get('p1_count') or 0) + int(cons.get('p1_count') or 0)
-        avg_logic = logic.get('avg_score') or 0
-        cons_pass = bool(cons.get('pass'))
-        cons_rate = 1.0 if cons_pass else 0.0
-        per_part_detail = [
-            {'part': p.get('part'), 'logic_score': p.get('logic_score'),
-             'consistency_score': p.get('consistency_score'),
-             'p0_issues': [str(i)[:80] for i in (p.get('p0_issues') or [])],
-             'p1_issues': [str(i)[:80] for i in (p.get('p1_issues') or [])]}
-            for p in (report.get('parts') or [])
-        ]
-        g4 = (parts_reviewed > 0 and total_p0 <= MAX_TOTAL_P0
-              and avg_logic >= MIN_AVG_LOGIC_SCORE and cons_pass)
-        gates['G4_coherence'] = {
-            'pass': g4, 'reviewed_parts': parts_reviewed,
-            'total_p0': total_p0, 'total_p1': total_p1,
-            'avg_logic_score': avg_logic, 'consistency_pass': cons_pass,
-            'thresholds': {'max_total_p0': MAX_TOTAL_P0, 'min_avg_logic_score': MIN_AVG_LOGIC_SCORE,
-                           'min_consistency_pass_rate': MIN_CONSISTENCY_PASS_RATE},
-            'per_part': per_part_detail,
-        }
+        # R4-3（S4）: 判定抽成纯函数 evaluate_g4（可单测）；混合案 (c) 口径 ——
+        # 终稿零残留 P0 + 修复全收敛 + 逻辑均分 + 一致性 pass + 首检 P0 率预算
+        g4, g4_detail = evaluate_g4(report, PARTS)
+        gates['G4_coherence'] = g4_detail
+        rs = g4_detail['revision_stats']
+        budget_txt = ('不设限' if g4_detail['first_pass_p0_budget'] is None
+                      else str(g4_detail['first_pass_p0_budget']))
         print(f"[G4] 连贯性: {'PASS' if g4 else 'FAIL'} "
-              f'(审查 {parts_reviewed} Parts | P0={total_p0} P1={total_p1} | '
-              f'逻辑均分={avg_logic} | 一致性通过={cons_pass})', flush=True)
+              f"(审查 {g4_detail['reviewed_parts']} Parts | P0={g4_detail['total_p0']} "
+              f"P1={g4_detail['total_p1']} | 逻辑均分={g4_detail['avg_logic_score']} | "
+              f"一致性通过={g4_detail['consistency_pass']})", flush=True)
+        print(f"     终稿口径: residual_p0={g4_detail['residual_total_p0']} | "
+              f"首检_p0={g4_detail['first_pass_total_p0']}（预算 {budget_txt}）| "
+              f"修复统计: attempted={rs['attempted']} passed={rs['passed']} "
+              f"degraded={rs['degraded']} spotfixed={rs['spotfixed']}", flush=True)
 
     # 成本
     try:

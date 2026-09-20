@@ -62,12 +62,28 @@ def aggregate_review_results(per_part_results: list) -> dict:
         "logic":       {avg_score, pass, total_issues, top_issue, parts_count, ...},
         "emotion":     {avg_score, pass, avg_resonance, avg_immersion, parts_count},
         "consistency": {avg_score, pass, total_issues, top_issue, parts_count, ...},
+        "first_pass_total_p0": int,   # R4-3：首检 P0 总数（过程质量护栏）
+        "residual_total_p0": int,     # R4-3：终稿残留 P0 总数（门禁硬判据）
+        "revision_stats": {"attempted", "passed", "degraded", "spotfixed"},  # R4-3/R4-5
         "parts": [
             {"part": N, "logic_score": ..., "emotion_score": ..., "consistency_score": ...,
              "p0_issues": [...], "p1_issues": [...], "summary": "..."},
             ...
         ]
     }
+
+    R4-3（S4）新增字段语义（只增不改，既有字段一字不动）：
+    - part_entry.first_pass_p0：该 Part 首检 P0 数。repair note 携带的真实首检数
+      （p0_before）优先，否则 = len(p0_issues)。修复成功时 entry 的 logic/
+      consistency_result 已被 Phase4Runner 替换为重审结果，len(p0_issues) 会丢掉
+     真实首检数，故以 note 值为准（否则"首检率预算"对修好的 Part 恒为 0，护栏失效）。
+    - part_entry.residual_p0：触发修复且 passed → entry 结果已是重审结果，
+      residual = 重审 P0（= len(p0_issues)）；触发修复且 failed → residual =
+      note['residual_p0']（重审残留），p0_issues 保持首检值（现状不变）；
+      未触发 → residual = 首检 P0。
+    - 新字段仅在触发过修复时追加到 parts[]（无 revision 键时 parts[] 输出与
+      改前逐字节一致，R1-J 纪律）；summary 级三个新键始终存在（聚合器纯函数，
+      不读 revision_log，revision_stats 从 entry 的 revision_* 字段汇总）。
     """
     logic_scores: list = []
     emotion_scores: list = []
@@ -81,6 +97,10 @@ def aggregate_review_results(per_part_results: list) -> dict:
     logic_p1: list = []
     consistency_p0: list = []
     consistency_p1: list = []
+    # R4-3（S4）: 首检/残留双口径 + 修复统计（从 entry 的 revision_* 字段汇总）
+    first_pass_total_p0 = 0
+    residual_total_p0 = 0
+    revision_stats = {"attempted": 0, "passed": 0, "degraded": 0, "spotfixed": 0}
 
     parts_out: list = []
 
@@ -136,6 +156,34 @@ def aggregate_review_results(per_part_results: list) -> dict:
         if "revision_attempted" in entry:
             part_entry["revision_attempted"] = bool(entry.get("revision_attempted"))
             part_entry["revision_passed"] = bool(entry.get("revision_passed"))
+            # R4-3: 首检/残留双口径（仅修复过的 Part 追加，保持无修复时输出不变）
+            note_first_pass = entry.get("first_pass_p0")
+            first_pass_p0 = (note_first_pass
+                             if isinstance(note_first_pass, int) and note_first_pass >= 0
+                             else len(part_entry["p0_issues"]))
+            residual_p0 = len(part_entry["p0_issues"])
+            if not entry.get("revision_passed"):
+                note_residual = entry.get("residual_p0")
+                if isinstance(note_residual, int) and note_residual >= 0:
+                    residual_p0 = note_residual
+            part_entry["first_pass_p0"] = first_pass_p0
+            part_entry["residual_p0"] = residual_p0
+            if entry.get("revision_degraded"):
+                part_entry["revision_degraded"] = True
+            # R4-5: 修复统计（attempted/passed/degraded/spotfixed）
+            revision_stats["attempted"] += 1
+            if entry.get("revision_passed"):
+                revision_stats["passed"] += 1
+            if entry.get("revision_degraded"):
+                revision_stats["degraded"] += 1
+            if entry.get("revision_spotfixed"):
+                revision_stats["spotfixed"] += 1
+            first_pass_total_p0 += first_pass_p0
+            residual_total_p0 += residual_p0
+        else:
+            # 未触发修复：residual = 首检（p0_issues 即首检值）
+            first_pass_total_p0 += len(part_entry["p0_issues"])
+            residual_total_p0 += len(part_entry["p0_issues"])
         parts_out.append(part_entry)
 
     return {
@@ -164,5 +212,9 @@ def aggregate_review_results(per_part_results: list) -> dict:
             "top_issue": _first_issue(consistency_p0) or _first_issue(consistency_p1),
             "parts_count": len(per_part_results),
         },
+        # R4-3（S4）: 首检/残留双口径 + 修复统计（G4 混合门禁的输入）
+        "first_pass_total_p0": first_pass_total_p0,
+        "residual_total_p0": residual_total_p0,
+        "revision_stats": revision_stats,
         "parts": parts_out,
     }
