@@ -2,15 +2,21 @@
 R1-J: P0 定向修复回路 —— Phase 4 评审检出 P0 后系统内自愈。
 R4-2: 姓名漂移定点修复（确定性字符串归一 + 4 条安全闸 + 计数复检 + 回退）。
 R4-5: 修复回路四段式（分流 / 变坏回退 / 条件性第二跳 / 失败汇总与告警）。
+R5-3: 配对推导第三来源（issue 引文 span + 位置型替换指令闸）—— 修不修不再
+取决于评审 issue 的 character 字段写法（R4-2 来源 (b) 的盲区）。
 
 背景：评审发现 P0 后此前仅记录进 review_report，全管线无重写路径，
 G4（logic+consistency P0 总数 = 0）只能靠"预防全对"，容错为零。
 
-设计（Reviewer 批准缩窄版 + Round 4 收紧）：
+设计（Reviewer 批准缩窄版 + Round 4 收紧 + Round 5 加固）：
 - 分诊（R4-2）：名称类 P0 → 定点修复（零 LLM 的字符串替换 + 确定性复检）；
   结构/logic 类 → 全文重写。定点修复的 (错误名, 正确名) 配对只认显式来源
-  （名册已晋升别名候选 / consistency issue 字段字面包含），歧义即放弃；
-  **禁止编辑距离/相似度猜配对**（Round 1 拒绝理由负面清单）
+  （名册已晋升别名候选 / consistency issue 字段字面包含 / issue 引文 span），
+  歧义即放弃；**禁止编辑距离/相似度猜配对**（Round 1 拒绝理由负面清单）
+- 引文 span 来源（R5-3）必须过**位置型替换指令闸**：span 前后 6 个非引号字符内
+  出现替换指令词（改为/简写为/统一为…），否则拒绝 —— 防"大长老林渊→林万重"
+  式坏配对（把称谓并进名字）；span 含功能词（的了之是在被将与其为和或也）
+  视为短语而非名字
 - 定点修复 4 条安全闸全部满足才替换：配对来源显式 / len(错误名)>=2 /
   错误名与注册名·已登记别名·退场名互不为子串（双向）/ 错误名不在退场名单
 - 替换后重审 Logic + Consistency（Emotion 不参与）；P0 归零才保留，
@@ -19,7 +25,7 @@ G4（logic+consistency P0 总数 = 0）只能靠"预防全对"，容错为零。
   brief 必须附第一轮新引入的问题清单；重写导致劣化（residual 不降 / 出现
   首检没有的新 P0 类别）→ 立即回退原文并标注 revision_degraded
 - 修订痕迹写入 s.data['revision_log']（定点修复条目带
-  type='name_spotfix' + wrong_name/right_name/pair_source，只增不改既有字段）
+  type='name_spotfix' + wrong_name/right_name/pair_source + trigger，只增不改）
 - 不静默丢内容；重写走与 Phase 3 相同的 _save_chunk_progress 落盘路径
 """
 import asyncio
@@ -41,6 +47,16 @@ MAX_REWRITE_ROUNDS = 2
 # consistency issue 的 character 字段可能是"林万重/林渊"这类复合写法，
 # 按常见分隔符切分出候选错误名 token（只做字面切分，不做任何模糊匹配）
 _CHAR_FIELD_SPLIT_RE = re.compile(r'[/、,，;；|\s]+')
+
+# R5-3: 配对推导第三来源 —— issue 引文 span（QianBi"引证验真"模式）
+_QUOTED_SPAN_RE = re.compile(r'[「」『』“”‘’"\']([^「」『』“”‘’"\']{2,12})[「」『』“”‘’"\']')
+# 位置型替换指令词：span 前后紧邻出现才认（防"大长老林渊→林万重"坏配对）
+_DIRECTIVE_RE = re.compile(r'改为|改写为|统一为|应为|修正为|写成|写作|简写为|讹为|误作|笔误|混淆为|错写成')
+_DIRECTIVE_WINDOW = 6        # 指令词须在 span 前后 6 个非引号字符内
+_DIRECTIVE_MARGIN = 2        # 窗口余量：防 3 字指令词跨 6 字边界被截断
+# 含功能词的 span 视为短语而非名字（大长老林渊 / 您的传讯玉 这类直接排除）
+_SPAN_STOP_CHARS = '的了之是在被将与其为和或也'
+_QUOTE_CHARS = '「」『』“”‘’"\''
 
 
 class _RevisionStateProxy:
@@ -103,14 +119,16 @@ def has_name_issue(consistency_result: dict, registry: dict) -> bool:
     """R4-2 分诊：是否存在名称类 P0。
 
     名称类 = consistency P0 issue 的 dimension=='名称一致性'，或其
-    description/location 含名册已晋升的别名对（variant 字面出现）。
+    description/location/verdict 含名册已晋升的别名对（variant 字面出现）。
+    R5-3: verdict 纳入文本扫描面（复审判定文本常只在此给出两种写法）。
     """
     if not isinstance(registry, dict) or not registry:
         return False
     for issue in _p0_issues(consistency_result):
         if is_name_issue(issue):
             return True
-        text = f"{issue.get('description') or ''} {issue.get('location') or ''}"
+        text = (f"{issue.get('description') or ''} {issue.get('location') or ''} "
+                f"{issue.get('verdict') or ''}")
         for info in registry.values():
             if not isinstance(info, dict):
                 continue
@@ -120,22 +138,81 @@ def has_name_issue(consistency_result: dict, registry: dict) -> bool:
     return False
 
 
-def derive_name_pairs(part_text: str, consistency_result: dict, registry: dict) -> list:
-    """R4-2: 推导显式 (错误名, 正确名) 配对（确定性，零相似度）。
+def _window_has_directive(text: str, start: int, end: int, forward: bool) -> bool:
+    """R5-3: 位置型替换指令判定 —— 从 span 边界出发，跳过引号字符，在前后各
+    _DIRECTIVE_WINDOW 个非引号字符（+余量）内命中 _DIRECTIVE_RE。
 
-    来源仅两类：
+    真案例：…被大量简写为'井中意识'… → 向后命中"简写为"；
+            应将所有'林渊'改为'林万重' → 向前命中"改为"。
+    坏案例：…突然出现另一位'大长老林渊'… → 前后 6 字无指令词 → 拒绝。
+    """
+    chars: list = []
+    i = end if forward else start - 1
+    step = 1 if forward else -1
+    count = 0
+    limit = _DIRECTIVE_WINDOW + _DIRECTIVE_MARGIN
+    while 0 <= i < len(text) and count < limit:
+        ch = text[i]
+        if ch not in _QUOTE_CHARS:
+            chars.append(ch)
+            count += 1
+        i += step
+    window = ''.join(chars) if forward else ''.join(reversed(chars))
+    return bool(_DIRECTIVE_RE.search(window))
+
+
+def _directive_quoted_spans(field_text: str) -> list:
+    """R5-3: 抽取带位置型替换指令佐证的引号 span（纯函数，可单测）。
+
+    候选 span 须满足：2-12 字 / 不含 _SPAN_STOP_CHARS 功能词 / 同一字段内某次
+    出现的前后窗口命中替换指令词（指令词与 span 不得跨字段拼接判定）。
+
+    Returns:
+        [(span, evidence 切片), ...]（按出现顺序、同 span 去重；evidence 含
+        指令词原文，≤30 字）。
+    """
+    if not field_text:
+        return []
+    out: list = []
+    seen: set = set()
+    for m in _QUOTED_SPAN_RE.finditer(field_text):
+        span = m.group(1)
+        if not (2 <= len(span) <= 12):
+            continue
+        if any(ch in _SPAN_STOP_CHARS for ch in span):
+            continue  # 含功能词 → 短语而非名字
+        if span in seen:
+            continue
+        if not (_window_has_directive(field_text, m.start(), m.end(), True)
+                or _window_has_directive(field_text, m.start(), m.end(), False)):
+            continue  # 无位置型替换指令佐证 → 拒绝（坏配对防线）
+        seen.add(span)
+        lo = max(0, m.start() - 15)
+        hi = min(len(field_text), m.end() + 15)
+        out.append((span, field_text[lo:hi].strip()))
+    return out
+
+
+def derive_name_pairs(part_text: str, consistency_result: dict, registry: dict) -> list:
+    """R4-2/R5-3: 推导显式 (错误名, 正确名) 配对（确定性，零相似度）。
+
+    来源三类（按 (a) → (b) → (c) 顺序执行，seen 去重先到先得）：
       (a) registry alias_candidates 中已按晋升规则生效的条目
           （同一 variant ≥2 次或带非空 evidence）；
       (b) consistency P0 issue 的 character 字段 token + description/location
-          中**同时字面包含**该 token（不在 registry）与某个 registry canonical 名。
+          中**同时字面包含**该 token（不在 registry）与某个 registry canonical 名；
+      (c) R5-3: issue 引文 span（description/suggestion/verdict）—— span 不在
+          registry、正文 count>0、且带位置型替换指令佐证（_DIRECTIVE_RE 紧邻），
+          与 description 中唯一字面出现的 canonical 配对。修不修不再取决于
+          character 字段写法（(b) 的盲区：character 只写规范名时配对为空）。
 
-    歧义即放弃：description/location 含多个 canonical 候选、不含任何
-    canonical 名、或错误名本身在 registry 中 → 不产配对（调用方落回重写）。
+    歧义即放弃：description 含多个 canonical 候选、不含任何 canonical
+    名、或错误名本身在 registry 中 → 不产配对（调用方落回重写）。
     只保留在正文中实际出现过的错误名（count > 0）。
 
     Returns:
         [{"wrong", "right", "source", "evidence"}, ...]（source ∈
-        {'alias_candidate', 'issue_character'}）
+        {'alias_candidate', 'issue_character', 'issue_quote'}）
     """
     if not isinstance(registry, dict) or not registry:
         return []
@@ -185,6 +262,22 @@ def derive_name_pairs(part_text: str, consistency_result: dict, registry: dict) 
             token = token.strip()
             if token and token not in registry and token in text and token != canonical:
                 _add(token, canonical, 'issue_character', desc)
+
+    # (c) R5-3: issue 引文 span + 位置型替换指令闸（desc/sugg/verdict 各自独立
+    # 判定指令位置，不跨字段拼接；canonical 歧义口径同 (b)：只看 description）
+    for issue in _p0_issues(consistency_result):
+        desc = (issue.get('description') or '').strip()
+        if not desc:
+            continue
+        present = [n for n in canonicals if n in desc]
+        if len(present) != 1:
+            continue  # 歧义（0 个或 ≥2 个 canonical）即放弃
+        canonical = present[0]
+        for field_text in (desc, (issue.get('suggestion') or '').strip(),
+                           (issue.get('verdict') or '').strip()):
+            for span, evidence in _directive_quoted_spans(field_text):
+                if span != canonical and span not in registry:
+                    _add(span, canonical, 'issue_quote', evidence)
     return pairs
 
 
