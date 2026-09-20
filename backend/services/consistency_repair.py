@@ -393,6 +393,17 @@ class ConsistencyRepairer:
         # R5-2: 定点修复重审后的二次定点硬顶（每次 _spotfix_names 调用重置）
         self._spotfix_retry_used = False
 
+    async def _emit_log(self, message: str) -> None:
+        """R5-S6（P1-2）: emitter + logger 双写。
+
+        verify 的 FakeEmitter.emit 是 pass —— 四段式回退/第二跳/完成消息只走
+        emitter 时全量跑日志不可见（P1-2 实证）。双写后运行日志可实时观测，
+        消息文本逐字保留（emoji 不变）。
+        """
+        await self.service.emitter.emit(EventType.LOG, {'message': message, 'work_id': self.service.work_id},
+                                        work_id=self.service.work_id)
+        logger.info(f'[ConsistencyRepairer] {message}')
+
     async def maybe_repair_part(self, part_num: int, part_text: str,
                                 logic_result: dict, consistency_result: dict,
                                 state_mock) -> dict:
@@ -509,11 +520,10 @@ class ConsistencyRepairer:
                               applied_verified=True, gates_passed=True)
             self._append_revision_log(part_num, p0_before, note, extra=spot_meta,
                                       trigger=trigger)
-            await s.emitter.emit(EventType.LOG, {
-                'message': (f'✅ Part {part_num} 姓名定点修复完成'
-                            f'（{spot_meta["wrong_name"]}→{spot_meta["right_name"]}，'
-                            f'重审 P0 归零，零重写零内容损失）'),
-                'work_id': s.work_id}, work_id=s.work_id)
+            await self._emit_log(
+                f'✅ Part {part_num} 姓名定点修复完成'
+                f'（{spot_meta["wrong_name"]}→{spot_meta["right_name"]}，'
+                f'重审 P0 归零，零重写零内容损失）')
             return note
 
         # 仍不过：回退保留原文（现有兜底语义不变），留痕供全量跑后审计
@@ -524,10 +534,9 @@ class ConsistencyRepairer:
         record_name_pairs(s.data, gated, part_num, trigger, gates_passed=True)
         self._append_revision_log(part_num, p0_before, note, extra=spot_meta,
                                   trigger=trigger)
-        await s.emitter.emit(EventType.LOG, {
-            'message': (f'↩️ Part {part_num} 姓名定点修复后仍有 {residual_p0} 个 P0，'
-                        f'回退保留原文（{spot_meta["wrong_name"]}→{spot_meta["right_name"]}）'),
-            'work_id': s.work_id}, work_id=s.work_id)
+        await self._emit_log(
+            f'↩️ Part {part_num} 姓名定点修复后仍有 {residual_p0} 个 P0，'
+            f'回退保留原文（{spot_meta["wrong_name"]}→{spot_meta["right_name"]}）')
         return note
 
     # ----------------- R4-5: 全文重写四段式 -----------------
@@ -557,9 +566,7 @@ class ConsistencyRepairer:
                 note = {'revision_attempted': True, 'revision_passed': False,
                         'revision_error': rewrite_error or 'rewrite_empty_or_too_short'}
                 self._append_revision_log(part_num, p0_before, note)
-                await s.emitter.emit(EventType.LOG, {
-                    'message': f'↩️ Part {part_num} 重写产物不可用，保留原文',
-                    'work_id': s.work_id}, work_id=s.work_id)
+                await self._emit_log(f'↩️ Part {part_num} 重写产物不可用，保留原文')
                 return note
 
             # 重审 Logic + Consistency（Emotion 不参与，不影响其评审结果）
@@ -599,11 +606,10 @@ class ConsistencyRepairer:
                 note = {'revision_attempted': True, 'revision_passed': False,
                         'residual_p0': residual_p0, 'revision_degraded': True}
                 self._append_revision_log(part_num, p0_before, note, trigger=trigger)
-                await s.emitter.emit(EventType.LOG, {
-                    'message': (f'↩️ Part {part_num} 重写导致劣化'
-                                f'（{current_p0_before}→{residual_p0} 或引入新问题类别），'
-                                f'已回退原文'),
-                    'work_id': s.work_id}, work_id=s.work_id)
+                await self._emit_log(
+                    f'↩️ Part {part_num} 重写导致劣化'
+                    f'（{current_p0_before}→{residual_p0} 或引入新问题类别），'
+                    f'已回退原文')
                 return note
 
             if residual_p0 <= 0:
@@ -621,9 +627,7 @@ class ConsistencyRepairer:
                     record_name_pairs(s.data, name_fix_pairs, part_num, 're_review',
                                       applied_verified=True, gates_passed=True)
                 self._append_revision_log(part_num, p0_before, note, trigger=trigger)
-                await s.emitter.emit(EventType.LOG, {
-                    'message': f'✅ Part {part_num} 重写修复完成（重审 P0 归零，{len(new_text)} 字）',
-                    'work_id': s.work_id}, work_id=s.work_id)
+                await self._emit_log(f'✅ Part {part_num} 重写修复完成（重审 P0 归零，{len(new_text)} 字）')
                 return note
 
             # 未归零：仅当严格改善且未达硬顶时允许第二轮（brief 附新引入问题清单）
@@ -631,20 +635,17 @@ class ConsistencyRepairer:
                 introduced = newly_introduced_problems(round_logic, round_cons, new_logic, new_cons)
                 round_logic, round_cons = new_logic, new_cons
                 current_p0_before = residual_p0
-                await s.emitter.emit(EventType.LOG, {
-                    'message': (f'🔁 Part {part_num} 第 {round_no} 轮重写严格改善'
-                                f'（残留 {residual_p0} 个 P0），进入第 {round_no + 1} 轮'
-                                f'（附第一轮新引入问题清单 {len(introduced)} 条）'),
-                    'work_id': s.work_id}, work_id=s.work_id)
+                await self._emit_log(
+                    f'🔁 Part {part_num} 第 {round_no} 轮重写严格改善'
+                    f'（残留 {residual_p0} 个 P0），进入第 {round_no + 1} 轮'
+                    f'（附第一轮新引入问题清单 {len(introduced)} 条）')
                 continue
 
             # 未改善或已达 2 轮硬顶：保留原文（恢复落盘），仅留痕
             s._save_chunk_progress(part_num, part_text, truncate(part_text, n=200, suffix='...'))
             note = {'revision_attempted': True, 'revision_passed': False, 'residual_p0': residual_p0}
             self._append_revision_log(part_num, p0_before, note, trigger=trigger)
-            await s.emitter.emit(EventType.LOG, {
-                'message': f'↩️ Part {part_num} 重写后仍有 {residual_p0} 个 P0，保留原文',
-                'work_id': s.work_id}, work_id=s.work_id)
+            await self._emit_log(f'↩️ Part {part_num} 重写后仍有 {residual_p0} 个 P0，保留原文')
             return note
 
         # 理论不可达（循环内每个分支都 return）；防御性保留原文

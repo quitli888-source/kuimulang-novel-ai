@@ -136,18 +136,18 @@ class ConsistencyReviewAgent(BaseAgent):
 
         # R4-6: 系统预检警告段（consistency_flags：退场再现 + 伏笔未回收，有则展示，
         # ≤10 行）—— 只加展示段，不动 schema、不动评分逻辑、不动其他分支
+        # R5-S6（P1-3 止损）: foreshadow_unrevealed 不再注入评审 prompt —— R4-6 实证
+        # 7/7 误报（Phase2 content 是剧情描述句，前 10 字子串命中结构上不可能成功），
+        # 继续注入只会干扰评审判断（20 Part 还会挤占 ≤10 行上限把退场 flag 截断掉）；
+        # work.json 留痕与 verify 汇总行不变（观测通道保留，只是不污染评审上下文）。
         flags_block = ''
         flags = getattr(state, 'consistency_flags', None) or []
         if isinstance(flags, list) and flags:
             flag_lines = []
-            for fl in flags[:10]:
-                if not isinstance(fl, dict):
-                    continue
-                if fl.get('type') == 'foreshadow_unrevealed':
-                    flag_lines.append(
-                        f"- Part {fl.get('part', '?')} 伏笔[{fl.get('foreshadow_id', '?')}] "
-                        f"未在正文中检出回收关键词（系统确定性复检）")
-                elif fl.get('character'):
+            visible = [fl for fl in flags
+                       if isinstance(fl, dict) and fl.get('type') != 'foreshadow_unrevealed']
+            for fl in visible[:10]:
+                if fl.get('character'):
                     flag_lines.append(
                         f"- Part {fl.get('part', '?')} 已退场角色 {fl.get('character')} 出现 "
                         f"{fl.get('count', '?')} 次（退场记录: {fl.get('departed_record', '?')}）")

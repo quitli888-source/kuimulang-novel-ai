@@ -692,6 +692,9 @@ class Phase4Runner:
             # 三个 agent 为独立实例、call_llm_json 每次自建 client，无共享可变状态；
             # Semaphore(3) 防 provider 限流。AGENT_CALL start 全部先发、end 按完成顺序发。
             review_semaphore = asyncio.Semaphore(3)
+            # R5-S6（P1-1）: 跨 Part 连续修复失败计数（达 3 告警不停机 —— 全量无人值守
+            # 跑的黑洞防线：修复回路持续失败必须有事前可见的信号）
+            consec_fail = 0
 
             async def _run_review(agent, kind: str, part_num: int, part_text: str) -> dict:
                 async with review_semaphore:
@@ -717,6 +720,7 @@ class Phase4Runner:
                 await s.emitter.emit(EventType.AGENT_CALL, {'agent': 'consistency_review_agent', 'part': part_num, 'status': 'end', 'message': f'Part {part_num} 一致性检查完成', 'work_id': s.work_id}, work_id=s.work_id)
                 per_part_results.append({'part': part_num, 'logic_result': logic_result if isinstance(logic_result, dict) else {}, 'emotion_result': emotion_result if isinstance(emotion_result, dict) else {}, 'consistency_result': consistency_result if isinstance(consistency_result, dict) else {}})
                 # R1-J: P0 定向修复回路（最多 1 轮重写；无 P0 时零行为变化）
+                repair_note = None
                 try:
                     from services.consistency_repair import ConsistencyRepairer
                     repairer = ConsistencyRepairer(s, logic_agent, consistency_agent)
@@ -727,6 +731,19 @@ class Phase4Runner:
                         logger.info(f'[Phase4Runner] Part {part_num} 修复回路: {repair_note.get("revision_passed")}')
                 except Exception as repair_err:
                     logger.info(f'[Phase4Runner] Part {part_num} 修复回路异常（保留原文，不影响主流程）: {repair_err}')
+                # R5-S6（P1-1）: 连续修复失败告警（达 3 告警不停机，resume/人工可查
+                # revision_log；无修复或修复通过的 Part 清零计数）
+                if repair_note and repair_note.get('revision_attempted'):
+                    if repair_note.get('revision_passed'):
+                        consec_fail = 0
+                    else:
+                        consec_fail += 1
+                        if consec_fail >= 3:
+                            logger.warning(
+                                f'[Phase4Runner] 连续 {consec_fail} 个 Part 修复未通过'
+                                f'（最近: Part {part_num}），建议人工介入核查 revision_log')
+                else:
+                    consec_fail = 0
                 if part_nums:
                     part_progress = 85 + idx / len(part_nums) * 10
                     s.progress_callback(int(part_progress), f'Part {part_num} 评审完成 ({idx}/{len(part_nums)})')

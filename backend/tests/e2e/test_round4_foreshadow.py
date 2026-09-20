@@ -179,13 +179,23 @@ def test_review_state_mock_carries_consistency_flags(tmp_path):
 
 
 def test_consistency_prompt_shows_flags_block():
-    """R4-6 验收: consistency user_prompt 尾部在 mock 下含系统预检警告段（≤10 行）。"""
+    """R4-6/R5-S6 验收: consistency user_prompt 尾部在 mock 下含系统预检警告段。
+
+    R5-S6（P1-3 止损）: foreshadow_unrevealed 不再注入评审 prompt（R4-6 实证
+    7/7 误报，Phase2 content 是剧情描述句、前 10 字子串命中结构上不可能成功）——
+     fixture 改为 departed_reappearance 型 flags + 混入 2 条伏笔 flag，断言：
+    警告段仍在、退场 flag 展示且 ≤10 行截断仍成立（第 11 条起不展示）、伏笔 id
+    不出现在警告段、无 flags 时不出现警告段。work.json 留痕与 verify 汇总行不变
+    （test_phase3_foreshadow_flags_written_to_work_json /
+    test_summarize_consistency_flags_line 不许改）。
+    """
     from core.agents.consistency_review_agent import ConsistencyReviewAgent
     chars = [{'name': '林尘', 'role': '主角', 'identity': '少年', 'core_trait': '坚忍',
               'motivation': '寻道', 'secret': '血脉'}]
-    flags = ([{'part': i, 'type': 'foreshadow_unrevealed', 'foreshadow_id': f'FS_{i}'}
-              for i in range(1, 13)]   # 12 条伏笔未回收
-             + [{'part': 9, 'character': '林忠', 'count': 3, 'departed_record': 'Part2 死亡'}])
+    flags = ([{'part': i, 'character': f'林忠{i}', 'count': 2,
+               'departed_record': 'Part2 死亡'} for i in range(1, 13)]   # 12 条退场再现
+             + [{'part': 9, 'type': 'foreshadow_unrevealed', 'foreshadow_id': 'FS_X'},
+                {'part': 10, 'type': 'foreshadow_unrevealed', 'foreshadow_id': 'FS_Y'}])
     state = SimpleNamespace(
         work_id='r4', characters=chars, part_summaries={'1': '摘要'},
         parts={'1': '林尘踏入禁地。' * 50}, final_draft={'1': 'x'},
@@ -201,21 +211,28 @@ def test_consistency_prompt_shows_flags_block():
         ConsistencyReviewAgent().execute(state, 2, '林渊继续前行。' * 30)
     up = captured['user_prompt']
     assert '⚠ 系统预检警告' in up, '有 flags 时必须展示警告段'
-    assert 'FS_1' in up and 'FS_7' in up
-    assert '勿仅因此判 P0' in up
-    # 超过 10 条只展示前 10 行（第 11 条起的伏笔与退场 flag 均不展示）
+    assert '林忠1' in up and '林忠7' in up and '勿仅因此判 P0' in up
+    # 超过 10 条只展示前 10 行（第 11 条起的退场 flag 不展示）
     warn_idx = up.index('⚠ 系统预检警告')
     warn_lines = [l for l in up[warn_idx:].splitlines() if l.strip().startswith('- Part')]
     assert len(warn_lines) == 10, f'警告段应 ≤10 行: {len(warn_lines)}'
-    assert 'FS_10' in up[warn_idx:]
-    assert 'FS_11' not in up[warn_idx:], '第 11 条起不得展示'
-    assert '已退场角色' not in up[warn_idx:], '超出 10 条上限的退场 flag 不得展示'
+    assert '林忠10' in up[warn_idx:]
+    assert '林忠11' not in up[warn_idx:], '第 11 条起不得展示'
+    # R5-S6: 伏笔误报不再注入评审 prompt（只保留 work.json 留痕 + verify 汇总行）
+    assert 'FS_X' not in up and 'FS_Y' not in up, '伏笔 flag 不得进警告段'
+    assert '未在正文中检出回收关键词' not in up
     # 无 flags 时不出现警告段
     state_no_flags = SimpleNamespace(**{**vars(state), 'consistency_flags': []})
     with patch('core.agents.consistency_review_agent.call_llm_json', side_effect=fake_json):
         ConsistencyReviewAgent().execute(state_no_flags, 2, '林渊继续前行。' * 30)
     assert '系统预检警告' not in captured['user_prompt']
-    logger.info('[test_prompt_flags] PASS: 警告段展示/截断/无 flags 不展示')
+    # 纯伏笔 flags（无退场 flag）→ 不出现警告段（止损后无展示内容）
+    state_fs_only = SimpleNamespace(**{**vars(state), 'consistency_flags': [
+        {'part': 3, 'type': 'foreshadow_unrevealed', 'foreshadow_id': 'FS_Z'}]})
+    with patch('core.agents.consistency_review_agent.call_llm_json', side_effect=fake_json):
+        ConsistencyReviewAgent().execute(state_fs_only, 2, '林渊继续前行。' * 30)
+    assert '系统预检警告' not in captured['user_prompt'], '纯伏笔 flags 不得生成警告段'
+    logger.info('[test_prompt_flags] PASS: 退场 flag 展示/截断/伏笔止损/无 flags 不展示')
 
 
 def test_summarize_consistency_flags_line():
