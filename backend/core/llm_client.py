@@ -263,6 +263,15 @@ def call_llm(system_prompt: str, user_prompt: str, temperature: float=0.7, max_t
                     usage = last_chunk.usage
                 if usage is not None:
                     logger.info(f'    [LLM] Token使用: prompt={usage.prompt_tokens}, completion={usage.completion_tokens}, total={usage.total_tokens}')
+                    # S6: reasoning 明细可观测化 —— step 等推理模型的
+                    # completion_tokens_details.reasoning_tokens 计入 max_tokens 预算
+                    # （OpenAI Reasoning 指南：预算耗尽时可能"零可见文本即 length"）。
+                    # getattr 链兜底：供应商不返回该字段时自然无日志；只观测不改行为
+                    # （不碰重试/判定/record schema —— schema 部分牵连
+                    # test_cost_persist 5 项，降级 Round 4）。
+                    reasoning_tokens = getattr(getattr(usage, 'completion_tokens_details', None), 'reasoning_tokens', None)
+                    if reasoning_tokens:
+                        logger.info(f'    [LLM] reasoning_tokens={reasoning_tokens}/{usage.completion_tokens}（推理占用，计入 max_tokens 预算）')
                     tracker.record(model=model_name, agent=agent, is_json=False, prompt_tokens=usage.prompt_tokens or 0, completion_tokens=usage.completion_tokens or 0, total_tokens=usage.total_tokens or 0, duration_ms=call_duration)
                 else:
                     try:

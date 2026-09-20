@@ -38,6 +38,59 @@ def test_no_undefined_names_f821():
     assert r.returncode == 0, f'存在未定义变量（F821）:\n{r.stdout}{r.stderr}'
 
 
+# ---------------- S6: reasoning_tokens 可观测化 ----------------
+
+def test_reasoning_tokens_logged_when_present(caplog):
+    """S6: usage 带 completion_tokens_details.reasoning_tokens 时，日志出现
+    reasoning_tokens=<n>/<completion>（冒烟/全量跑后由 Tester 统计占比，
+    作为 Round 4 KML_*_MAX_TOKENS 预算校准的输入）。"""
+    import logging
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from core import llm_client
+
+    class _Completions:
+        def create(self, **kwargs):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content='正文' * 100),
+                                         finish_reason='stop')],
+                usage=SimpleNamespace(prompt_tokens=100, completion_tokens=6000,
+                                      total_tokens=6100,
+                                      completion_tokens_details=SimpleNamespace(reasoning_tokens=5000)))
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=_Completions()))
+    with patch.object(llm_client, '_get_client_for_agent', lambda agent: (client, 'step-5-preview')):
+        with caplog.at_level(logging.INFO, logger='kuaimulang.llm_client'):
+            out = llm_client.call_llm(system_prompt='s', user_prompt='u', max_tokens=8000)
+    assert out, 'fake 应返回正文'
+    assert any('reasoning_tokens=5000/6000' in r.message for r in caplog.records), (
+        f'未观察到 reasoning_tokens 日志: {[r.message for r in caplog.records if "Token" in r.message or "reasoning" in r.message]}')
+
+
+def test_reasoning_tokens_absent_no_log(caplog):
+    """S6 反向: fake usage 无 completion_tokens_details（step 供应商现状）→
+    无 reasoning_tokens 日志、调用正常返回（getattr 链兜底，零行为变化）。"""
+    import logging
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from core import llm_client
+
+    class _Completions:
+        def create(self, **kwargs):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content='正文' * 100),
+                                         finish_reason='stop')],
+                usage=SimpleNamespace(prompt_tokens=100, completion_tokens=6000, total_tokens=6100))
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=_Completions()))
+    with patch.object(llm_client, '_get_client_for_agent', lambda agent: (client, 'step-5-preview')):
+        with caplog.at_level(logging.INFO, logger='kuaimulang.llm_client'):
+            out = llm_client.call_llm(system_prompt='s', user_prompt='u', max_tokens=8000)
+    assert out
+    assert not any('reasoning_tokens=' in r.message for r in caplog.records), (
+        '无 completion_tokens_details 时不应出现 reasoning_tokens 日志')
+
+
 if __name__ == '__main__':
     test_no_undefined_names_f821()
     print('PASS test_no_undefined_names_f821')
