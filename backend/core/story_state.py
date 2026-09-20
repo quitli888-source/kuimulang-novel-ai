@@ -86,8 +86,14 @@ class StoryState:
                 if hasattr(self, "established_facts") else {"version": 1, "facts": []},
         }
 
-        with open(filepath, "w", encoding="utf-8") as f:
+        # R4-P2-x: 原子写 —— 此前 open('w') + json.dump 非原子，崩溃即留下截断的
+        # state 文件，之后 load() 直接 JSONDecodeError。tmp + os.replace 保证
+        # 任何时刻文件要么旧版要么新版。
+        tmp_path = str(filepath) + '.tmp'
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        import os as _os
+        _os.replace(tmp_path, filepath)
 
     def load(self, filepath: str = None):
         """从JSON文件加载状态"""
@@ -108,6 +114,11 @@ class StoryState:
                 self.established_facts.clear()
                 self.established_facts.from_dict(value or {})
                 continue
+            # R4-P1-x: JSON 对象键必为 str —— parts/part_summaries/final_draft 归一化为
+            # int 键，否则 load 后 `prev_part in self.parts`（int 查 str dict）恒 False、
+            # sorted() 变字典序（"10" < "2"）、p_num < current_part 混比直接 TypeError。
+            if key in ("parts", "part_summaries", "final_draft") and isinstance(value, dict):
+                value = {int(k): v for k, v in value.items() if str(k).isdigit()}
             setattr(self, key, value)
 
     def get_part_context(self, part_num: int) -> str:

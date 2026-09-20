@@ -3,6 +3,7 @@
 V5.1改动：添加会话管理功能
 """
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -13,6 +14,10 @@ from core.session_manager import session_manager
 from core.logger import get_logger
 logger = get_logger('works')
 router = APIRouter()
+
+# R4-P0-3: work_id 白名单 —— URL path 参数未校验时，Windows 下 %5C 反斜杠可穿越
+# WORKS_DIR（..\..\Music），导致任意 JSON 读/写与目录树删除。
+_WORK_ID_RE = re.compile(r'^[0-9a-zA-Z_-]{1,64}$')
 
 class CreateWorkRequest(BaseModel):
     title: str
@@ -30,8 +35,17 @@ class CreateSessionRequest(BaseModel):
 class UpdateSessionRequest(BaseModel):
     title: str
 
+def _validate_work_id(work_id: str) -> str:
+    if not work_id or not _WORK_ID_RE.match(work_id):
+        raise HTTPException(400, '非法作品ID')
+    return work_id
+
 def get_work_file(work_id: str) -> Path:
-    return WORKS_DIR / f'{work_id}.json'
+    _validate_work_id(work_id)
+    path = (WORKS_DIR / f'{work_id}.json').resolve()
+    if path.parent != WORKS_DIR.resolve():
+        raise HTTPException(400, '非法作品ID')
+    return path
 
 def list_works() -> list[dict]:
     """列出所有作品"""
@@ -40,7 +54,9 @@ def list_works() -> list[dict]:
         try:
             data = json.loads(f.read_text(encoding='utf-8'))
             works.append({'id': data.get('id', f.stem), 'title': data.get('title', '未命名'), 'inspiration': data.get('inspiration', ''), 'created_at': data.get('created_at', ''), 'updated_at': data.get('updated_at', ''), 'phase': data.get('phase', 'init'), 'word_count': data.get('word_count', 0)})
-        except:
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+            # P1-86: 区分错误类型；JSON 损坏 / 编码错误 / IO 错误分别 log warning，便于排障
+            logger.warning(f'[works.list_works] 跳过损坏的作品文件 {f.name}: {type(e).__name__}: {e}')
             continue
     works.sort(key=lambda x: x.get('updated_at', ''), reverse=True)
     return works
@@ -65,11 +81,16 @@ def get_work(work_id: str):
     path = get_work_file(work_id)
     if not path.exists():
         raise HTTPException(404, '作品不存在')
-    data = json.loads(path.read_text(encoding='utf-8'))
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        logger.warning(f'[works.get_work] 作品文件损坏 {work_id}: {type(e).__name__}: {e}')
+        raise HTTPException(500, '作品文件损坏，无法读取')
     try:
         from core.cost_tracker import get_tracker
-        tracker = get_tracker()
-        tracker.attach_work(work_id, data.get('cost_summary'))
+        # R4-P1-x: 用 per-work tracker 读成本——此前 get_tracker() 返回全局共享实例并
+        # attach_work 重绑其 _persist_path，导致全局累计成本串写到该作品的 .cost.json。
+        tracker = get_tracker(work_id=work_id)
         data['cost_summary'] = tracker.get_summary()
         try:
             total_parts = max(len(data.get('parts', {}) or {}), len(data.get('part_outline', []) or []), 0)

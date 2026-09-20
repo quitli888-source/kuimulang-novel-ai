@@ -31,14 +31,49 @@ class SessionManager:
         Returns:
             str: 会话ID
         """
+        import os as _os
         session_id = str(uuid.uuid4())
         session_data = {'session_id': session_id, 'title': title or f"创作会话_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}", 'inspiration': inspiration, 'created_at': datetime.now().isoformat(), 'updated_at': datetime.now().isoformat(), 'status': 'active', 'phase': 'init'}
         session_meta_path = self.sessions_dir / f'{session_id}.json'
-        with open(session_meta_path, 'w', encoding='utf-8') as f:
-            json.dump(session_data, f, ensure_ascii=False, indent=2)
+
+        # P1-93: 先写临时文件 + os.replace 原子替换（替代之前的两次顺序 write）
+        tmp_meta = session_meta_path.with_suffix('.json.tmp')
+        try:
+            with open(tmp_meta, 'w', encoding='utf-8') as f:
+                json.dump(session_data, f, ensure_ascii=False, indent=2)
+            _os.replace(tmp_meta, session_meta_path)
+        except Exception as meta_err:
+            logger.info(f'[session_manager] session_meta 写盘失败: {meta_err}')
+            try:
+                if tmp_meta.exists():
+                    tmp_meta.unlink()
+            except Exception:
+                logger.debug('session_manager: silent except (P2-19)', exc_info=True)
+            raise
+
         story_state = StoryState(inspiration)
         story_state.phase = 'init'
-        story_state.save(self._get_state_path(session_id))
+        # P1-93: 同样走原子替换，避免进程崩溃在两次 write 中间产生 orphan state file
+        state_path = self._get_state_path(session_id)
+        tmp_state = state_path.with_suffix(state_path.suffix + '.tmp') if state_path.suffix else state_path.with_suffix('.tmp')
+        try:
+            story_state.save(str(tmp_state))
+            _os.replace(tmp_state, state_path)
+        except Exception as state_err:
+            logger.info(f'[session_manager] story_state 写盘失败: {state_err}')
+            try:
+                if tmp_state.exists():
+                    tmp_state.unlink()
+            except Exception:
+                logger.debug('session_manager: silent except (P2-19)', exc_info=True)
+            # state 写失败时把已经写好的 meta 也回滚，避免出现 meta 在但 state 不在的悬空状态
+            try:
+                if session_meta_path.exists():
+                    session_meta_path.unlink()
+            except Exception:
+                logger.debug('session_manager: silent except (P2-19)', exc_info=True)
+            raise
+
         self.current_session_id = session_id
         return session_id
 
@@ -180,6 +215,15 @@ class SessionManager:
         """
         return self.sessions_dir / f'{session_id}_state.json'
 
+    def _write_session_meta_atomic(self, session_meta_path: Path, session_data: dict):
+        """R4-P2-x: 原子写会话 meta —— 读-改-写 + 直接覆写会让并发/崩溃后的
+        meta 文件丢失字段或留下截断 JSON。"""
+        tmp_path = session_meta_path.with_suffix('.json.tmp')
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(session_data, f, ensure_ascii=False, indent=2)
+        import os as _os
+        _os.replace(tmp_path, session_meta_path)
+
     def _update_session_timestamp(self, session_id: str):
         """
         更新会话时间戳
@@ -193,8 +237,7 @@ class SessionManager:
             with open(session_meta_path, 'r', encoding='utf-8') as f:
                 session_data = json.load(f)
             session_data['updated_at'] = datetime.now().isoformat()
-            with open(session_meta_path, 'w', encoding='utf-8') as f:
-                json.dump(session_data, f, ensure_ascii=False, indent=2)
+            self._write_session_meta_atomic(session_meta_path, session_data)
         except Exception as e:
             logger.info(f'更新会话时间戳失败: {e}')
 
@@ -219,8 +262,7 @@ class SessionManager:
                 status = 'active'
             session_data['status'] = status
             session_data['phase'] = phase
-            with open(session_meta_path, 'w', encoding='utf-8') as f:
-                json.dump(session_data, f, ensure_ascii=False, indent=2)
+            self._write_session_meta_atomic(session_meta_path, session_data)
         except Exception as e:
             logger.info(f'更新会话状态失败: {e}')
 session_manager = SessionManager()

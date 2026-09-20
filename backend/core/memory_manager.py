@@ -45,22 +45,23 @@ class MemoryManager:
         result.extend(self._process_memory_file(managed_path, MemoryType.MANAGED, processed_paths, force_include_external))
         user_path = self.memory_dir / 'user' / 'MEMORY.md'
         result.extend(self._process_memory_file(user_path, MemoryType.USER, processed_paths, True))
+
+        # P2-104: 项目 CLAUDE.md 扫描从 CWD 一路走到 /，每次访问都 path.exists() + path.is_file()，
+        # 实际全是 NoOp（项目根 / kuimulang-novel-ai / 用户主目录都没有 CLAUDE.md）。
+        # 这里改为"仅扫 1 次项目根 + CWD 当前目录"，移除从 / 开始的全树爬升。
         project_dir = Path.cwd()
-        while project_dir != project_dir.parent:
-            project_path = project_dir / 'CLAUDE.md'
-            result.extend(self._process_memory_file(project_path, MemoryType.PROJECT, processed_paths, force_include_external))
-            dot_claude_path = project_dir / '.claude' / 'CLAUDE.md'
-            result.extend(self._process_memory_file(dot_claude_path, MemoryType.PROJECT, processed_paths, force_include_external))
-            rules_dir = project_dir / '.claude' / 'rules'
-            if rules_dir.exists() and rules_dir.is_dir():
-                for md_file in rules_dir.glob('*.md'):
-                    result.extend(self._process_memory_file(md_file, MemoryType.PROJECT, processed_paths, force_include_external))
-            project_dir = project_dir.parent
+        project_path = project_dir / 'CLAUDE.md'
+        result.extend(self._process_memory_file(project_path, MemoryType.PROJECT, processed_paths, force_include_external))
+        dot_claude_path = project_dir / '.claude' / 'CLAUDE.md'
+        result.extend(self._process_memory_file(dot_claude_path, MemoryType.PROJECT, processed_paths, force_include_external))
+        rules_dir = project_dir / '.claude' / 'rules'
+        if rules_dir.exists() and rules_dir.is_dir():
+            for md_file in rules_dir.glob('*.md'):
+                result.extend(self._process_memory_file(md_file, MemoryType.PROJECT, processed_paths, force_include_external))
+
         local_dir = Path.cwd()
-        while local_dir != local_dir.parent:
-            local_path = local_dir / 'CLAUDE.local.md'
-            result.extend(self._process_memory_file(local_path, MemoryType.LOCAL, processed_paths, force_include_external))
-            local_dir = local_dir.parent
+        local_path = local_dir / 'CLAUDE.local.md'
+        result.extend(self._process_memory_file(local_path, MemoryType.LOCAL, processed_paths, force_include_external))
         return result
 
     def _process_memory_file(self, path: Path, memory_type: str, processed_paths: Set[str], include_external: bool) -> List[MemoryFileInfo]:

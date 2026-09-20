@@ -15,6 +15,9 @@ R17-P0-2: 节流写盘（每 N 条/T 秒 flush 一次）+ fcntl.flock 防多 wor
          estimated=True 记录不写入磁盘（避免 600+ 估算污染持久化历史）。
 """
 import json
+import os
+import re
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -37,7 +40,11 @@ class CostTracker:
         self._persisted_summary: dict = {}
         self._last_flush_ts: float = time.time()
         self._last_flush_count: int = 0
+        self._real_count: int = 0  # P0-80: O(1) 计数，替代 record() 里 O(N) 的 list 遍历
         self._dirty: bool = False
+        # R4-P2-x: 线程锁 —— record/_flush_to_disk/_trackers 此前无保护，
+        # 当前 async 单线程下侥幸安全，接入线程池后并发 append/flush 会损坏 calls。
+        self._lock = threading.RLock()
 
     def attach_work(self, work_id: str, work_cost_summary: Optional[dict]=None, persist_dir: Optional[Path]=None) -> None:
         """R5-P0-3: 把 cost_tracker 绑定到 work_id，同时从 work JSON 的 cost_summary
@@ -73,6 +80,7 @@ class CostTracker:
             if isinstance(calls, list) and calls:
                 existing_keys = {(c.get('timestamp'), c.get('model'), c.get('agent'), c.get('prompt_tokens'), c.get('completion_tokens')) for c in self.calls}
                 added = 0
+                added_real = 0
                 for c in calls:
                     if not isinstance(c, dict):
                         continue
@@ -82,47 +90,66 @@ class CostTracker:
                     self.calls.append(c)
                     existing_keys.add(sig)
                     added += 1
+                    if not c.get('estimated'):
+                        added_real += 1
                 if added:
                     logger.info(f'[cost_tracker] attach_work 从 work_cost_summary 恢复 {added} 条历史')
-                self._last_flush_count = len([c for c in self.calls if not c.get('estimated')])
+                # P0-80: O(1) 计数器；用增量而非每次重新遍历 self.calls
+                self._real_count += added_real
+                self._last_flush_count = self._real_count
             self._persisted_summary = {k: v for k, v in work_cost_summary.items() if k != 'calls'}
 
     def record(self, model: str, agent: str, is_json: bool, prompt_tokens: int, completion_tokens: int, total_tokens: int, duration_ms: float, estimated: bool=False):
         """记录一次LLM调用。R7-P0-3: estimated=True 表示 token 数是基于文本长度估算（非 provider 上报）。
         R17-P0-2: 估算记录不入盘（避免污染持久化历史）；真实记录节流写盘（每 20 条或 30s）。
+
+        P0-80 修复：用 self._real_count 计数器取代每次 O(N) 的 len([...]) 扫描；
+        旧实现每次 record 都会遍历 self.calls，100 Part × 30 calls/Part = 45 万次比较。
         """
-        self.calls.append({'timestamp': round(time.time() - self._start_time, 1), 'model': model, 'agent': agent, 'is_json': is_json, 'prompt_tokens': prompt_tokens, 'completion_tokens': completion_tokens, 'total_tokens': total_tokens, 'duration_ms': round(duration_ms, 0), 'estimated': bool(estimated)})
-        if estimated and (not self.PERSIST_ESTIMATED):
-            return
-        self._dirty = True
-        real_added = self.calls.count(None) if False else len([c for c in self.calls if not c.get('estimated')])
-        if real_added - self._last_flush_count >= self.FLUSH_EVERY_N_RECORDS or time.time() - self._last_flush_ts >= self.FLUSH_EVERY_N_SECONDS:
+        is_estimated = bool(estimated)
+        with self._lock:
+            self.calls.append({'timestamp': round(time.time() - self._start_time, 1), 'model': model, 'agent': agent, 'is_json': is_json, 'prompt_tokens': prompt_tokens, 'completion_tokens': completion_tokens, 'total_tokens': total_tokens, 'duration_ms': round(duration_ms, 0), 'estimated': is_estimated})
+            if not is_estimated:
+                self._real_count += 1
+            if is_estimated and (not self.PERSIST_ESTIMATED):
+                return
+            self._dirty = True
+            should_flush = self._real_count - self._last_flush_count >= self.FLUSH_EVERY_N_RECORDS or time.time() - self._last_flush_ts >= self.FLUSH_EVERY_N_SECONDS
+        if should_flush:
             self._flush_to_disk()
 
     def _flush_to_disk(self) -> None:
         """R4-P1-7: 把当前 self.calls 序列化为 JSON 写到 _persist_path。
         R17: 加 fcntl.flock 文件锁防多 worker 冲突；估算记录不写入磁盘。
+        R4-P2-x: 原子替换（tmp + os.replace）+ 实例锁保护并发 flush。
         """
         if not self._persist_path or not self._dirty:
             return
-        try:
-            persist_calls = [c for c in self.calls if not c.get('estimated')] if not self.PERSIST_ESTIMATED else list(self.calls)
-            payload = json.dumps(persist_calls, ensure_ascii=False, indent=2)
+        with self._lock:
             try:
-                import fcntl
-                with open(self._persist_path, 'w', encoding='utf-8') as f:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                    try:
-                        f.write(payload)
-                    finally:
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-            except (ImportError, AttributeError):
-                self._persist_path.write_text(payload, encoding='utf-8')
-            self._last_flush_ts = time.time()
-            self._last_flush_count = len(persist_calls)
-            self._dirty = False
-        except Exception as e:
-            logger.info(f'[cost_tracker] _flush_to_disk 失败（不影响主流程）: {e}')
+                persist_calls = [c for c in self.calls if not c.get('estimated')] if not self.PERSIST_ESTIMATED else list(self.calls)
+                payload = json.dumps(persist_calls, ensure_ascii=False, indent=2)
+                try:
+                    import fcntl
+                    # R4-P2-x: 先写临时文件再 os.replace —— 此前 open(path,'w') 在 flock 之前
+                    # 就截断文件，锁等待期间的读者会看到空/半截 .cost.json。
+                    tmp_path = self._persist_path.with_suffix('.json.tmp')
+                    with open(tmp_path, 'w', encoding='utf-8') as f:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                        try:
+                            f.write(payload)
+                        finally:
+                            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                    os.replace(tmp_path, self._persist_path)
+                except (ImportError, AttributeError):
+                    tmp_path = self._persist_path.with_suffix('.json.tmp')
+                    tmp_path.write_text(payload, encoding='utf-8')
+                    os.replace(tmp_path, self._persist_path)
+                self._last_flush_ts = time.time()
+                self._last_flush_count = len(persist_calls)
+                self._dirty = False
+            except Exception as e:
+                logger.info(f'[cost_tracker] _flush_to_disk 失败（不影响主流程）: {e}')
 
     def force_flush(self) -> None:
         """R17: 强制立即 flush（用于 Part 写完 / 任务结束 / 关键 checkpoint）"""
@@ -153,8 +180,13 @@ class CostTracker:
         return {'total_calls': len(self.calls), 'total_tokens': total, 'prompt_tokens': total_prompt, 'completion_tokens': total_completion, 'estimated_cost_rmb': cost_rounded, 'estimated_cost': cost_rounded, 'total_duration_ms': round(total_duration, 0), 'model_breakdown': {m: round(c, 4) for m, c in model_costs.items()}, 'calls': list(self.calls)}
 
     def get_per_part_summary(self, part_num: int) -> dict:
-        """获取某个Part的成本"""
-        part_calls = [c for c in self.calls if f'Part {part_num}' in c.get('agent', '')]
+        """获取某个Part的成本
+
+        R4-P1-x: agent 名精确匹配 Part 号——此前用 f'Part {part_num}' in agent 子串匹配，
+        'Part 1' 会命中 'Part 10'~'Part 19'/'Part 1xx'，per-part 成本串号。
+        匹配形如 'Part 10 ...' / 'Part 10_...' 且后续不是数字的调用。
+        """
+        part_calls = [c for c in self.calls if self._agent_matches_part(c.get('agent', ''), part_num)]
         if not part_calls:
             return {'total_tokens': 0, 'calls': 0, 'estimated_cost_rmb': 0.0, 'estimated_cost': 0.0}
         total_prompt = sum((c['prompt_tokens'] for c in part_calls))
@@ -164,6 +196,16 @@ class CostTracker:
         cost = (total_prompt * pricing['input'] + total_completion * pricing['output']) / 1000000
         cost_rounded = round(cost, 4)
         return {'total_tokens': total_prompt + total_completion, 'calls': len(part_calls), 'estimated_cost_rmb': cost_rounded, 'estimated_cost': cost_rounded}
+
+    @staticmethod
+    def _agent_matches_part(agent: str, part_num: int) -> bool:
+        """agent 名中的 Part 号精确匹配：'Part 3 writer' 命中 3，不命中 30/31。"""
+        if not agent:
+            return False
+        for m in re.finditer(r'Part[ _](\d+)', agent):
+            if int(m.group(1)) == part_num:
+                return True
+        return False
 
     def should_prompt_for_cost(self, work_id: Optional[str]=None, threshold: Optional[float]=None) -> bool:
         """R3-P1-6: 熔断判定 — 当前累计预估成本是否超过阈值。
@@ -189,6 +231,9 @@ class CostTracker:
         """重置追踪器"""
         self.calls = []
         self._start_time = time.time()
+        self._real_count = 0  # P0-80: 同步清零
+        self._last_flush_count = 0
+        self._last_flush_ts = time.time()
 _tracker = None
 _trackers: dict[str, CostTracker] = {}
 

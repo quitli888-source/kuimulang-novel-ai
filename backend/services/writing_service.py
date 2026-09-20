@@ -7,6 +7,8 @@ R27-P1-7: 各阶段实现搬到 services/writing_phase_runners.py
 """
 import json
 import asyncio
+import os
+from typing import Optional
 from api.sse import SSEEmitter, EventType
 from api.works import get_work_file
 from core.config import get_app_config
@@ -14,6 +16,7 @@ from core.progress_manager import progress_manager
 from core.error_handler import error_handler
 from core.memory_manager import get_all_memory
 from core.sliding_window import SlidingWindow
+from core.text_utils import truncate
 from core.logger import get_logger
 logger = get_logger('writing_service')
 
@@ -26,6 +29,7 @@ class TempStoryState:
     """临时故事状态类，用于构建 PartWriterAgent 所需的上下文"""
 
     def __init__(self, data, memory=None, vector_store=None):
+        self.work_id = data.get('id', '') or ''  # P1-87: 用于 per-work cost_tracker 路由
         self.inspiration = data.get('inspiration', '')
         self.core_elements = data.get('core_elements', {})
         self.market_positioning = data.get('market_positioning', {})
@@ -211,6 +215,10 @@ class WritingService:
         saved_phase = str(self.data.get('phase', 'init') or 'init')
         skip_to_part = 0
         phase_already_4 = False
+        # R4-P1-x: resume 到 phase1/phase2 时按数据存在性跳过——此前只处理 phase3_part/phase4，
+        # docstring 承诺的"phase1 完成→跳过"从未实现，resume 会把 Phase1/2 全量重跑并覆盖已有规划。
+        skip_planning = False   # Phase1+2 均已完成
+        skip_phase1_only = False  # 仅 Phase1 已完成（core_elements 存在但 outline 为空）
         if self.resume and saved_phase.startswith('phase3_part'):
             try:
                 skip_to_part = int(saved_phase.replace('phase3_part', ''))
@@ -218,6 +226,18 @@ class WritingService:
                 skip_to_part = 0
         elif self.resume and saved_phase == 'phase4':
             phase_already_4 = True
+        elif self.resume and saved_phase in ('phase1', 'phase2'):
+            has_core = bool(self.data.get('core_elements'))
+            has_outline = bool(self.data.get('part_outline'))
+            if has_core and has_outline:
+                skip_planning = True
+                parts_keys = [int(k) for k in (self.data.get('parts') or {}) if str(k).isdigit()]
+                if parts_keys:
+                    skip_to_part = max(parts_keys)
+                logger.info(f'[WritingService] resume: Phase1+2 均已完成，跳过规划阶段（已有 {skip_to_part} 个 Part）')
+            elif has_core:
+                skip_phase1_only = True
+                logger.info('[WritingService] resume: Phase1 已完成，仅重跑 Phase2 情节规划')
         if phase_already_4:
             logger.info(f'[WritingService] resume 命中 phase4，直接 emit FINAL')
             await self.emitter.emit(EventType.FINAL, {'work_id': self.work_id, 'total_parts': self.cfg.part_count, 'resumed': True}, work_id=self.work_id)
@@ -231,14 +251,18 @@ class WritingService:
                 self.progress_callback(start_progress, f'恢复创作，已完成 {skip_to_part} 个 Part')
             else:
                 self.progress_callback(0, '开始创作流程')
-            if skip_to_part == 0:
-                logger.info('[WritingService] 进入Phase 1: 灵感解析')
-                self.progress_callback(5, '开始灵感解析')
-                await self._phase1_planning()
-                logger.info('[WritingService] Phase 1完成')
-                self.progress_callback(25, '灵感解析完成')
-                if self.cfg.confirm_mode:
-                    await self._request_confirm('phase1_complete', '✨ 灵感解析已完成！\n\n已生成以下内容：\n- 主角设定\n- 题材分类\n- 世界观基础\n\n是否继续进行情节规划？')
+            if skip_to_part == 0 and not skip_planning:
+                if not skip_phase1_only:
+                    logger.info('[WritingService] 进入Phase 1: 灵感解析')
+                    self.progress_callback(5, '开始灵感解析')
+                    await self._phase1_planning()
+                    logger.info('[WritingService] Phase 1完成')
+                    self.progress_callback(25, '灵感解析完成')
+                    if self.cfg.confirm_mode:
+                        await self._request_confirm('phase1_complete', '✨ 灵感解析已完成！\n\n已生成以下内容：\n- 主角设定\n- 题材分类\n- 世界观基础\n\n是否继续进行情节规划？')
+                else:
+                    logger.info('[WritingService] 跳过Phase 1（已有 core_elements）')
+                    self.progress_callback(25, '灵感解析已完成（resume 跳过）')
                 logger.info('[WritingService] 进入Phase 2: 情节规划')
                 self.progress_callback(30, '开始情节规划')
                 await self._phase2_outline()
@@ -312,7 +336,7 @@ class WritingService:
             Exception: 如果用户选择取消
         """
         logger.info(f'[WritingService] 请求用户确认: {confirm_id}')
-        _confirm_flags[self.work_id] = {'event': asyncio.Event(), 'result': ''}
+        _confirm_flags[self.work_id] = {'event': asyncio.Event(), 'result': '', 'confirm_id': confirm_id}
         await self.emitter.emit(EventType.CONFIRM, {'confirm_id': confirm_id, 'message': message, 'work_id': self.work_id}, work_id=self.work_id)
         await self.emitter.emit(EventType.LOG, {'message': f'⏳ 等待用户确认: {confirm_id}', 'work_id': self.work_id}, work_id=self.work_id)
         try:
@@ -329,18 +353,22 @@ class WritingService:
             await self.emitter.emit(EventType.LOG, {'message': f'✅ 用户确认继续: {confirm_id}', 'work_id': self.work_id}, work_id=self.work_id)
 
     @staticmethod
-    def handle_confirm_response(work_id: str, choice: str):
+    def handle_confirm_response(work_id: str, choice: str, confirm_id: Optional[str]=None):
         """
         处理用户的确认响应（由API调用）
-        
-        Args:
-            work_id: 作品ID
-            choice: 用户选择 ("proceed" 或 "cancel")
+
+        R4-P1-x: confirm_id 校验 —— 过期响应（如 600s 超时自动 proceed 之后用户才点取消）
+        不得作用到下一个 confirm 上。confirm_id 不匹配时忽略并记录。
         """
-        logger.info(f'[WritingService] 收到用户确认响应: work_id={work_id}, choice={choice}')
-        if work_id in _confirm_flags:
-            _confirm_flags[work_id]['result'] = choice
-            _confirm_flags[work_id]['event'].set()
+        logger.info(f'[WritingService] 收到用户确认响应: work_id={work_id}, choice={choice}, confirm_id={confirm_id}')
+        pending = _confirm_flags.get(work_id)
+        if not pending:
+            return
+        if confirm_id is not None and pending.get('confirm_id') != confirm_id:
+            logger.info(f'[WritingService] 忽略错位确认响应: 当前等待 {pending.get("confirm_id")}, 收到 {confirm_id}')
+            return
+        pending['result'] = choice
+        pending['event'].set()
 
     async def _phase1_planning(self):
         """R27-P1-7: Phase 1 实际实现已搬到 Phase1Runner；保留方法名供旧调用方。"""
@@ -362,9 +390,10 @@ class WritingService:
 
         R2：三个 Review Agent 都依赖 state.part_outline / part_summaries /
         characters / world_setting / foreshadowing / parts / final_draft。
+        P1-87: 携带 work_id 让 review agents 把 cost 计入 per-work tracker。
         """
         from types import SimpleNamespace
-        return SimpleNamespace(inspiration=self.data.get('inspiration', ''), core_elements=self.data.get('core_elements', {}), market_positioning=self.data.get('market_positioning', {}), world_setting=self.data.get('world_setting', ''), characters=self.data.get('characters', []), part_outline=self.data.get('part_outline', []), foreshadowing=self.data.get('foreshadowing', []), parts=dict(self.data.get('parts', {}) or {}), part_summaries=dict(self.data.get('part_summaries', {}) or {}), current_plot_state=self.data.get('current_plot_state', ''), character_state_track=self.data.get('character_state_track', {}), memory=None, final_draft=dict(self.data.get('final_draft', {}) or self.data.get('parts', {}) or {}))
+        return SimpleNamespace(work_id=self.work_id, inspiration=self.data.get('inspiration', ''), core_elements=self.data.get('core_elements', {}), market_positioning=self.data.get('market_positioning', {}), world_setting=self.data.get('world_setting', ''), characters=self.data.get('characters', []), part_outline=self.data.get('part_outline', []), foreshadowing=self.data.get('foreshadowing', []), parts=dict(self.data.get('parts', {}) or {}), part_summaries=dict(self.data.get('part_summaries', {}) or {}), current_plot_state=self.data.get('current_plot_state', ''), character_state_track=self.data.get('character_state_track', {}), memory=None, final_draft=dict(self.data.get('final_draft', {}) or self.data.get('parts', {}) or {}))
 
     @staticmethod
     def _review_failure(kind: str, part_num: int, err: Exception) -> dict:
@@ -396,8 +425,10 @@ class WritingService:
                 part_text = part_result.get('content', '')
             else:
                 part_text = part_result if isinstance(part_result, str) else ''
-            self.data['parts'][str(part_num)] = part_text
+            # R4-P0-2: 先算 summary 再落盘 —— 此前 truncate 未导入，NameError 发生在
+            # parts 写入之后、summary 写入之前，异常路径 _save() 会把"新正文 + 旧摘要"的半份状态落盘。
             summary = truncate(part_text, n=200, suffix="...")
+            self.data['parts'][str(part_num)] = part_text
             self.data['part_summaries'][str(part_num)] = summary
             self._save()
             try:
@@ -413,10 +444,14 @@ class WritingService:
             await self.emitter.emit(EventType.PART_COMPLETE, {'part': part_num, 'words': 0, 'work_id': self.work_id}, work_id=self.work_id)
 
     def _save(self):
-        """保存作品数据（R5-P0-3: cost_tracker 当前 summary 含 calls 列表写回 data）
+        """保存作品数据（R5-P0-3: cost_tracker 当前 summary 写回 data）
 
-        R17-P0-3: 高频写盘优化 —— 每次 _save 仍同步阻塞（向后兼容），
-        但调用方可选用 _save_async() 在后台线程池中写盘，不阻塞事件循环。
+        R4-P2-x:
+        - 走临时文件 + os.replace 原子替换 —— 此前 write_text 非原子，崩溃/断电会留下
+          截断的 work JSON，之后 get_work / WritingService.__init__ 全部失败。
+        - cost_summary 剔除 calls 大数组（与 _save_chunk_progress 一致，P0-79 约定）——
+          600 calls × ~200B 每 Part 边界全量重写纯属浪费，历史由 .cost.json 承载。
+        - tmp 路径带 pid 后缀，避免并发实例共用同一 tmp 文件产生混合落盘。
         """
         try:
             from core.cost_tracker import get_tracker
@@ -424,34 +459,45 @@ class WritingService:
                 get_tracker(work_id=self.work_id).force_flush()
             except Exception:
                 logger.debug('writing_service: silent except (P2-19)', exc_info=True)
-            self.data['cost_summary'] = get_tracker(work_id=self.work_id).get_summary()
+            full_summary = get_tracker(work_id=self.work_id).get_summary()
+            self.data['cost_summary'] = {k: v for k, v in full_summary.items() if k != 'calls'}
         except Exception:
             logger.debug('writing_service: silent except (P2-19)', exc_info=True)
+        payload = json.dumps(self.data, ensure_ascii=False, indent=2)
+        tmp_path = self.work_path.with_suffix(f'.json.tmp.{os.getpid()}')
         try:
-            self.work_path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding='utf-8')
+            tmp_path.write_text(payload, encoding='utf-8')
+            os.replace(tmp_path, self.work_path)
         except Exception as e:
             logger.info(f'[WritingService] _save 失败: {e}')
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                logger.debug('writing_service: silent except (P2-19)', exc_info=True)
 
     def _save_chunk_progress(self, part_num: int, text: str, summary: str = None) -> None:
         """P1-46: 高频 checkpoint 路径 —— 只写 data['parts'][N] + data['part_summaries'][N]
-        与 cost_summary，不重写整份 data（避免 50 万字 + 600 calls 全量重写）。
+        与 cost_summary 聚合统计，不带全量 calls 列表（避免 50 万字 + 600 calls 全量重写）。
 
-        实现策略：把 data 序列化到临时文件 → os.replace 原子覆盖 → 失败时回退 _save()。
+        P0-79 修复：剔除 cost_summary['calls'] 大数组；calls 全量历史由 CostTracker
+        单独落盘到 {work_id}.cost.json（与 work JSON 解耦）。
+        写盘走临时文件 + os.replace 原子替换 → 失败时回退 _save()。
         """
         self.data['parts'][str(part_num)] = text
         if summary is not None:
             self.data['part_summaries'][str(part_num)] = summary
-        # cost_summary 增量更新
+        # cost_summary 仅存聚合统计（剔除每条 calls，避免 600 calls × ~200B 拖垮写盘）
         try:
             from core.cost_tracker import get_tracker
-            self.data['cost_summary'] = get_tracker(work_id=self.work_id).get_summary()
+            full_summary = get_tracker(work_id=self.work_id).get_summary()
+            self.data['cost_summary'] = {k: v for k, v in full_summary.items() if k != 'calls'}
         except Exception:
             logger.debug('writing_service: silent except (P2-19)', exc_info=True)
-        # 写到临时文件后原子重命名（避免半写状态）
-        tmp_path = self.work_path.with_suffix('.json.tmp')
+        # 写到临时文件后原子重命名（避免半写状态）；tmp 带 pid 后缀防并发实例互相覆盖
+        tmp_path = self.work_path.with_suffix(f'.json.tmp.{os.getpid()}')
         try:
             tmp_path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding='utf-8')
-            import os as _os
             _os.replace(tmp_path, self.work_path)
         except Exception as e:
             logger.info(f'[WritingService] _save_chunk_progress 失败，回退 _save: {e}')
@@ -461,28 +507,6 @@ class WritingService:
             except Exception:
                 logger.debug('writing_service: silent except (P2-19)', exc_info=True)
             self._save()
-
-    async def _save_async(self):
-        """R17-P0-3: 异步版 _save —— 高频 checkpoint 路径使用，不阻塞 asyncio event loop。
-
-        - 通过 asyncio.to_thread() 把 json.dumps + write_text 放到默认 executor
-        - 调用方 await _save_async() 即可（写入完成后才返回）
-        """
-        try:
-            from core.cost_tracker import get_tracker
-            try:
-                get_tracker().force_flush()
-            except Exception:
-                logger.debug('writing_service: silent except (P2-19)', exc_info=True)
-            self.data['cost_summary'] = get_tracker().get_summary()
-        except Exception:
-            logger.debug('writing_service: silent except (P2-19)', exc_info=True)
-        path = self.work_path
-        data_snapshot = json.dumps(self.data, ensure_ascii=False, indent=2)
-        try:
-            await asyncio.to_thread(path.write_text, data_snapshot, encoding='utf-8')
-        except Exception as e:
-            logger.info(f'[WritingService] _save_async 失败: {e}')
 
     def _save_initial_state(self):
         """R5-P0-1: 仅在 restart 路径下使用 —— 不经过 cost_tracker 的简易落盘。"""

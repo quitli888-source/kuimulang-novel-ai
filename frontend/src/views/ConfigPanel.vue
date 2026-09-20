@@ -22,6 +22,8 @@
               :current-template-info="currentTemplateInfo"
               @select="handleTemplateSelect"
               @saveCustom="saveCustomTemplate"
+              @update:custom-target-words="customTargetWords = $event"
+              @update:custom-part-count="customPartCount = $event"
             />
           </n-tab-pane>
 
@@ -207,6 +209,7 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import { useMessage } from 'naive-ui'
 import api from '@/api'
 import LayoutSidebar from '@/components/Layout/Sidebar.vue'
 import TemplateSection from '@/components/config/TemplateSection.vue'
@@ -214,6 +217,9 @@ import WindowConfigTab from '@/components/config/WindowConfigTab.vue'
 
 const router = useRouter()
 const route = useRoute()
+
+// P1-95: 替换 alert() 为 naive-ui useMessage 非阻塞 toast
+const message = useMessage()
 
 const workId = ref(route.params.workId || route.query.workId || '')
 const templates = ref([])
@@ -467,10 +473,10 @@ async function saveProviderKey() {
     providers.value = res.data
     console.log('🔄 供应商列表刷新成功')
     
-    alert(`${selectedProviderName.value} 配置保存成功！`)
+    message.success(`${selectedProviderName.value} 配置保存成功！`)
   } catch (error) {
     console.error('❌ 保存供应商配置失败:', error)
-    alert('保存失败: ' + (error.response?.data?.detail || error.message))
+    message.error('保存失败: ' + (error.response?.data?.detail || error.message))
   } finally {
     savingLLM.value = false
   }
@@ -483,10 +489,10 @@ async function saveLLMConfig() {
       per_agent_enabled: false,
       global_temperature: globalTemp.value,
     })
-    alert('全局参数保存成功')
+    message.success('全局参数保存成功')
   } catch (error) {
     console.error('保存全局参数失败:', error)
-    alert('保存失败')
+    message.error('保存失败')
   }
 }
 
@@ -494,10 +500,10 @@ async function saveLLM() {
   savingLLM.value = true
   try {
     await api.put('/config/llm', llmConfig.value)
-    alert('LLM配置保存成功')
+    message.success('LLM配置保存成功')
   } catch (error) {
     console.error('保存LLM配置失败:', error)
-    alert('保存失败')
+    message.error('保存失败')
   } finally {
     savingLLM.value = false
   }
@@ -506,25 +512,25 @@ async function saveLLM() {
 async function saveAgent(name, cfg) {
   try {
     await api.put(`/config/agents/${name}`, cfg)
-    alert(`${agentLabel(name)} 配置保存成功`)
+    message.success(`${agentLabel(name)} 配置保存成功`)
   } catch (error) {
     console.error('保存Agent配置失败:', error)
-    alert('保存失败')
+    message.error('保存失败')
   }
 }
 
 async function saveAppConfig() {
   try {
-    await api.put('/config/app', { 
-      confirm_mode: confirmMode.value, 
+    await api.put('/config/app', {
+      confirm_mode: confirmMode.value,
       template_name: selectedTemplate.value,
       custom_target_words: customTargetWords.value,
       custom_part_count: customPartCount.value
     })
-    alert('设置保存成功')
+    message.success('设置保存成功')
   } catch (error) {
     console.error('保存设置失败:', error)
-    alert('保存失败')
+    message.error('保存失败')
   }
 }
 
@@ -532,31 +538,31 @@ async function saveCustomTemplate() {
   try {
     // 验证输入值
     if (!customTargetWords.value || customTargetWords.value < 1000) {
-      alert('请输入有效的目标字数（至少1000字）')
+      message.warning('请输入有效的目标字数（至少1000字）')
       return
     }
     if (!customPartCount.value || customPartCount.value < 1) {
-      alert('请输入有效的Part数量（至少1个）')
+      message.warning('请输入有效的Part数量（至少1个）')
       return
     }
-    
-    console.log('💾 保存自定义模板:', { 
-      target_words: customTargetWords.value, 
+
+    console.log('💾 保存自定义模板:', {
+      target_words: customTargetWords.value,
       part_count: customPartCount.value,
       avg_per_part: Math.round(customTargetWords.value / customPartCount.value)
     })
-    
+
     await api.put('/config/app', {
       confirm_mode: confirmMode.value,
       template_name: '自定义',
       custom_target_words: customTargetWords.value,
       custom_part_count: customPartCount.value
     })
-    
-    alert(`✅ 自定义模板配置保存成功！\n\n目标字数：${customTargetWords.value.toLocaleString()}字\nPart数量：${customPartCount.value}个\n每Part约：${Math.round(customTargetWords.value / customPartCount.value).toLocaleString()}字`)
+
+    message.success(`✅ 自定义模板配置保存成功！\n\n目标字数：${customTargetWords.value.toLocaleString()}字\nPart数量：${customPartCount.value}个\n每Part约：${Math.round(customTargetWords.value / customPartCount.value).toLocaleString()}字`)
   } catch (error) {
     console.error('❌ 保存自定义模板失败:', error)
-    alert('保存自定义模板失败: ' + (error.response?.data?.detail || error.message))
+    message.error('保存自定义模板失败: ' + (error.response?.data?.detail || error.message))
   }
 }
 
@@ -573,12 +579,12 @@ async function saveWindowConfig() {
     windowConfig.value.last_result = `✅ 保存成功：window_size=${resp.data.config.window_size}, rolling_every=${resp.data.config.rolling_every}, milestone_every=${resp.data.config.milestone_every}`
     windowConfig.value.source = 'user_file'
     console.log('💾 滑动窗口配置保存:', resp.data.config)
-    alert(`✅ 滑动窗口配置已保存！\n下次启动创作时生效。`)
+    message.success('✅ 滑动窗口配置已保存！下次启动创作时生效。')
   } catch (error) {
     windowConfig.value.last_ok = false
     windowConfig.value.last_result = `❌ 保存失败: ${error.response?.data?.detail || error.message}`
     console.error('❌ 滑动窗口配置保存失败:', error)
-    alert('保存失败: ' + (error.response?.data?.detail || error.message))
+    message.error('保存失败: ' + (error.response?.data?.detail || error.message))
   } finally {
     windowSaving.value = false
   }
@@ -601,7 +607,7 @@ async function resetWindowConfig() {
   } catch (error) {
     windowConfig.value.last_ok = false
     windowConfig.value.last_result = '❌ 重置失败: ' + (error.response?.data?.detail || error.message)
-    alert('重置失败: ' + (error.response?.data?.detail || error.message))
+    message.error('重置失败: ' + (error.response?.data?.detail || error.message))
   } finally {
     windowSaving.value = false
   }
@@ -614,11 +620,11 @@ async function startWriting() {
       await api.post('/writing/start', { work_id: workId.value })
       router.push(`/writing/${workId.value}`)
     } else {
-      alert('请先选择或创建作品')
+      message.warning('请先选择或创建作品')
     }
   } catch (error) {
     console.error('开始创作失败:', error)
-    alert('开始创作失败: ' + (error.response?.data?.detail || error.message))
+    message.error('开始创作失败: ' + (error.response?.data?.detail || error.message))
   } finally {
     starting.value = false
   }

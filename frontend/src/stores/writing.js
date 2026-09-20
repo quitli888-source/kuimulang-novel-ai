@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import api from '@/api'
-import { safeStorage, debouncedPersist, flushPersist } from '@/utils/safeStorage'
+import { safeStorage, throttledPersist, flushPersist } from '@/utils/safeStorage'
 
 // =====================================================================
 // R4-P0-1 SSE 二合一（2026-09-14）：
@@ -27,13 +27,18 @@ export const WRITING_PHASES = [
 
 const STORAGE_KEY = 'kuimulang-writing-store'
 
+// P2-107: 统一日志 trim 阈值（运行时 500→300，持久化 100→保留运行时 300）
+const LOG_TRIM_THRESHOLD = 500
+const LOG_TRIM_KEEP = 300
+const LOG_PERSIST_KEEP = 300
+
 // P1-54 + P2-62: 用 safeStorage 替代直接 localStorage；持久化走 1s 节流
 
 function loadFromStorage() {
   return safeStorage.get(STORAGE_KEY, null)
 }
 
-const persist = debouncedPersist(STORAGE_KEY, 1000)
+const persist = throttledPersist(STORAGE_KEY, 1000)
 
 // P1-54: 取代旧的 saveToStorage —— 只持久化关键状态字段，写盘走节流
 function saveToStorage(state) {
@@ -42,7 +47,7 @@ function saveToStorage(state) {
     currentPhase: state.currentPhase,
     currentPart: state.currentPart,
     completedParts: state.completedParts,
-    logs: (state.logs || []).slice(-100),  // 只保留最近 100 条
+    logs: (state.logs || []).slice(-LOG_PERSIST_KEEP),
   }
   persist(toSave)
 }
@@ -54,7 +59,7 @@ function saveToStorageNow(state) {
     currentPhase: state.currentPhase,
     currentPart: state.currentPart,
     completedParts: state.completedParts,
-    logs: (state.logs || []).slice(-100),
+    logs: (state.logs || []).slice(-LOG_PERSIST_KEEP),
   }
   flushPersist(STORAGE_KEY)
   safeStorage.set(STORAGE_KEY, toSave)
@@ -176,9 +181,19 @@ export const useWritingStore = defineStore('writing', {
           type: log.type || 'info',
         }
       }
+
+      // P3-112: SSE 重连可能重复发同一事件 —— 500ms 窗口内同 msg+type 重复 push 跳过，
+      // 避免日志流刷屏（"✅ Part X 创作完成"被重发 3 次）。
+      const now = Date.now()
+      const last = this._lastAddLog
+      if (last && now - last.ts < 500 && last.msg === entry.msg && last.type === entry.type) {
+        return
+      }
+      this._lastAddLog = { ts: now, msg: entry.msg, type: entry.type }
+
       this.logs.push(entry)
-      if (this.logs.length > 500) {
-        this.logs = this.logs.slice(-300)
+      if (this.logs.length > LOG_TRIM_THRESHOLD) {
+        this.logs = this.logs.slice(-LOG_TRIM_KEEP)
       }
       this.persistState()
     },
@@ -284,13 +299,6 @@ export const useWritingStore = defineStore('writing', {
       this.workData = { title: '', parts: {}, part_outline: [] }
       this.currentPhase = ''
       this.completedParts = []
-      this.setCurrentPart(0)  // P0-42: 走 action 走封装
-    },
-
-    // P0-42: 集中 setter —— 维护 store 内部不变式（如清空 completedParts）
-    setCurrentPart(n) {
-      this.currentPart = n
-    },
       this.logs = []
       this.progress = 0
       this.progressMessage = '准备开始创作'
@@ -299,6 +307,13 @@ export const useWritingStore = defineStore('writing', {
       this.errorMessage = ''
       this.errorSuggestion = ''
       this.sseStatus = SSE_STATUS.DISCONNECTED
+      this.setCurrentPart(0)  // P0-42: 走 action 走封装（最后清 part，避免与 completedParts 顺序耦合）
+      this.persistState()
+    },
+
+    // P0-42: 集中 setter —— 维护 store 内部不变式（如清空 completedParts）
+    setCurrentPart(n) {
+      this.currentPart = n
     },
   },
 })

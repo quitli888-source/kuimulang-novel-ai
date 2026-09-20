@@ -24,6 +24,7 @@ def _load_user_window_config() -> dict:
     R15: 读取 data/window_config.json 作为用户 UI 配置。
     返回 {"window_size": int, "rolling_every": int, "milestone_every": int}（缺字段则省略）。
     R21-P2-30: 路径常量 WINDOW_CONFIG_FILE 同时被 sliding_window.py 和 config_api.py 共用。
+    P2-103: 解析失败改打 warning（之前是 debug，不可见）。
     """
     try:
         if _os.path.exists(WINDOW_CONFIG_FILE):
@@ -34,11 +35,11 @@ def _load_user_window_config() -> dict:
                     if k in data:
                         try:
                             out[k] = int(data[k])
-                        except (TypeError, ValueError):
-                            logger.debug('sliding_window: silent except (P2-19)', exc_info=True)
+                        except (TypeError, ValueError) as type_err:
+                            logger.warning(f'window_config.json 字段 {k}={data[k]!r} 不是合法整数: {type_err}')
                 return out
-    except Exception:
-        logger.debug('sliding_window: silent except (P2-19)', exc_info=True)
+    except Exception as parse_err:
+        logger.warning(f'window_config.json 解析失败，回退默认: {type(parse_err).__name__}: {parse_err}')
     return {}
 _PROJECT_ROOT = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 WINDOW_CONFIG_FILE = _os.path.join(_PROJECT_ROOT, 'data', 'window_config.json')
@@ -105,12 +106,14 @@ class SlidingWindow:
         """外部生成里程碑后注入窗口。"""
         self.milestones[milestone_num] = milestone_text
 
-    def maybe_generate_rolling_summary(self, part_num: int, *, world_setting: str='') -> dict:
+    def maybe_generate_rolling_summary(self, part_num: int, *, world_setting: str='', work_id: Optional[str]=None) -> dict:
         """
         R15: 若 part_num 命中 rolling 触发点，自动调 LLM 生成二级滚动摘要。
         从 writing_service._phase3_writing 抽出来，所有路径（WritingService + PartWriterAgent
         直调）都会触发。
         Returns: {"generated": bool, "text": str, "char_count": int}
+
+        P1-87: 新增 work_id 关键字参数 —— 透传给 cost_tracker 做 per-work 计费路由。
         """
         if not self.should_create_rolling_summary(part_num):
             return {'generated': False, 'text': '', 'char_count': 0}
@@ -122,7 +125,7 @@ class SlidingWindow:
         recent_text = '\n'.join((f'Part {p}: {self.summaries[p]}' for p in recent_keys))
         try:
             from core.llm_client import call_llm
-            rolling = call_llm(system_prompt='你是长篇小说剧情压缩助手。将下面若干个 Part 的剧情概要压缩为一段 800 字以内的连贯剧情段，保留关键人物、冲突、伏笔、角色位置/状态/伤势变化，输出纯叙事文本，不要分点。', user_prompt=recent_text, temperature=0.3, max_tokens=1200, agent='rolling_summary')
+            rolling = call_llm(system_prompt='你是长篇小说剧情压缩助手。将下面若干个 Part 的剧情概要压缩为一段 800 字以内的连贯剧情段，保留关键人物、冲突、伏笔、角色位置/状态/伤势变化，输出纯叙事文本，不要分点。', user_prompt=recent_text, temperature=0.3, max_tokens=1200, agent='rolling_summary', work_id=work_id)
             rolling_text = (rolling or '')[:self.SUMMARY_L2_LEN]
             if not rolling_text.strip():
                 fallback = '\n'.join((f'Part {p}: {self.summaries[p][:100]}' for p in recent_keys))
@@ -132,10 +135,12 @@ class SlidingWindow:
         except Exception as e:
             return {'generated': False, 'text': '', 'char_count': 0, 'error': str(e)[:200]}
 
-    def maybe_generate_milestone(self, part_num: int, *, world_setting: str='') -> dict:
+    def maybe_generate_milestone(self, part_num: int, *, world_setting: str='', work_id: Optional[str]=None) -> dict:
         """
         R15: 若 part_num 命中 milestone 触发点，自动调 LLM 生成里程碑摘要。
         Returns: {"generated": bool, "text": str, "char_count": int, "milestone_num": int}
+
+        P1-87: 新增 work_id 关键字参数 —— 透传给 cost_tracker 做 per-work 计费路由。
         """
         if not self.should_create_milestone(part_num):
             return {'generated': False, 'text': '', 'char_count': 0}
@@ -151,7 +156,7 @@ class SlidingWindow:
         milestone_input = recent_text + (f'\n【世界观】{world_setting}' if world_setting else '') + ('\n【角色状态】\n' + '\n'.join(char_state_lines) if char_state_lines else '') + ('\n【伏笔】\n' + '\n'.join(foreshadow_lines) if foreshadow_lines else '')
         try:
             from core.llm_client import call_llm
-            milestone = call_llm(system_prompt=f'你是长篇小说剧情压缩助手。将下面 {self.milestone_every} 个 Part 的剧情概要压缩为 2000 字以内的全局脉络段，涵盖主线、支线、关键转折、角色弧光，输出纯叙事文本，不要分点。', user_prompt=milestone_input, temperature=0.3, max_tokens=2500, agent='milestone_summary')
+            milestone = call_llm(system_prompt=f'你是长篇小说剧情压缩助手。将下面 {self.milestone_every} 个 Part 的剧情概要压缩为 2000 字以内的全局脉络段，涵盖主线、支线、关键转折、角色弧光，输出纯叙事文本，不要分点。', user_prompt=milestone_input, temperature=0.3, max_tokens=2500, agent='milestone_summary', work_id=work_id)
             milestone_text = (milestone or '')[:self.SUMMARY_L3_LEN]
             if not milestone_text.strip():
                 fallback = '\n'.join((f'Part {p}: {self.summaries[p][:100]}' for p in recent_keys))

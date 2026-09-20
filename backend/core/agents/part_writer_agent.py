@@ -11,24 +11,33 @@ R2改动（生成器式分块生成）：
 - 单 Part 超过 3500 字时改为多片段循环续写
 - 后续片段仅注入"上一片段末尾 800 字 + 下一片段计划"
 - 解决 50 万字场景下 PART_WORD_MAX=10000 单次必爆 token 上限的问题
+
+P0 修复（2026-09-18 反凑字数）：
+- 加 _strip_padding_chars 后处理，强制清洗 minimax-m3 等模型在字数压力下
+  批量堆叠的省略号 `……` 和破折号 `——`（r14 数据佐证：后半 Part 破折号密度达 39-49/1k）
+- 移除 endswith('…') 早退信号（之前在 _write_part_chunked 把 `……` 视作合法退出标点）
 """
 import time
 from typing import Dict, Any
+
+# P0 反凑字数常量 —— 已抽到 core/text_utils.py
+# 旧版 _strip_padding_chars 本地实现已删除，统一改用 strip_padding_chars。
 from core.agents.base_agent import BaseAgent
 from core.llm_client import call_llm, call_llm_json
 from core.config import PART_WORD_MIN, PART_WORD_MAX
 from core.prompt_loader import load_prompt
 from core.established_facts import facts_from_extractor_payload
 from core.logger import get_logger
+from core.text_utils import strip_padding_chars
 logger = get_logger('part_writer_agent')
-SYSTEM_PROMPT = load_prompt('part_writer', '你是一位番茄小说平台的顶级短篇作家。你的作品以快节奏、强冲突、高情感密度著称，读者一旦开始就无法放下。\n\n## 番茄快节奏铁律（必须逐条遵守）\n\n1. **第一句话就要抓人**：绝不能以环境描写、"XX醒来"、天气描写开头。第一句要么是动作、要么是对白、要么是悬念\n2. **300字一推进**：每300字内必须有事件推进、情绪转折、或新悬念抛出。如果某段300字没有推进，删掉重写\n3. **对白驱动**：对话占比≥40%。用对话讲故事，用对话展现性格，用对话推进情节\n4. **短段落**：一个自然段不超过3行（手机一屏可见）。禁止大段文字堆砌\n5. **感官代替标签**：禁止"他感到害怕""她觉得心碎"这类情绪标签。用动作、生理反应、环境细节来表现\n6. **删除一切废话**：每个句子都必须有存在价值——删掉它，读者会少知道什么关键信息？如果答案是"没什么"，就删掉\n\n## 绝对禁止\n\n- 禁止"心中一沉""不禁笑了""不由得""竟然"等网文陈词滥调\n- 禁止超过100字的纯环境描写（除非环境本身就是情节）\n- 禁止大段心理独白（把内心活动转化为动作或对话）\n- 禁止回忆闪回（除非回忆直接推进当前主线，且不超过200字）\n- 禁止说教和价值观输出\n- 禁止与前文矛盾的任何内容\n\n## 上下文使用\n\n你会收到：角色档案、世界观、已完成剧情摘要、上一部分结尾、角色状态快照。\n这些是你的"记忆"，你必须严格遵守：\n- **角色名称必须一字不差**：角色档案中的名字就是唯一正确的名字，绝对不能自行改名\n- 角色的言行必须符合档案设定\n- 已发生的事件不能否认或遗忘\n- 上一部分结尾的情境必须自然承接\n- 不能出现与前文矛盾的信息\n- 不能引入角色档案中不存在的角色（除非是路人甲等无名字的临时角色）\n\n## 一致性红线（V3新增，最高优先级）\n\n以下问题一旦出现，视为严重缺陷：\n- 角色在前面已死/已离开，后面又出现\n- 角色突然知道了前面不可能知道的信息\n- 角色性格突变（与前面已建立的人设矛盾）\n- 时间线不连续（前面在白天，突然变成夜晚而没有交代）\n- 已明确交代的物理规则被违反\n\n## 输出格式\n\n只输出小说正文。\n不要输出Part标题、不要输出"---"分隔线、不要输出任何标注或说明。\n直接从正文第一个字开始写。')
+SYSTEM_PROMPT = load_prompt('part_writer', '你是一位番茄小说平台的顶级短篇作家。你的作品以快节奏、强冲突、高情感密度著称，读者一旦开始就无法放下。\n\n## 番茄快节奏铁律（必须逐条遵守）\n\n1. **第一句话就要抓人**：绝不能以环境描写、"XX醒来"、天气描写开头。第一句要么是动作、要么是对白、要么是悬念\n2. **300字一推进**：每300字内必须有事件推进、情绪转折、或新悬念抛出。如果某段300字没有推进，删掉重写\n3. **对白驱动**：对话占比≥40%。用对话讲故事，用对话展现性格，用对话推进情节\n4. **短段落**：一个自然段不超过3行（手机一屏可见）。禁止大段文字堆砌\n5. **感官代替标签**：禁止"他感到害怕""她觉得心碎"这类情绪标签。用动作、生理反应、环境细节来表现\n6. **删除一切废话**：每个句子都必须有存在价值——删掉它，读者会少知道什么关键信息？如果答案是"没什么"，就删掉\n\n## 绝对禁止\n\n- 禁止"心中一沉""不禁笑了""不由得""竟然"等网文陈词滥调\n- 禁止超过100字的纯环境描写（除非环境本身就是情节）\n- 禁止大段心理独白（把内心活动转化为动作或对话）\n- 禁止回忆闪回（除非回忆直接推进当前主线，且不超过200字）\n- 禁止说教和价值观输出\n- 禁止与前文矛盾的任何内容\n\n## 🚨 反凑字数规则（P0 修复：2026-09-18）\n\n下列写法是字数注水，被检测到会被强制清洗，必须无条件禁止：\n\n1. **禁止用省略号"……"凑字数**——单段最多 1 个，全段连续不超过 2 个。`……` 是真实的语言中断，不是空白填充。\n2. **禁止用破折号"——"凑字数**——典型注水模式："小子——\\n声音低沉：\\n\'有一个人——\'"。每段对白独立成段写完整，不要用 `——` 串联。\n3. **禁止断句注水**："她的眼睛——看着远方——心中——想着故乡" 这种每短句之间用 `——` 的，禁止。\n4. **字数不够时**：精简、合并、删去冗余描写——绝不 用符号填充。\n\n判断标准：如果一段里连续出现 3 个以上 `……` 或 5 个以上 `——`，几乎肯定是注水。正常文学用法保留，批量重复必须清除。\n\n## 上下文使用\n\n你会收到：角色档案、世界观、已完成剧情摘要、上一部分结尾、角色状态快照。\n这些是你的"记忆"，你必须严格遵守：\n- **角色名称必须一字不差**：角色档案中的名字就是唯一正确的名字，绝对不能自行改名\n- 角色的言行必须符合档案设定\n- 已发生的事件不能否认或遗忘\n- 上一部分结尾的情境必须自然承接\n- 不能出现与前文矛盾的信息\n- 不能引入角色档案中不存在的角色（除非是路人甲等无名字的临时角色）\n\n## 一致性红线（V3新增，最高优先级）\n\n以下问题一旦出现，视为严重缺陷：\n- 角色在前面已死/已离开，后面又出现\n- 角色突然知道了前面不可能知道的信息\n- 角色性格突变（与前面已建立的人设矛盾）\n- 时间线不连续（前面在白天，突然变成夜晚而没有交代）\n- 已明确交代的物理规则被违反\n\n## 输出格式\n\n只输出小说正文。\n不要输出Part标题、不要输出"---"分隔线、不要输出任何标注或说明。\n不要输出"…………"或"——————"等符号填充。\n直接从正文第一个字开始写。')
 CHUNK_WORDS = 3500
 CHUNK_OVERLAP = 800
 MAX_CHUNKS = 6
 PROGRESS_START = 55
 # R23-P1-11: 从 prompts/part_chunk.txt 加载（外置），保留简明 fallback
 PART_CHUNK_SYSTEM_PROMPT = load_prompt('part_chunk',
-    '你是番茄小说平台顶级短篇作家，正在为一部连载小说续写某个 Part 的片段。\n\n## 核心约束（片段级）\n\n1. **只写这一片段，不要总结、不要预告、不要回顾**\n2. **如果提供了【已写片段末尾】，必须从该结尾自然续接**\n3. **结尾必须是完整段落**——不允许在对话中间或动作进行时戛然而止\n\n## 输出格式\n\n只输出本片段的正文。\n不要重复【已写片段末尾】中的最后一句话。\n')
+    '你是番茄小说平台顶级短篇作家，正在为一部连载小说续写某个 Part 的片段。\n\n## 核心约束（片段级）\n\n1. **只写这一片段，不要总结、不要预告、不要回顾**\n2. **如果提供了【已写片段末尾】，必须从该结尾自然续接**——上一句如果是动作/对白，下一句必须直接承接\n3. **如果提供了【下一片段计划】，本片段的结尾必须留出钩子或承接点**\n4. 番茄快节奏铁律（首句抓人、300字一推进、对白驱动、短段落、感官代替标签、删除废话）——与 PartWriter 主系统提示一致\n5. **字数硬约束**：本片段目标字数见下方【本片段目标】，不要通过填充符号凑字数\n6. **结尾必须是完整段落**——不允许在对话中间、动作进行时戛然而止\n\n## 🚨 反凑字数规则（与 PartWriter 主提示一致）\n\n下列写法是字数注水，被系统检测后会强制清洗，必须禁止：\n\n1. **禁止用省略号"……"凑字数**——单段最多 1 个，全段连续不超过 2 个\n2. **禁止用破折号"——"凑字数**——禁止 "小子——\\n声音低沉：\\n\'有一个人——\'" 这种串联\n3. **禁止"每短句之间用——"的断句注水**："她的眼睛——看着远方——"\n4. **字数不够时**：精简、合并、删去冗余描写——绝不 用符号填充\n\n## 输出格式\n\n只输出本片段的正文（自然段）。\n不要输出"片段X/共Y""---"分隔线、不要输出任何标注或说明。\n不要重复【已写片段末尾】中的最后一句话。\n不要用 `……` 或 `——` 串联对白或填充段落。\n')
 _FACTS_EXTRACTOR_SYSTEM_PROMPT = load_prompt('established_facts', '你是"小说事实抽取员"。从以下小说片段中提取"已确立的关键事实"。\n\n每条事实用一行："[category] text"\ncategory 限：character / location / object / event / trait / relationship / world_rule / foreshadow / knowledge\n最多提取 15 条最关键的事实。\n输出 JSON: {"facts": [{"category": "...", "text": "...", "quote": "...", "subject": "...", "predicate": "..."}]}\n')
 # P3-70: load_prompt 优先读 prompts/established_facts.txt（已存在且内容更详细），
 # fallback 是上面内嵌的精简版；正常启动走外置文件路径。修改 prompt 直接改 prompts/established_facts.txt，
@@ -81,7 +90,7 @@ class PartWriterAgent(BaseAgent):
                     logger.info(f'[PartWriterAgent] R15 window.add_part 异常: {add_err}')
                 world_setting = getattr(state, 'world_setting', '') or ''
                 try:
-                    roll_result = window.maybe_generate_rolling_summary(part_num, world_setting=world_setting)
+                    roll_result = window.maybe_generate_rolling_summary(part_num, world_setting=world_setting, work_id=getattr(state, 'work_id', None))
                     if roll_result.get('generated'):
                         logger.info(f"[PartWriterAgent] R15 Part {part_num} 触发 rolling 摘要（{roll_result['char_count']} 字）")
                     elif roll_result.get('error'):
@@ -89,7 +98,7 @@ class PartWriterAgent(BaseAgent):
                 except Exception as roll_err:
                     logger.info(f'[PartWriterAgent] R15 rolling 异常（不影响主流程）: {roll_err}')
                 try:
-                    mile_result = window.maybe_generate_milestone(part_num, world_setting=world_setting)
+                    mile_result = window.maybe_generate_milestone(part_num, world_setting=world_setting, work_id=getattr(state, 'work_id', None))
                     if mile_result.get('generated'):
                         logger.info(f"[PartWriterAgent] R15 Part {part_num} 触发 milestone #{mile_result['milestone_num']}（{mile_result['char_count']} 字）")
                     elif mile_result.get('error'):
@@ -141,14 +150,17 @@ class PartWriterAgent(BaseAgent):
                     stage_hint = '完成结尾钩子，干净收尾'
                 next_plan = f"本章目标: {target_words}字 (已写 {len(accumulated)}字, 还需约 {remaining}字)\n本片段建议推进: {stage_hint}\n本章核心事件: {outline.get('core_event', '')}\n本章结尾钩子: {outline.get('end_hook', '')}"
             chunk_user_prompt = self._build_chunk_prompt(part_num=part_num, chunk_idx=chunk_idx, is_first_chunk=chunk_idx == 1, prev_tail=prev_tail, next_plan=next_plan, context=context if chunk_idx == 1 else '', foreshadow_info=foreshadow_info if chunk_idx == 1 else '', outline=outline, chunk_target=min(CHUNK_WORDS, remaining + 200), target_words=target_words, hard_max=hard_max, written_so_far=len(accumulated), state=state)
-            chunk_max_tokens = min(CHUNK_WORDS * 2 + 300, 12000)
+            # 长篇超 Part（>=3500 字）容易触发 token 截断 —— 一次给足 max_tokens。
+            # 此前 min(7300, 12000)=7300 导致 completion=7300 = max_tokens → 整段被截为空串，
+            # 触发 3 次 retry，5 min/Part。直接给 14600 一次产出更稳定。
+            chunk_max_tokens = min(max(CHUNK_WORDS * 4 + 500, 14600), 16000)
             chunk_start = time.time()
             self.update_progress(45 + (chunk_idx - 1) * 5, f'Part {part_num} 片段 {chunk_idx}/{MAX_CHUNKS} 生成中...')
             chunk_text = ''
             for retry_attempt in range(3):
                 cur_max = chunk_max_tokens * (1 + retry_attempt)
                 try:
-                    chunk_text = call_llm(system_prompt=PART_CHUNK_SYSTEM_PROMPT, user_prompt=chunk_user_prompt, temperature=0.8, max_tokens=cur_max, agent=self.name)
+                    chunk_text = call_llm(system_prompt=PART_CHUNK_SYSTEM_PROMPT, user_prompt=chunk_user_prompt, temperature=0.8, max_tokens=cur_max, agent=self.name, work_id=getattr(state, 'work_id', None))
                 except Exception as e:
                     logger.info(f'[PartWriterAgent] Part {part_num} 片段 {chunk_idx} 第 {retry_attempt + 1} 次调用异常: {e}')
                     chunk_text = ''
@@ -157,6 +169,8 @@ class PartWriterAgent(BaseAgent):
                 logger.info(f'[PartWriterAgent] Part {part_num} 片段 {chunk_idx} 第 {retry_attempt + 1} 次返回空内容（max_tokens={cur_max}），重试...')
             chunk_elapsed = time.time() - chunk_start
             chunk_text = chunk_text.strip()
+            # P0 反凑字数：每个片段入库前强制清洗 `……` / `——` 批量堆叠
+            chunk_text = strip_padding_chars(chunk_text)
             if prev_tail and chunk_text.startswith(prev_tail):
                 chunk_text = chunk_text[len(prev_tail):].lstrip()
             accumulated += chunk_text
@@ -166,13 +180,18 @@ class PartWriterAgent(BaseAgent):
                     self.checkpoint_callback(part_num, chunk_idx, accumulated)
                 except Exception as cp_err:
                     logger.info(f'[PartWriterAgent] checkpoint_callback 失败（不影响主流程）: {cp_err}')
+            # P0 修复：移除 endswith('…') 早退分支 —— 之前把 end of chunk 的 `……` 当作合法退出信号，
+            # 导致 minimax-m3 在后半 Part 学习用 `……` 凑字数提前结束循环。
+            # 现在只允许 `。！？\n\n` 作为正常终止标点，`……` 不再触发提前退出。
             if len(accumulated) >= PART_WORD_MIN:
                 tail_stripped = accumulated.rstrip()
-                if (tail_stripped.endswith('\n\n') or tail_stripped.endswith('。') or tail_stripped.endswith('！') or tail_stripped.endswith('？') or tail_stripped.endswith('…')) and len(chunk_text) < CHUNK_WORDS * 0.6:
+                if (tail_stripped.endswith('\n\n') or tail_stripped.endswith('。') or tail_stripped.endswith('！') or tail_stripped.endswith('？')) and len(chunk_text) < CHUNK_WORDS * 0.6:
                     break
             if len(accumulated) >= hard_max:
                 break
         total_elapsed = time.time() - total_start
+        # P0 反凑字数：Part 全部片段完成后做最终一次清洗，避免拼接处残留
+        accumulated = strip_padding_chars(accumulated)
         return (accumulated, chunk_idx, total_elapsed)
 
     def _build_chunk_prompt(self, part_num: int, chunk_idx: int, is_first_chunk: bool, prev_tail: str, next_plan: str, context: str, foreshadow_info: str, outline: dict, chunk_target: int, target_words: int, hard_max: int, written_so_far: int, state=None) -> str:
@@ -237,7 +256,7 @@ class PartWriterAgent(BaseAgent):
             return 0
         try:
             user_prompt = f'Part {part_num} 全文（约 {len(part_text)} 字）：\n\n{part_text}\n\n请按 system prompt 的协议输出 JSON。'
-            payload = call_llm_json(system_prompt=_FACTS_EXTRACTOR_SYSTEM_PROMPT, user_prompt=user_prompt, temperature=0.0, max_tokens=1800, agent='established_facts')
+            payload = call_llm_json(system_prompt=_FACTS_EXTRACTOR_SYSTEM_PROMPT, user_prompt=user_prompt, temperature=0.0, max_tokens=1800, agent='established_facts', work_id=getattr(state, 'work_id', None))
         except Exception as call_err:
             logger.info(f'[PartWriterAgent] R8-P0-1 事实抽取 LLM 调用失败: {call_err}')
             return 0

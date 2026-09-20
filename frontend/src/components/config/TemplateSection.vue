@@ -20,7 +20,8 @@
         <n-form label-placement="left" label-width="100">
           <n-form-item label="目标字数">
             <n-input-number
-              v-model:value="customTargetWords"
+              :value="localTargetWords"
+              @update:value="onTargetWordsChange"
               :min="1000"
               :max="500000"
               :step="1000"
@@ -32,7 +33,8 @@
           </n-form-item>
           <n-form-item label="Part数量">
             <n-input-number
-              v-model:value="customPartCount"
+              :value="localPartCount"
+              @update:value="onPartCountChange"
               :min="1"
               :max="50"
               :step="1"
@@ -43,7 +45,7 @@
             />
           </n-form-item>
           <n-alert type="info" style="margin-bottom:16px">
-            预计每Part字数：{{ customTargetWords && customPartCount ? Math.round(customTargetWords / customPartCount).toLocaleString() : 0 }} 字
+            预计每Part字数：{{ localTargetWords && localPartCount ? Math.round(localTargetWords / localPartCount).toLocaleString() : 0 }} 字
           </n-alert>
           <n-button type="primary" @click="emit('saveCustom')" block size="large">
             💾 保存自定义配置
@@ -78,7 +80,7 @@
 
 <script setup>
 // P1-15: TemplateSection.vue —— 从 ConfigPanel.vue 拆出 (lines 16-94)
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 const props = defineProps({
   templates: { type: Array, required: true },
@@ -88,7 +90,23 @@ const props = defineProps({
   currentTemplateInfo: { type: Object, default: () => ({}) },
 })
 
-const emit = defineEmits(['select', 'saveCustom'])
+const emit = defineEmits(['select', 'saveCustom', 'update:customTargetWords', 'update:customPartCount'])
+
+// R4-P1-x: v-model:value 此前直接绑 props（只读），用户输入被静默丢弃且保存时提交旧值。
+// 改为本地 ref + emit update，父组件负责回写。
+const localTargetWords = ref(props.customTargetWords)
+const localPartCount = ref(props.customPartCount)
+watch(() => props.customTargetWords, (v) => { localTargetWords.value = v })
+watch(() => props.customPartCount, (v) => { localPartCount.value = v })
+
+function onTargetWordsChange(v) {
+  localTargetWords.value = v
+  emit('update:customTargetWords', v)
+}
+function onPartCountChange(v) {
+  localPartCount.value = v
+  emit('update:customPartCount', v)
+}
 
 function getDisplayInfo(t) {
   return `${t.target_words?.toLocaleString() || 0} 字 · ${t.part_count} Part`

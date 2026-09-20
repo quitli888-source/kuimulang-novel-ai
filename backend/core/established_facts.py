@@ -156,7 +156,10 @@ class EstablishedFacts:
         return None
 
     def clear(self) -> None:
+        # R4-P0-4: 同步清 _sp_index —— 此前只重置 facts，残留的旧下标会让 clear 后
+        # add() 的冲突查找读到已删除元素，直接 IndexError。
         self.facts = []
+        self._sp_index.clear()
 
     # ----------------- 渲染为 prompt 段 -----------------
     def render_for_prompt(
@@ -165,6 +168,7 @@ class EstablishedFacts:
         *,
         before_part_num: Optional[int] = None,
         max_per_category: int = 8,
+        max_total: int = 30,
     ) -> str:
         """渲染为可注入 prompt 的多行文本。
 
@@ -172,6 +176,8 @@ class EstablishedFacts:
             categories: 限定要包含的 category；None 表示全部
             before_part_num: 只包含 part_num < 该值的事实；None 表示全部
             max_per_category: 每个 category 最多取多少条（按 part_num 降序）
+            max_total: 全局上限（按 part_num 全局倒序选最近 N 条）—— P1-91：
+                       防止 100 Part × 9 category × 8 = 720 条事实都塞进 prompt。
 
         Returns:
             多行字符串，category 段标题 + 条目；若全部为空返回 ""。
@@ -188,6 +194,11 @@ class EstablishedFacts:
 
         if not selected:
             return ""
+
+        # P1-91: 全局按 part_num 倒序选最近 max_total 条，再按 category 分组。
+        # 这样既保证保留最新事实，又避免后期 Part 90+ 时把所有历史事实全过一遍再截 8。
+        selected.sort(key=lambda x: x.part_num, reverse=True)
+        selected = selected[:max_total]
 
         # 按 category 分组
         grouped: dict = {}
@@ -240,7 +251,12 @@ class EstablishedFacts:
             if prefer == "newer" and f.superseded_by:
                 # 新版本已 supersede 该事实，按 new 优先：跳过被覆盖的旧事实
                 continue
+            # R4-P2-x: append 后同步 _sp_index——此前不更新，合并进来的事实
+            # 后续 supersede 冲突查找全部落空。
+            pos = len(self.facts)
             self.facts.append(f)
+            if f.subject and f.predicate:
+                self._sp_index.setdefault((f.subject, f.predicate), []).append(pos)
 
     # ----------------- 持久化 -----------------
     def to_dict(self) -> dict:
@@ -257,16 +273,19 @@ class EstablishedFacts:
             return
         raw = d.get("facts") or []
         self._sp_index.clear()  # 重建
-        for idx, item in enumerate(raw):
+        for item in raw:
             if not isinstance(item, dict):
                 continue
             try:
                 f = Fact.from_dict(item)
+                # R4-P0-4: 索引用实际追加位置——此前用 enumerate(raw) 的 idx，
+                # 脏数据被 skip 后下标与 facts 列表脱钩，后续冲突查找 IndexError。
+                pos = len(self.facts)
                 self.facts.append(f)
                 if f.subject and f.predicate:
                     self._sp_index.setdefault(
                         (f.subject, f.predicate), []
-                    ).append(idx)
+                    ).append(pos)
             except Exception:
                 # 单条解析失败不影响整体
                 continue

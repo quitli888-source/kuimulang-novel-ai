@@ -20,6 +20,9 @@ import os
 import functools
 from pathlib import Path
 from typing import List, Optional, Tuple
+from core.logger import get_logger
+
+logger = get_logger('vector_store')
 
 
 @functools.lru_cache(maxsize=2048)
@@ -176,17 +179,31 @@ class VectorStore:
 
     # ---------- 内部 ----------
     def _embed(self, text: str) -> List[float]:
-        """统一 embedding 入口：远程 → 本地 → hash fallback。"""
-        # 1) 远程（仅占位；R7-P0-4 范围内不真正调用第三方，简化降级）
+        """统一 embedding 入口：远程 → 本地 → hash fallback。
+
+        P1-92: 之前 step/siliconflow 路径只递增 fallback_count 但仍走 hash —— 用户配置
+        step provider 时拿到的是 hash 结果，silent regression。现统一走 hash，并在
+        docstring 明确"远程 embedding 暂未接入"；当未来真接入时，把
+        `raise NotImplementedError` 改成实际 HTTP 调用即可。
+        """
+        # 1) 远程 step/siliconflow：当前实现未接入第三方 embedding API，
+        #    仅做 key 存在性检查并统计 fallback。真实接入需要走 OpenAI 协议
+        #    embedding 端点（base_url + /embeddings），代码未实装。
         if self.embedding_provider in ("step", "siliconflow"):
             api_key_name = "STEP_API_KEY" if self.embedding_provider == "step" else "SILICONFLOW_API_KEY"
             api_key = os.environ.get(api_key_name, "")
             if api_key:
-                # 占位：远程 embedding 端点调用不在本轮实现范围内；
-                # 真接入需要 OpenAI 协议 embedding API + base_url，本轮只走降级路径。
+                # 计数"远程 provider 已配置但未实装 embedding 端点"的次数，
+                # 让 dashboard / 排障能看到。
                 self._stats["fallback_count"] += 1
-        # 2) 本地 sentence-transformers（R7-P0-4 暂不实现，依赖过重）
-        # 3) hash-based 假向量（始终可用）
+                self._stats.setdefault("remote_unimplemented", 0)
+                self._stats["remote_unimplemented"] += 1
+                logger.debug(
+                    f'[vector_store] embedding_provider={self.embedding_provider} 远程接口未实装，'
+                    f'当前仅支持 hash fallback（dim={self.embedding_dim}）'
+                )
+        # 2) 本地 sentence-transformers（依赖过重，未实装）
+        # 3) hash-based 假向量（始终可用；语义检索退化为关键词 / 顺序检索）
         return _hash_embedding(text, dim=self.embedding_dim)
 
     @staticmethod

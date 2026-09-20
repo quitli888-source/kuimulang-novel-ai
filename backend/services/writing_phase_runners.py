@@ -68,8 +68,10 @@ class Phase1Runner:
             logger.info(f'[Phase1Runner] 出错: {e}')
             traceback.print_exc()
             await s.emitter.emit(EventType.ERROR, {'message': f'Phase1错误: {str(e)}', 'work_id': s.work_id}, work_id=s.work_id)
-            s.data['phase'] = 'phase1'
-            s._save()
+            # R4-P1-x: 重新抛出 —— 此前吞异常后 run() 会带着空 core_elements 继续跑后续
+            # 阶段，产出基于空设定的垃圾稿，且 phase 被写成成功态（resume 时误判为已完成）。
+            # 失败时不写 phase / 不 _save，保留现场供 resume 重试。
+            raise
 
 
 class Phase2Runner:
@@ -109,9 +111,9 @@ class Phase2Runner:
             await s.emitter.emit(EventType.LOG, {'message': '情节规划完成', 'work_id': s.work_id}, work_id=s.work_id)
         except Exception as e:
             await s.emitter.emit(EventType.ERROR, {'message': f'Phase2错误: {str(e)}', 'work_id': s.work_id}, work_id=s.work_id)
-            s.data['phase'] = 'phase2'
-            s.data['part_outline'] = []
-            s._save()
+            # R4-P1-x: 重新抛出 —— 此前吞异常清空 part_outline 并把 phase 写成 'phase2'，
+            # Phase3 会拿空 outline 继续写，resume 时还会把失败的规划当已完成跳过。
+            raise
 
 
 class Phase3Runner:
@@ -183,45 +185,23 @@ class Phase3Runner:
                             s.vector_store.add(i, part_text)
                     except Exception as vs_err:
                         logger.info(f'[Phase3Runner] vector_store.add 失败（不影响主流程）: {vs_err}')
+                    # P0-90: 委托给 SlidingWindow 自带方法，删除 Phase3Runner 重复实现
+                    # （PartWriterAgent.execute 已先调用过 window.maybe_generate_*，
+                    # 这里再做一次幂等查询：已存在的会跳过，无 LLM 重复调用）
                     if temp_state.window.should_create_rolling_summary(i):
                         try:
-                            from core.llm_client import call_llm
-                            recent_keys = sorted([p for p in temp_state.window.summaries.keys() if p < i])[-temp_state.window.ROLLING_EVERY:]
-                            recent_text = '\n'.join((f'Part {p}: {temp_state.window.summaries[p]}' for p in recent_keys if p in temp_state.window.summaries))
-                            rolling = call_llm(system_prompt='你是长篇小说剧情压缩助手。将下面若干个 Part 的剧情概要压缩为一段 800 字以内的连贯剧情段，保留关键人物、冲突、伏笔、角色位置/状态/伤势变化，输出纯叙事文本，不要分点。', user_prompt=recent_text or '(无最近摘要)', temperature=0.3, max_tokens=1200, agent='rolling_summary')
-                            rolling_text = (rolling or '')[:800]
-                            if not rolling_text.strip():
-                                fallback = '\n'.join((f'Part {p}: {temp_state.window.summaries[p][:100]}' for p in recent_keys if p in temp_state.window.summaries))
-                                rolling_text = fallback[:800]
-                            temp_state.window.add_rolling_summary(i, rolling_text)
-                            await s.emitter.emit(EventType.LOG, {'message': f'📚 Part {i} 二级滚动摘要已生成（{len(rolling_text)} 字）', 'work_id': s.work_id}, work_id=s.work_id)
+                            world_setting = getattr(temp_state, 'world_setting', '') or ''
+                            roll_result = temp_state.window.maybe_generate_rolling_summary(i, world_setting=world_setting, work_id=getattr(temp_state, 'work_id', None))
+                            if roll_result.get('generated'):
+                                await s.emitter.emit(EventType.LOG, {'message': f'📚 Part {i} 二级滚动摘要已生成（{roll_result.get("char_count", 0)} 字）', 'work_id': s.work_id}, work_id=s.work_id)
                         except Exception as roll_err:
                             logger.info(f'[Phase3Runner] 二级滚动摘要生成失败（不影响主流程）: {roll_err}')
                     if temp_state.window.should_create_milestone(i):
                         try:
-                            from core.llm_client import call_llm
-                            recent_keys = sorted([p for p in temp_state.window.summaries.keys() if p < i])[-temp_state.window.MILESTONE_EVERY:]
-                            recent_text = '\n'.join((f'Part {p}: {temp_state.window.summaries[p]}' for p in recent_keys if p in temp_state.window.summaries))
-                            char_state_lines = []
-                            try:
-                                for name, st in (temp_state.window.character_state or {}).items():
-                                    char_state_lines.append(f'- {name}: {st}')
-                            except Exception:
-                                logger.debug('writing_phase_runners: silent except (P2-19)', exc_info=True)
-                            foreshadow_lines = []
-                            try:
-                                for f_item in temp_state.window.foreshadowing or []:
-                                    foreshadow_lines.append(f"- {f_item.get('id', '')}: {f_item.get('content', '')}")
-                            except Exception:
-                                logger.debug('writing_phase_runners: silent except (P2-19)', exc_info=True)
-                            milestone_input = (recent_text or '(无最近摘要)') + ('\n【世界观】' + (temp_state.world_setting or '') if getattr(temp_state, 'world_setting', '') else '') + ('\n【角色状态】\n' + '\n'.join(char_state_lines) if char_state_lines else '') + ('\n【伏笔】\n' + '\n'.join(foreshadow_lines) if foreshadow_lines else '')
-                            milestone = call_llm(system_prompt='你是长篇小说剧情压缩助手。将下面 20 个 Part 的剧情概要压缩为 2000 字以内的全局脉络段，涵盖主线、支线、关键转折、角色弧光，输出纯叙事文本，不要分点。', user_prompt=milestone_input, temperature=0.3, max_tokens=2500, agent='milestone_summary')
-                            milestone_text = (milestone or '')[:2000]
-                            if not milestone_text.strip():
-                                milestone_text = '\n'.join((f'Part {p}: {temp_state.window.summaries[p][:100]}' for p in recent_keys if p in temp_state.window.summaries))[:2000]
-                            milestone_num = i // temp_state.window.MILESTONE_EVERY
-                            temp_state.window.add_milestone(milestone_num, milestone_text)
-                            await s.emitter.emit(EventType.LOG, {'message': f'🏔️ 里程碑 #{milestone_num} 摘要已生成（{len(milestone_text)} 字）', 'work_id': s.work_id}, work_id=s.work_id)
+                            world_setting = getattr(temp_state, 'world_setting', '') or ''
+                            mile_result = temp_state.window.maybe_generate_milestone(i, world_setting=world_setting, work_id=getattr(temp_state, 'work_id', None))
+                            if mile_result.get('generated'):
+                                await s.emitter.emit(EventType.LOG, {'message': f'🏔️ 里程碑 #{mile_result.get("milestone_num", 0)} 摘要已生成（{mile_result.get("char_count", 0)} 字）', 'work_id': s.work_id}, work_id=s.work_id)
                         except Exception as m_err:
                             logger.info(f'[Phase3Runner] 三级里程碑摘要生成失败（不影响主流程）: {m_err}')
                     word_count = len(part_text)
@@ -291,7 +271,9 @@ class Phase4Runner:
             state_mock = s._build_review_state_mock()
             part_nums: list = []
             for k, v in (s.data.get('parts', {}) or {}).items():
-                if isinstance(v, str) and v.strip():
+                # R4-P3-x: 排除 '[Part N 创作失败]' 占位符——非空串会进评审，
+                # 白烧 3 次 LLM 调用并产出无意义评审。
+                if isinstance(v, str) and v.strip() and not v.startswith('[Part '):
                     try:
                         part_nums.append(int(k))
                     except (TypeError, ValueError):
@@ -332,16 +314,27 @@ class Phase4Runner:
                     s.progress_callback(int(part_progress), f'Part {part_num} 评审完成 ({idx}/{len(part_nums)})')
             await s.emitter.emit(EventType.AGENT_CALL, {'agent': 'style_optimizer_agent', 'status': 'start', 'message': '执行风格优化...', 'work_id': s.work_id}, work_id=s.work_id)
             style_agent = StyleOptimizerAgent()
-            try:
-                style_result = await asyncio.to_thread(style_agent.execute, type('State', (), {'parts': s.data.get('parts', {})})())
-            except Exception as e:
-                logger.info(f'[Phase4Runner] StyleOptimizer 失败（不影响主流程）: {e}')
-                style_result = {}
-            s.data['final_draft'] = s.data.get('parts', {})
+            # R4-P1-x: StyleOptimizerAgent.execute 签名是 (state, part_num, part_text, ...)——
+            # 此前只传 state 必 TypeError，被吞后 final_draft 直接取 parts，"风格优化"
+            # 从未真正执行但前端显示完成。改为逐 Part 调用，失败的 Part 保留原文。
+            # state_mock 含 part_outline/work_id（execute 内部会取 outline[part_num-1]）。
+            s.data['final_draft'] = dict(s.data.get('parts', {}))
+            style_ok = 0
+            style_fail = 0
+            for part_num in part_nums:
+                part_key = str(part_num)
+                try:
+                    optimized = await asyncio.to_thread(style_agent.execute, state_mock, part_num, s.data['parts'][part_key])
+                    if isinstance(optimized, str) and optimized.strip():
+                        s.data['final_draft'][part_key] = optimized
+                        style_ok += 1
+                except Exception as e:
+                    style_fail += 1
+                    logger.info(f'[Phase4Runner] StyleOptimizer Part {part_num} 失败（保留原文）: {e}')
             s.data['review_report'] = s._aggregate_review_results(per_part_results)
             s.data['phase'] = 'phase4'
             total_words = sum((len(t) for t in s.data['final_draft'].values()))
-            await s.emitter.emit(EventType.AGENT_CALL, {'agent': 'style_optimizer_agent', 'status': 'end', 'message': f'风格优化完成 (总字数: {total_words})', 'work_id': s.work_id}, work_id=s.work_id)
+            await s.emitter.emit(EventType.AGENT_CALL, {'agent': 'style_optimizer_agent', 'status': 'end', 'message': f'风格优化完成 (成功 {style_ok}/{len(part_nums)}, 失败 {style_fail}, 总字数: {total_words})', 'work_id': s.work_id}, work_id=s.work_id)
             s._save()
             await s.emitter.emit(EventType.LOG, {'message': '风格优化完成', 'work_id': s.work_id}, work_id=s.work_id)
         except Exception as e:

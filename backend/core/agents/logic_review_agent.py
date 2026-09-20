@@ -212,6 +212,7 @@ class LogicReviewAgent(BaseAgent):
                 user_prompt=user_prompt,
                 temperature=0.2,
                 agent=self.name,
+                work_id=getattr(state, 'work_id', None),  # P1-87: per-work 计费路由
             )
             if not isinstance(result, dict):
                 raise ValueError(f"Logic Agent 返回非 dict: {type(result).__name__}")

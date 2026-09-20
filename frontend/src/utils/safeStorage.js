@@ -88,3 +88,39 @@ export function flushPersist(key) {
   safeStorage.set(key, pending.value)
   _pendingTimers.delete(key)
 }
+
+const _throttledFlags = new Set()
+
+/**
+ * P1-97: 前缘节流（leading-edge throttle）—— 高频事件流下避免"每次都 reset 定时器导致
+ * 最后一次写入永远被丢掉"的问题。
+ *
+ * 与 debouncedPersist 的区别：
+ *   - debouncedPersist：每次调用都 clearTimeout + 重置定时器 → SSE 高频事件下
+ *     每次新事件都把"原本该 1s 后写"的定时器清掉，最后一条状态永远不写。
+ *   - throttledPersist：第一次调用 schedule，1s 内后续调用都 no-op；1s 到点 flush 一次；
+ *     flush 后解除标记，下一批第一次调用重新 schedule。保证窗口内最新状态写盘。
+ *
+ * 用法：throttledPersist('foo', 1000)({ a: 1 })
+ */
+export function throttledPersist(key, delayMs = 1000) {
+  return (value) => {
+    if (!isBrowser) return
+    if (_throttledFlags.has(key)) {
+      // 窗口内：仅更新待写值（避免 reset 定时器），到点时一次性 flush 最新值
+      const existing = _pendingTimers.get(key)
+      if (existing) existing.value = value
+      return
+    }
+    _throttledFlags.add(key)
+    const timer = setTimeout(() => {
+      const pending = _pendingTimers.get(key)
+      if (pending) {
+        safeStorage.set(key, pending.value)
+        _pendingTimers.delete(key)
+      }
+      _throttledFlags.delete(key)
+    }, delayMs)
+    _pendingTimers.set(key, { timer, value })
+  }
+}

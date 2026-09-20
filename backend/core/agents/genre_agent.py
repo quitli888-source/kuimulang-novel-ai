@@ -90,6 +90,7 @@ class GenreAgent(BaseAgent):
                 user_prompt=user_prompt,
                 temperature=0.3,
                 agent=self.name,
+                work_id=getattr(state, 'work_id', None),  # P1-87: per-work 计费路由
             )
 
             self.log_done(

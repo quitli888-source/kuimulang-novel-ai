@@ -210,7 +210,10 @@ const costXLabels = computed(() => {
 })
 
 const wordCount = computed(() => {
-  const parts = workData.value.final_draft || workData.value.parts || {}
+  // R4-P2-x: final_draft 为空对象时（Phase4 未跑完）`{} || parts` 恒取 final_draft，
+  // 导致总字数显示 0。空 final_draft 回退 parts。
+  const fd = workData.value.final_draft
+  const parts = (fd && Object.keys(fd).length) ? fd : (workData.value.parts || {})
   return Object.values(parts).reduce((sum, text) => sum + (text?.length || 0), 0)
 })
 

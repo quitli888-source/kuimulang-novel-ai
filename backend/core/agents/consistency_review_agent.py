@@ -139,6 +139,7 @@ class ConsistencyReviewAgent(BaseAgent):
                 user_prompt=user_prompt,
                 temperature=0.2,
                 agent=self.name,
+                work_id=getattr(state, 'work_id', None),  # P1-87: per-work 计费路由
             )
 
             p0_count = len([i for i in result.get("issues", []) if i.get("level") == "P0"])

@@ -20,9 +20,10 @@ os.environ.setdefault('ENABLE_VECTOR_RAG', '0')
 import core.llm_client as llm_client_mod
 _original_call_llm = llm_client_mod.call_llm
 
-def _safe_call_llm(system_prompt, user_prompt, temperature=0.7, max_tokens=4000, agent='default', stream=False, stream_callback=None):
+def _safe_call_llm(system_prompt, user_prompt, temperature=0.7, max_tokens=4000, agent='default', stream=False, stream_callback=None, work_id=None):
     if not stream:
-        return _original_call_llm(system_prompt, user_prompt, temperature, max_tokens, agent, stream, stream_callback)
+        # P2-106: 透传 work_id 到真实 call_llm，让成本计入 per-work tracker
+        return _original_call_llm(system_prompt, user_prompt, temperature, max_tokens, agent, stream, stream_callback, work_id)
     import time as _t
     from core.config import get_llm_config_for_agent
     from openai import OpenAI
@@ -47,7 +48,8 @@ def _safe_call_llm(system_prompt, user_prompt, temperature=0.7, max_tokens=4000,
     content = llm_client_mod._strip_think_tags(content)
     call_duration = (_t.time() - call_start) * 1000
     from core.cost_tracker import get_tracker as _gt, estimate_tokens_from_text as _ett
-    tracker = _gt()
+    # P2-106: 传 work_id 让 per-work 计费准确；测试中 work_id 通常为 None → 走全局 tracker
+    tracker = _gt(work_id=work_id)
     usage = last_chunk.usage if last_chunk is not None and getattr(last_chunk, 'usage', None) is not None else None
     if usage is not None:
         tracker.record(model=cfg.model, agent=agent, is_json=False, prompt_tokens=usage.prompt_tokens or 0, completion_tokens=usage.completion_tokens or 0, total_tokens=usage.total_tokens or 0, duration_ms=call_duration)

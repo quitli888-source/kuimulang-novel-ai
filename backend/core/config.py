@@ -1,10 +1,15 @@
 """
 番茄小说AI创作系统 V5 - 配置管理
 支持从.env文件读取和写入，支持前端实时同步
+
+P2-101: read_env 加 @lru_cache —— 100 次 LLM 调用每次拿 config → 100 次全文件读。
+        write_env / delete_env / load_llm_config 等任何 .env 变更路径需失效缓存。
+P2-102: write_env 保留原有 key 顺序 + 注释；新增 key 追加到末尾（不重排已有内容）。
 """
 import json
 import os
 import sys
+from functools import lru_cache
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import Optional
@@ -49,7 +54,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 WORKS_DIR.mkdir(parents=True, exist_ok=True)
 MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
-def read_env(key: str, default: str='') -> str:
+def _read_env_uncached(key: str, default: str='') -> str:
     if not ENV_FILE.exists():
         return default
     for line in ENV_FILE.read_text(encoding='utf-8').splitlines():
@@ -62,8 +67,26 @@ def read_env(key: str, default: str='') -> str:
                 return v.strip()
     return default
 
+
+@lru_cache(maxsize=256)
+def read_env(key: str, default: str='') -> str:
+    """P2-101: 缓存 .env 读取 —— 同一 key 多次调用只读一次文件。
+
+    缓存失效由 write_env / delete_env / reload_env_cache 显式触发。
+    """
+    return _read_env_uncached(key, default)
+
+
+def reload_env_cache():
+    """P2-101: 显式清空缓存（外部直接修改 .env 后调用）。"""
+    read_env.cache_clear()
+
+
 def write_env(key: str, value: str):
-    """写入或更新.env中的配置键值对"""
+    """P2-102: 写入或更新 .env —— 保留原有 key 顺序 + 注释；
+    新增 key 追加到末尾（不重排已有内容）。
+    P2-101: 写盘后失效 read_env 缓存。
+    """
     lines = []
     if ENV_FILE.exists():
         lines = ENV_FILE.read_text(encoding='utf-8').splitlines()
@@ -71,7 +94,8 @@ def write_env(key: str, value: str):
     found = False
     for line in lines:
         stripped = line.strip()
-        if stripped.startswith('#'):
+        if stripped.startswith('#') or not stripped:
+            # 注释 / 空行原样保留（保持用户写的顺序）
             new_lines.append(line)
             continue
         if '=' in stripped:
@@ -82,8 +106,11 @@ def write_env(key: str, value: str):
                 continue
         new_lines.append(line)
     if not found:
+        # P2-102: 新增 key 追加到末尾（不强行按字母重排）
         new_lines.append(f'{key}={value}')
     ENV_FILE.write_text('\n'.join(new_lines), encoding='utf-8')
+    reload_env_cache()  # P2-101: 失效缓存
+
 
 def delete_env(key: str):
     """从.env中删除配置"""
@@ -91,6 +118,7 @@ def delete_env(key: str):
         return
     lines = [l for l in ENV_FILE.read_text(encoding='utf-8').splitlines() if not (l.strip().startswith(f'{key}=') and '=' in l)]
     ENV_FILE.write_text('\n'.join(lines), encoding='utf-8')
+    reload_env_cache()  # P2-101: 失效缓存
 
 @dataclass
 class LLMConfig:
@@ -175,9 +203,19 @@ class AppConfig:
             self.template = DEFAULT_TEMPLATES[0]
         custom_target_words = read_env('CUSTOM_TARGET_WORDS', '')
         custom_part_count = read_env('CUSTOM_PART_COUNT', '')
-        if custom_target_words and custom_part_count:
-            self._target_words = int(custom_target_words)
-            self._part_count = int(custom_part_count)
+        # R4-P1-x: int() 失败/part_count=0 此前直接 bubble 到启动路径（ZeroDivisionError /
+        # ValueError），UI 配 0 或 .env 写非法值即无法启动。非法配置回退模板默认值。
+        custom_words = custom_parts = None
+        try:
+            if custom_target_words:
+                custom_words = int(custom_target_words)
+            if custom_part_count:
+                custom_parts = int(custom_part_count)
+        except (TypeError, ValueError):
+            _logger.info(f'[Config] 自定义字数/Part数配置非法: words={custom_target_words!r}, parts={custom_part_count!r}，回退模板默认值')
+        if custom_words and custom_parts and custom_words > 0 and custom_parts > 0:
+            self._target_words = custom_words
+            self._part_count = custom_parts
             self._part_word_min = max(1000, self._target_words // self._part_count // 2)
             self._part_word_max = min(10000, self._target_words // self._part_count * 2)
         else:
@@ -286,7 +324,7 @@ def _dataclass_defaults() -> dict:
                 defaults[f_name] = f_obj.default
                 continue
         except Exception:
-            logger.debug('app: silent except (P2-19)', exc_info=True)
+            _logger.debug('app: silent except (P2-19)', exc_info=True)
         if f_obj.default_factory is not MISSING and f_obj.default_factory is not None:
             try:
                 defaults[f_name] = f_obj.default_factory()
@@ -339,7 +377,7 @@ def migrate_llm_config() -> bool:
             try:
                 _LLM_CONFIG_MIGRATION_FLAG.touch()
             except Exception:
-                logger.debug('app: silent except (P2-19)', exc_info=True)
+                _logger.debug('app: silent except (P2-19)', exc_info=True)
         except Exception as e:
             _logger.info(f'[Config] migrate_llm_config: 写盘失败（不影响主流程）: {e}')
             return False

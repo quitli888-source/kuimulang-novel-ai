@@ -1,12 +1,20 @@
 """
 番茄小说AI创作系统 V5 - 配置管理API
 前端配置 → 自动同步写入 .env / data/llm_config.json
+
+R4-P1-x: logger / os / sliding_window 配置路径 import 从文件末尾上移 ——
+此前路由函数在模块 import 完成前引用这些名字纯属侥幸（函数体运行时才解析）。
 """
 import json
+import os as _os
+from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from core.config import get_app_config, DEFAULT_TEMPLATES, write_env, read_env, delete_env, get_all_providers, load_llm_config, save_llm_config, get_llm_config_for_agent
-from core.llm_providers import ActiveLLMConfig
+from core.llm_providers import ActiveLLMConfig, PROVIDER_ENV_KEYS
+from core.sliding_window import WINDOW_CONFIG_FILE as _WCF
+from core.logger import get_logger
+logger = get_logger('config_api')
 router = APIRouter()
 
 @router.get('/providers')
@@ -52,7 +60,6 @@ def update_provider_config(provider_id: str, req: ProviderConfigUpdate):
     - JSON模型名称（所有供应商均可修改）
     - Base URL（仅自定义LLM）
     """
-    from core.llm_providers import PROVIDER_ENV_KEYS
     if provider_id not in PROVIDER_ENV_KEYS:
         raise HTTPException(400, f'未知供应商: {provider_id}')
     key_map = {pid: meta['api_key'] for pid, meta in PROVIDER_ENV_KEYS.items()}
@@ -72,7 +79,6 @@ def update_provider_config(provider_id: str, req: ProviderConfigUpdate):
         logger.info(f'[PUT] 自定义LLM Base URL已更新为: {req.base_url}')
     from core.llm_client import reset_llm_clients
     reset_llm_clients()
-    llm_client_module._json_client = None
     logger.info(f'[PUT] 供应商 {provider_id} 配置更新完成')
     return {'ok': True, 'provider_id': provider_id}
 
@@ -101,14 +107,15 @@ def update_llm_config_api(req: LLMConfigUpdate):
     save_llm_config(cfg)
     from core.llm_client import reset_llm_clients
     reset_llm_clients()
-    llm_client_module._json_client = None
     return {'ok': True}
 
 @router.get('/llm')
 def get_llm_config_legacy():
     """兼容：返回当前激活供应商的LLM配置"""
     cfg = get_llm_config_for_agent('part_writer')
-    return {'api_key': cfg.api_key, 'base_url': cfg.base_url, 'model': cfg.model, 'json_model': cfg.json_model, 'has_api_key': bool(cfg.api_key)}
+    # R4-P1-x: 不再返回明文 api_key —— 该端点无鉴权，GET /llm 即可拿到 .env 真实密钥。
+    # has_api_key 已足够前端判断"是否已配置"。
+    return {'base_url': cfg.base_url, 'model': cfg.model, 'json_model': cfg.json_model, 'has_api_key': bool(cfg.api_key)}
 
 class LLMConfigUpdateLegacy(BaseModel):
     api_key: str = ''
@@ -135,7 +142,6 @@ def update_llm_config_legacy(req: LLMConfigUpdateLegacy):
         write_env(json_model_key_map[provider_id], req.json_model)
     from core.llm_client import reset_llm_clients
     reset_llm_clients()
-    llm_client_module._json_client = None
     return {'ok': True}
 
 @router.get('/agents')
@@ -234,10 +240,6 @@ def update_app_config(req: AppConfigUpdate):
         import traceback
         traceback.print_exc()
         raise HTTPException(500, f'Internal Server Error: {str(e)}')
-import os as _os
-from core.sliding_window import WINDOW_CONFIG_FILE as _WCF
-from core.logger import get_logger
-logger = get_logger('config_api')
 
 def load_window_config() -> dict:
     """从 data/window_config.json 读取滑动窗口配置。"""
@@ -295,8 +297,8 @@ def update_sliding_window_config(req: SlidingWindowConfigUpdate):
 def reset_sliding_window_config():
     """重置为类默认值（删除 data/window_config.json）。"""
     try:
-        if _os.path.exists(WINDOW_CONFIG_FILE):
-            _os.remove(WINDOW_CONFIG_FILE)
+        if _os.path.exists(_WCF):
+            _os.remove(_WCF)
         return {'ok': True, 'message': '已重置为类默认值'}
     except Exception as e:
         raise HTTPException(500, str(e))

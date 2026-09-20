@@ -127,6 +127,7 @@ class InspirationAgent(BaseAgent):
                 user_prompt=user_prompt,
                 temperature=0.4,
                 agent=self.name,
+                work_id=getattr(state, 'work_id', None),  # P1-87: per-work 计费路由
             )
 
             # 兼容字段名变体（模型有时会自行命名）

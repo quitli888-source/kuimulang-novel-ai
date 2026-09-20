@@ -148,8 +148,11 @@ def main():
     }
 
     # 保存状态
-    state.save()
+    # R4-P2-x: phase 必须在 save() 之前赋值 —— save() 按调用时的 self.phase
+    # 序列化，此前先 save 后置位，磁盘上的 phase 永远不是 complete，
+    # --resume 续写链路实际失效。
     state.phase = "complete"
+    state.save()
 
     # 输出成本统计
     tracker = get_tracker()

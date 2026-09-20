@@ -16,10 +16,15 @@ os.environ['ENABLE_VECTOR_RAG'] = '0'
 import core.llm_client as llm_client_mod
 _original_call_llm = llm_client_mod.call_llm
 
-def _safe_call_llm(system_prompt, user_prompt, temperature=0.7, max_tokens=4000, agent='default', stream=False, stream_callback=None):
-    """对 stream 路径跳过 choices=[] 的 chunk（stepfun 偶发）；非 stream 走原函数。"""
+def _safe_call_llm(system_prompt, user_prompt, temperature=0.7, max_tokens=4000, agent='default', stream=False, stream_callback=None, *args, **kwargs):
+    """对 stream 路径跳过 choices=[] 的 chunk（stepfun 偶发）；非 stream 走原函数。
+
+    R4-P1-x: 签名加 *args/**kwargs 透传 —— 生产 call_llm 带 work_id 关键字参数，
+    PartWriterAgent 以 work_id=... 调用，此前窄签名直接 TypeError，异常被
+    part_writer 的 except 吞掉计为空内容，测试既不报错也不打真 API。
+    """
     if not stream:
-        return _original_call_llm(system_prompt, user_prompt, temperature, max_tokens, agent, stream, stream_callback)
+        return _original_call_llm(system_prompt, user_prompt, temperature, max_tokens, agent, stream, stream_callback, *args, **kwargs)
     import time as _t
     from core.config import get_llm_config_for_agent
     from openai import OpenAI

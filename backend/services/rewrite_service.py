@@ -2,6 +2,7 @@
 番茄小说AI创作系统 V5 - AI辅助改写服务
 支持选中文字 → 润色/扩写/缩写
 """
+import asyncio
 from core.config import get_app_config, read_env
 from core.llm_client import get_client
 
@@ -35,13 +36,33 @@ class RewriteService:
 5. 不要添加任何注释或标注，直接输出缩写后的正文""",
     }
 
+    # R4-P2-x: 单次改写输入上限 —— 此前无限制，粘贴 20 万字符会产生
+    # max_tokens=40万 的请求（provider 400 或巨额计费）。
+    MAX_INPUT_CHARS = 20000
+    VALID_MODES = ('polish', 'expand', 'summarize')
+
     async def rewrite(self, text: str, mode: str, context: str = "") -> dict:
         """
         执行AI改写
         mode: "polish" | "expand" | "summarize"
         """
         cfg = get_app_config()
-        system = self.SYSTEM_PROMPTS.get(mode, self.SYSTEM_PROMPTS["polish"])
+        # R4-P2-x: mode 白名单校验 —— 此前任意值静默回落到 polish，调用方无从感知
+        if mode not in self.VALID_MODES:
+            return {
+                "original": text,
+                "rewritten": text,
+                "mode": mode,
+                "error": f"不支持的改写模式: {mode}（可选: {', '.join(self.VALID_MODES)}）",
+            }
+        if len(text) > self.MAX_INPUT_CHARS:
+            return {
+                "original": text,
+                "rewritten": text,
+                "mode": mode,
+                "error": f"输入过长（{len(text)} 字符，上限 {self.MAX_INPUT_CHARS}）",
+            }
+        system = self.SYSTEM_PROMPTS[mode]
 
         user_prompt = f"原文：\n{text}"
         if context:
@@ -50,16 +71,19 @@ class RewriteService:
         try:
             client = get_client()
             model = cfg.llm.model or read_env("OPENAI_MODEL", "MiniMax-Text-01")
-            response = client.chat.completions.create(
+            # R4-P2-x: 同步 SDK 调用放线程池 —— 此前 30-120s 的改写请求直接阻塞
+            # 整个 asyncio 事件循环，SSE 心跳/其它请求全部排队。
+            response = await asyncio.to_thread(
+                client.chat.completions.create,
                 model=model,
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.5,
-                max_tokens=len(text) * 2 + 500,
+                max_tokens=min(len(text) * 2 + 500, 16000),
             )
-            rewritten = response.choices[0].message.content.strip()
+            rewritten = (response.choices[0].message.content or "").strip()
         except Exception as e:
             return {
                 "original": text,

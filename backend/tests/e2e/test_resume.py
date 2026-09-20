@@ -12,6 +12,7 @@ R5-P3-5.1: test_resume.py —— 验证 resume 路径跳过 Phase1+2，直接从
 import asyncio
 import json
 import sys
+import pytest
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -50,8 +51,9 @@ def test_resume_phase3_part40_keeps_phase_after_save(tmp_path):
         with patches[0], patches[1]:
             svc = WritingService(work_id, emitter, resume=True)
     except Exception as init_err:
-        logger.info(f'[test_resume] init 警告: {init_err}')
-        return
+        # R4-P1-x: 构造失败必须让测试失败——此前 return 让断言永不执行，
+        # import/配置/回归错误都会被伪装成"通过"。
+        pytest.fail(f'WritingService(resume=True) 构造失败: {init_err}')
     assert svc.data.get('phase') == 'phase3_part40', f"resume=True 不应重置 phase，实际为 {svc.data.get('phase')}"
     assert len(svc.data.get('parts', {})) == 40, f"resume 应保留 40 个 Part，实际 {len(svc.data.get('parts', {}))}"
     logger.info(f"[test_resume] PASS: resume=True 后 phase={svc.data.get('phase')}, parts={len(svc.data.get('parts', {}))}")
@@ -70,8 +72,7 @@ def test_restart_resets_phase_to_init(tmp_path):
         with patches[0], patches[1]:
             svc = WritingService(work_id, emitter, resume=False, restart=True)
     except Exception as init_err:
-        logger.info(f'[test_restart] init 警告: {init_err}')
-        return
+        pytest.fail(f'WritingService(restart=True) 构造失败: {init_err}')
     assert svc.data.get('phase') == 'init', f"restart=True 应重置 phase=init，实际为 {svc.data.get('phase')}"
     assert svc.data.get('parts') == {}, f"restart=True 应清空 parts，实际 {svc.data.get('parts')}"
     assert svc.data.get('part_summaries') == {}, f"restart=True 应清空 part_summaries，实际 {svc.data.get('part_summaries')}"
@@ -120,7 +121,7 @@ def test_run_with_resume_does_not_invoke_phase1_agents(tmp_path):
             try:
                 await svc._phase3_writing(start_from=41)
             except Exception as run_err:
-                logger.info(f'[test_run_resume] 警告: run 异常（可接受）: {run_err}')
+                pytest.fail(f'_phase3_writing(start_from=41) 异常: {run_err}')
     asyncio.run(_run())
     assert calls['inspiration'] == 0, f"resume 不应调 InspirationAgent，实际 {calls['inspiration']}"
     assert calls['genre'] == 0, f"resume 不应调 GenreAgent，实际 {calls['genre']}"

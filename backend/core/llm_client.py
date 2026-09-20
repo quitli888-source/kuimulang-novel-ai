@@ -10,10 +10,12 @@ import json
 import re
 import time
 import os
+from typing import Optional
 from openai import OpenAI
 from core.config import get_llm_config_for_agent, get_llm_config
 from core.error_handler import LLMError, NetworkError, SystemError
 from core.logger import get_logger
+from core.text_utils import truncate, strip_padding_chars
 logger = get_logger('llm_client')
 
 def _safe_temperature(temp: float, model: str) -> float:
@@ -25,6 +27,21 @@ def _safe_temperature(temp: float, model: str) -> float:
     if any((model.lower().startswith(p.lower()) for p in minimax_prefixes)):
         return max(temp, 0.01)
     return temp
+
+def _is_client_error(e: Exception) -> bool:
+    """R4-P1-x: 识别 4xx 客户端错误（不重试）—— 401 鉴权 / 400 参数 / 404 模型不存在。
+    既认 openai SDK 异常类型，也兜底认 status_code 属性与报文关键词（兼容代理包装的异常）。"""
+    try:
+        from openai import AuthenticationError, PermissionDeniedError, BadRequestError, NotFoundError, UnprocessableEntityError
+        if isinstance(e, (AuthenticationError, PermissionDeniedError, BadRequestError, NotFoundError, UnprocessableEntityError)):
+            return True
+    except ImportError:
+        pass
+    status = getattr(e, 'status_code', None)
+    if isinstance(status, int) and 400 <= status < 500:
+        return True
+    msg = str(e).lower()
+    return 'invalid api key' in msg or 'authentication' in msg or 'model not found' in msg or 'does not exist' in msg and 'model' in msg
 _NO_JSON_FORMAT_MODELS = ('minimax', 'abab', 'm2', 'mini-max', 'deepseek', 'qwen', 'glm', 'ernie', 'step')
 _response_format_cache: dict[str, bool] = {}
 
@@ -62,11 +79,20 @@ def _extract_json(raw: str) -> str:
     2. 前后有解释文字
     3. 模型在 JSON 前加了"以下是..."之类引导语
     4. 末尾有多余的逗号（宽松修复）
+
+    P2-99: 优先匹配 ```json ... ``` 块；只有没 ```json 时才回退到任意 ``` 块，
+           避免模型输出 ```python ... ``` 包含 ```json 字面量时被非贪婪匹配错选。
     """
     raw = raw.strip()
-    md_match = re.search('```(?:json)?\\s*\\n?([\\s\\S]*?)\\n?```', raw)
-    if md_match:
-        raw = md_match.group(1).strip()
+    # 1) 优先匹配 ```json ... ``` 显式 JSON 块
+    json_match = re.search('```json\\s*\\n?([\\s\\S]*?)\\n?```', raw, re.IGNORECASE)
+    if json_match:
+        raw = json_match.group(1).strip()
+    else:
+        # 2) 回退到任意 ``` ... ``` 块（最后一个，避免 ```python 示例被错选）
+        md_matches = list(re.finditer('```([a-zA-Z]*)\\s*\\n?([\\s\\S]*?)\\n?```', raw))
+        if md_matches:
+            raw = md_matches[-1].group(2).strip()
     start = raw.find('{')
     end = raw.rfind('}')
     if start != -1 and end != -1 and (end >= start):
@@ -157,21 +183,29 @@ def reset_llm_clients() -> None:
     _json_client = None
     _client_cache.clear()
 
-def call_llm(system_prompt: str, user_prompt: str, temperature: float=0.7, max_tokens: int=4000, agent: str='default', stream: bool=False, stream_callback: callable=None) -> str:
-    """调用 LLM 并返回文本结果，自动重试3次。agent参数决定使用哪个供应商的配置。"""
+def call_llm(system_prompt: str, user_prompt: str, temperature: float=0.7, max_tokens: int=4000, agent: str='default', stream: bool=False, stream_callback: callable=None, work_id: Optional[str]=None) -> str:
+    """调用 LLM 并返回文本结果，自动重试3次。agent参数决定使用哪个供应商的配置。
+
+    P1-87: 新增 work_id 参数 —— 透传给 cost_tracker，使 per-work 成本统计准确。
+    """
     client, model_name = _get_client_for_agent(agent)
     temp = _safe_temperature(temperature, model_name)
     messages = [{'role': 'system', 'content': system_prompt}, {'role': 'user', 'content': user_prompt}]
     for attempt in range(3):
         try:
             call_start = time.time()
-            logger.info(f'    [LLM] 第{attempt + 1}次调用开始: model={model_name}, max_tokens={max_tokens}, agent={agent}, stream={stream}')
+            logger.info(f'    [LLM] 第{attempt + 1}次调用开始: model={model_name}, max_tokens={max_tokens}, agent={agent}, stream={stream}, work_id={work_id}')
             logger.info(f'    [LLM] messages长度: {len(messages)} 条, 系统提示长度: {len(system_prompt)} 字符')
             if stream and stream_callback:
                 response = client.chat.completions.create(model=model_name, messages=messages, temperature=temp, max_tokens=max_tokens, stream=True)
                 content = ''
                 last_chunk = None
                 for chunk in response:
+                    # R4-P1-x: 部分 provider 的流末尾发 choices=[] 的 usage-only chunk，
+                    # 直接 chunk.choices[0] 会 IndexError → 整个请求白重试 3 次（token 已扣）。
+                    if not chunk.choices:
+                        last_chunk = chunk
+                        continue
                     if chunk.choices[0].delta.content:
                         chunk_content = chunk.choices[0].delta.content
                         content += chunk_content
@@ -180,7 +214,17 @@ def call_llm(system_prompt: str, user_prompt: str, temperature: float=0.7, max_t
                 content = content.strip()
             else:
                 response = client.chat.completions.create(model=model_name, messages=messages, temperature=temp, max_tokens=max_tokens)
-                content = response.choices[0].message.content.strip()
+                if not response.choices:
+                    raise ValueError(f'LLM 返回空 choices: model={model_name}')
+                message = response.choices[0].message
+                # R4-P1-x: 推理模型（deepseek-r1 / MiniMax-M3 代理）可能把全部预算花在
+                # reasoning 上，content 为 None —— None.strip() 会 AttributeError 触发无谓重试。
+                content = (message.content or '')
+                finish_reason = getattr(response.choices[0], 'finish_reason', None)
+                if finish_reason == 'length':
+                    # R4-P1-x: 此前完全不看 finish_reason —— max_tokens 截断的残篇会被当作
+                    # 完整输出返回，Part 中间夹半句话。至少留下可观测痕迹。
+                    logger.info(f'    [LLM] 警告: finish_reason=length，输出可能被 max_tokens={max_tokens} 截断')
                 # P0-44: 删除 last_chunk = None —— stream=False 路径下 usage 取自 response，
                 # last_chunk 仅 stream=True 路径才有意义，赋值后再读 = dead branch
             content = _strip_think_tags(content)
@@ -190,7 +234,7 @@ def call_llm(system_prompt: str, user_prompt: str, temperature: float=0.7, max_t
             logger.info(f'    [LLM] 返回内容长度: {len(content)} 字符, 预览: {content_preview}')
             try:
                 from core.cost_tracker import get_tracker, estimate_tokens_from_text
-                tracker = get_tracker()
+                tracker = get_tracker(work_id=work_id)  # P1-87: 透传 work_id 到 per-work tracker
                 usage = None
                 if not stream:
                     usage = getattr(response, 'usage', None)
@@ -218,6 +262,10 @@ def call_llm(system_prompt: str, user_prompt: str, temperature: float=0.7, max_t
             return content
         except Exception as e:
             logger.info(f'  [LLM] 第{attempt + 1}次调用失败: {e}')
+            # R4-P1-x: 4xx 客户端错误（鉴权失败/参数错误/模型不存在）重试永远不会成功，
+            # 此前一律重试 3 次 + 线性 sleep，纯浪费配额与用户时间。
+            if _is_client_error(e):
+                raise LLMError(f'LLM调用失败（客户端错误，不重试）: {e}')
             if attempt < 2:
                 wait_time = 3 * (attempt + 1)
                 logger.info(f'  [LLM] 等待{wait_time}秒后重试...')
@@ -231,13 +279,15 @@ def call_llm(system_prompt: str, user_prompt: str, temperature: float=0.7, max_t
                 else:
                     raise LLMError(f'LLM调用失败: {e}')
 
-def call_llm_json(system_prompt: str, user_prompt: str, temperature: float=0.3, max_tokens: int=4000, agent: str='default') -> dict:
+def call_llm_json(system_prompt: str, user_prompt: str, temperature: float=0.3, max_tokens: int=4000, agent: str='default', work_id: Optional[str]=None) -> dict:
     """
     调用 LLM 并返回 JSON 结果。
     - 根据 agent 参数选择对应供应商的 JSON 模型
     - 自动检测并降级 response_format（不支持的模型靠 prompt 引导）
     - 多级 JSON 修复，兼容各种输出风格
     - 失败时最多重试3次
+
+    P1-87: 新增 work_id 参数 —— 透传给 cost_tracker，使 per-work 成本统计准确。
     """
     cfg = get_llm_config_for_agent(agent)
     client = OpenAI(api_key=cfg.api_key, base_url=cfg.base_url)
@@ -251,6 +301,7 @@ def call_llm_json(system_prompt: str, user_prompt: str, temperature: float=0.3, 
     json_reminder = '\n\n请直接输出 JSON 对象，第一个字符是 {，最后一个字符是 }，不要任何其他内容。'
     full_user_prompt = user_prompt + json_reminder
     last_error = None
+    last_raw = ''
     call_start = time.time()
     current_max_tokens = max_tokens
     for attempt in range(3):
@@ -260,11 +311,14 @@ def call_llm_json(system_prompt: str, user_prompt: str, temperature: float=0.3, 
                 kwargs['response_format'] = {'type': 'json_object'}
             resp = client.chat.completions.create(**kwargs)
             call_duration = (time.time() - call_start) * 1000
-            raw = resp.choices[0].message.content.strip()
+            if not resp.choices:
+                raise ValueError('LLM 返回空 choices')
+            raw = (resp.choices[0].message.content or '').strip()
+            last_raw = raw  # R4-P1-x: 供最终失败时附 raw_text 给上层营救逻辑
             raw = _strip_think_tags(raw)
             try:
                 from core.cost_tracker import get_tracker
-                tracker = get_tracker()
+                tracker = get_tracker(work_id=work_id)  # P1-87: 透传 work_id
                 usage = resp.usage
                 if usage:
                     tracker.record(model=model, agent=agent, is_json=True, prompt_tokens=usage.prompt_tokens or 0, completion_tokens=usage.completion_tokens or 0, total_tokens=usage.total_tokens or 0, duration_ms=call_duration)
@@ -287,15 +341,27 @@ def call_llm_json(system_prompt: str, user_prompt: str, temperature: float=0.3, 
                 use_response_format = False
                 kwargs.pop('response_format', None)
                 continue
+            # R4-P1-x: 4xx 客户端错误不重试（同 call_llm 约定）
+            if _is_client_error(e):
+                raise LLMError(f'LLM调用失败（客户端错误，不重试）: {e}')
             last_error = e
             logger.info(f'  [LLM-JSON] 第{attempt + 1}次调用失败: {e}')
             if attempt < 2:
                 time.sleep(3 * (attempt + 1))
-    if isinstance(last_error, ValueError):
-        raise SystemError(f'JSON解析失败: {last_error}')
-    elif 'network' in str(last_error).lower() or 'connection' in str(last_error).lower():
-        raise NetworkError(f'网络连接失败: {last_error}')
-    elif 'rate_limit' in str(last_error).lower() or 'quota' in str(last_error).lower():
-        raise SystemError(f'速率限制或配额不足: {last_error}')
-    else:
-        raise LLMError(f'LLM调用失败: {last_error}')
+    # R4-P1-x: 异常附 raw_text —— LogicReviewAgent 的 regex 营救路径读 e.raw_text，
+    # 此前 SystemError 不带该属性，营救逻辑从未生效（永远返回降级评分）。
+    def _raise_final(err):
+        if isinstance(err, ValueError):
+            exc = SystemError(f'JSON解析失败: {err}')
+        elif 'network' in str(err).lower() or 'connection' in str(err).lower():
+            exc = NetworkError(f'网络连接失败: {err}')
+        elif 'rate_limit' in str(err).lower() or 'quota' in str(err).lower():
+            exc = SystemError(f'速率限制或配额不足: {err}')
+        else:
+            exc = LLMError(f'LLM调用失败: {err}')
+        try:
+            exc.raw_text = last_raw or ''
+        except Exception:
+            pass
+        raise exc
+    _raise_final(last_error)

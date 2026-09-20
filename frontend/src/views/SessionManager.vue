@@ -130,6 +130,7 @@ import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { useSessionsStore } from '@/stores/sessions'
+import api from '@/api'
 import LayoutSidebar from '@/components/Layout/Sidebar.vue'
 
 const route = useRoute()
@@ -161,12 +162,10 @@ const switchResultMsg = ref('')
 onMounted(async () => {
   await store.loadSessions(workId)
   // 尝试拿作品标题
+  // P1-96: 改走统一 api 客户端，自动走 AbortController / 重试 / 401/500 错误处理
   try {
-    const res = await fetch(`/api/works/${workId}`)
-    if (res.ok) {
-      const data = await res.json()
-      workTitle.value = data.title || '会话管理'
-    }
+    const data = (await api.get(`/works/${workId}`)).data
+    workTitle.value = data?.title || '会话管理'
   } catch {
     workTitle.value = '会话管理'
   }

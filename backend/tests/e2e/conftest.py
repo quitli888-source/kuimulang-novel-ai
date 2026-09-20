@@ -28,16 +28,14 @@ def require_env(name: str) -> str:
     return val
 
 
-@pytest.fixture(scope='session', autouse=True)
-def _step_api_key_guard():
-    """session 级 fixture：在每个测试 session 开始时检查 STEP_API_KEY。
-    无 key 时 skip 整个模块，而不是让每个测试都自己报错。
-    """
-    if not os.environ.get('STEP_API_KEY', '').strip():
-        pytest.skip('STEP_API_KEY not set; skipping live LLM test module', allow_module_level=True)
-
-
 @pytest.fixture
 def step_api_key() -> str:
-    """测试函数级 fixture：直接拿 STEP_API_KEY；缺失自动 skip。"""
+    """测试函数级 fixture：直接拿 STEP_API_KEY；缺失自动 skip。
+
+    R4-P1-x: 移除此前的 session 级 autouse guard —— allow_module_level=True 的
+    autouse skip 会把**整个 session 的全部测试**（包括完全离线的
+    test_resume / test_cost_persist / test_milestone_rolling）一并 skip，
+    无密钥环境下 pytest 输出"全绿"但实际零覆盖。需要 live key 的测试
+    请显式请求 step_api_key fixture（或调 require_env）。
+    """
     return require_env('STEP_API_KEY')

@@ -137,6 +137,8 @@ const lastPart = ref(0)
 const totalParts = ref(0)
 // R5-P0-1: 弹出弹窗时记录 nextPart = N + 1（用于 handleResume('continue') 调 /writing/resume）
 const resumeFromPart = ref(0)
+// R4-P1-x: 当前等待中的 confirm_id（来自 CONFIRM 事件，响应时回传）
+const pendingConfirmId = ref(null)
 
 const phases = [
   { id: 'phase1', name: '灵感解析' },
@@ -207,7 +209,9 @@ onMounted(async () => {
   }
 
   // 连接 SSE（带指数退避）
-  reconnectState.stopped = false
+  // R4-P0-1: reconnectState 是 useWritingSse 闭包内私有变量（未 export），此前此处
+  // 直接赋值抛 ReferenceError，导致 onMounted 中断、connectSSE() 永不执行——
+  // 整个创作页面收不到任何 SSE 事件。composable 每次 setup 新建时 stopped 即为 false，无需重置。
   connectSSE()
 })
 
@@ -266,7 +270,8 @@ function handleEvent(ev) {
       break
     case 'agent_call': {
       if (ev.data.status === 'start') {
-        store.currentPart = ev.data.part
+        // P1-94: 通过 action 走封装而非直接 mutation
+        store.setCurrentPart(ev.data.part)
         store.addLog({ msg: `🤖 ${ev.data.message}`, type: 'agent' })
       } else {
         store.addLog({ msg: `✅ ${ev.data.message}`, type: 'done' })
@@ -275,6 +280,8 @@ function handleEvent(ev) {
       break
     }
     case 'confirm':
+      // R4-P1-x: 记录 confirm_id，确认响应回传以拒绝过期/错位点击
+      pendingConfirmId.value = ev.data.confirm_id || null
       store.setConfirm(ev.data.message)
       break
     case 'error':
@@ -341,7 +348,8 @@ async function resumeWriting() {
 async function confirmAction(choice) {
   store.dismissConfirm()
   try {
-    await api.post('/writing/confirm', { work_id: workId, choice })
+    await api.post('/writing/confirm', { work_id: workId, choice, confirm_id: pendingConfirmId.value })
+    pendingConfirmId.value = null
     console.log(`[Frontend] 确认选择已发送: ${choice}`)
   } catch (err) {
     console.error('[Frontend] 发送确认选择失败:', err)

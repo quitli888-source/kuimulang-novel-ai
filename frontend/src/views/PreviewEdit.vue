@@ -62,19 +62,19 @@
 
     <!-- 报告弹窗 -->
     <n-modal v-model:show="showReport" preset="card" title="创作报告" style="width:700px">
-      <report-view :work-id="workId" />
+      <Report :work-id="workId" />
     </n-modal>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute } from 'vue-router'
 import api from '@/api'
+import Report from '@/views/Report.vue'
 import LayoutSidebar from '@/components/Layout/Sidebar.vue'
 
 const route = useRoute()
-const router = useRouter()
 const workId = route.params.workId
 
 const workData = ref({ title: '', parts: {}, part_outline: [] })

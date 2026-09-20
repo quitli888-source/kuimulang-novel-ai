@@ -111,7 +111,7 @@ class EmotionReviewAgent(BaseAgent):
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 temperature=0.3,
-            agent=self.name,)
+            agent=self.name, work_id=getattr(state, 'work_id', None))
 
             self.log_done(
                 f"Part {part_num} 情感评分: {result.get('emotion_score', 0)}/10\n"
