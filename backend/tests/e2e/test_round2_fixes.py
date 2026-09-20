@@ -339,10 +339,11 @@ def test_task_max_tokens_defaults_and_env():
         os.environ.pop(k, None)
     assert get_task_max_tokens('chunk') == 20000
     assert get_task_max_tokens('polish') == PART_WORD_MAX * 2 + 2000
-    assert get_task_max_tokens('json_facts') == 8000
-    assert get_task_max_tokens('json_review') == 8000
-    # R1-C 边界: get_json_max_tokens 保留为薄包装，默认随条目升到 8000
-    assert get_json_max_tokens() == 8000
+    # R4-X: facts/评审 JSON 预算默认 8000 → 12000（reasoning 吃光 8000 的实测自救成本）
+    assert get_task_max_tokens('json_facts') == 12000
+    assert get_task_max_tokens('json_review') == 12000
+    # R1-C 边界: get_json_max_tokens 保留为薄包装，默认随条目升到 12000
+    assert get_json_max_tokens() == 12000
     # env 覆盖
     os.environ['KML_CHUNK_MAX_TOKENS'] = '30000'
     os.environ['KML_POLISH_MAX_TOKENS'] = '40000'

@@ -119,8 +119,10 @@ def get_task_max_tokens(task: str) -> int:
         # 润色要重写全文：2 倍正文上限 + 2000 余量（5000 字 Part → 12000）
         return _env_int('KML_POLISH_MAX_TOKENS', PART_WORD_MAX * 2 + 2000)
     if task in ('json_facts', 'json_review'):
-        # facts 输入含数千字原文、评审 JSON 也可能带 reasoning：默认 8000
-        return _env_int('KML_JSON_MAX_TOKENS', 8000)
+        # facts 输入含数千字原文、评审 JSON 也可能带 reasoning：R4-X 默认 8000 → 12000
+        # （step-5-preview 的 reasoning 计入 completion 预算，8000 仍被吃光导致
+        # content 空返/短返，靠升级机制自救每次浪费约 85s 往返；按量计费零成本）
+        return _env_int('KML_JSON_MAX_TOKENS', 12000)
     raise ValueError(f'get_task_max_tokens: 未知 task {task!r}（可选 chunk/polish/json_facts/json_review）')
 
 
@@ -129,8 +131,8 @@ def get_json_max_tokens() -> int:
 
     step-5-preview 等推理模型的 reasoning token 计入 max_tokens，默认 4000 会被
     推理吃光导致 content 空返回（冒烟实证：facts 抽取 1800 → 3 次重试全败）。
-    R2-5 起为 get_task_max_tokens('json_review') 的薄包装（默认 6000 → 8000），
-    env KML_JSON_MAX_TOKENS 契约不变，既有调用方零改动。
+    R2-5 起为 get_task_max_tokens('json_review') 的薄包装（默认 6000 → 8000 → 12000，
+    R4-X），env KML_JSON_MAX_TOKENS 契约不变，既有调用方零改动。
     """
     return get_task_max_tokens('json_review')
 
