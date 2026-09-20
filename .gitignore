@@ -67,3 +67,8 @@ data/works/*.json
 .venv
 venv/
 env/
+# Environment files (all names, not just the exact `.env`)
+# NOTE: `.env`, `.env.local` ... only match those exact names.
+# A Chinese-named file like `环境变量配置说明.env`
+# does NOT match them, so keys filled into it would be committed. `*.env` covers all.
+*.env
