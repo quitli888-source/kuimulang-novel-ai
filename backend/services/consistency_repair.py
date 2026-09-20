@@ -37,6 +37,7 @@ from core.established_facts import EstablishedFacts
 from core.logger import get_logger
 from core.name_registry import promoted_candidates, render_name_roster
 from core.text_utils import truncate
+from services.name_audit import record_name_pairs
 
 logger = get_logger('consistency_repair')
 
@@ -389,6 +390,8 @@ class ConsistencyRepairer:
         self.service = service
         self.logic_agent = logic_agent
         self.consistency_agent = consistency_agent
+        # R5-2: 定点修复重审后的二次定点硬顶（每次 _spotfix_names 调用重置）
+        self._spotfix_retry_used = False
 
     async def maybe_repair_part(self, part_num: int, part_text: str,
                                 logic_result: dict, consistency_result: dict,
@@ -416,6 +419,9 @@ class ConsistencyRepairer:
         if has_name_issue(consistency_result, registry):
             pairs = derive_name_pairs(part_text, consistency_result, registry)
             if pairs:
+                # R5-2: 检查点产出当场沉淀进违禁词典（未过闸 → advisory；后续
+                # 定点修复过闸后再记一次，record_name_pairs 只升不降）
+                record_name_pairs(s.data, pairs, part_num, 'first_pass')
                 note = await self._spotfix_names(
                     part_num, part_text, pairs, registry, p0,
                     logic_result, consistency_result, state_mock)
@@ -439,8 +445,14 @@ class ConsistencyRepairer:
                              registry: dict, p0_before: int,
                              logic_result: dict, consistency_result: dict,
                              state_mock) -> dict | None:
-        """姓名定点修复。返回 note dict；返回 None 表示放弃定点修复（落回重写）。"""
+        """姓名定点修复。返回 note dict；返回 None 表示放弃定点修复（落回重写）。
+
+        R5-2: 重审后发现**新的**名称类 P0 且有界内再定点一次（硬顶 1 次，
+        防震荡）—— 复检发现的名册外写法此前在结构上没有修复路径可接。
+        """
         s = self.service
+        # R5-2: 每次调用重置（每 Part 一次修复尝试最多 1 次额外定点）
+        self._spotfix_retry_used = False
         departed_names = [n for n in (s.data.get('character_state_track') or {}) if n]
         gated = apply_safety_gates(pairs, registry, departed_names)
         if not gated:
@@ -455,12 +467,33 @@ class ConsistencyRepairer:
         new_cons = await self._re_review(self.consistency_agent, 'consistency', part_num, new_text, state_mock)
         residual_p0 = count_p0(new_logic, new_cons)
 
+        # R5-2: 重审仍不过且发现新的名称类 P0 → 有界再定点一次（硬顶 1 次）。
+        # 只走既有纯函数与既有 _re_review，零新 LLM 调用形态。
+        if residual_p0 > 0 and not self._spotfix_retry_used:
+            self._spotfix_retry_used = True
+            if has_name_issue(new_cons, registry):
+                logger.info(f'[ConsistencyRepairer] Part {part_num} 重审发现新的名称类 P0，'
+                            f'尝试二次定点修复（有界 1 次）')
+                pairs2 = derive_name_pairs(new_text, new_cons, registry)
+                gated2 = apply_safety_gates(pairs2, registry, departed_names)
+                if gated2:
+                    fixed2, ok2, reason2 = apply_name_spotfix(new_text, gated2)
+                    if ok2:
+                        new_logic = await self._re_review(self.logic_agent, 'logic', part_num, fixed2, state_mock)
+                        new_cons = await self._re_review(self.consistency_agent, 'consistency', part_num, fixed2, state_mock)
+                        residual_p0 = count_p0(new_logic, new_cons)
+                        new_text = fixed2  # 后续保留/回退分支都用修复后文本判定
+                        gated = gated + gated2
+                    else:
+                        logger.info(f'[ConsistencyRepairer] Part {part_num} 二次定点校验失败（{reason2}），沿用首轮结果')
+
         spot_meta = {
             'type': 'name_spotfix',
             'wrong_name': '|'.join(p['wrong'] for p in gated),
             'right_name': '|'.join(p['right'] for p in gated),
             'pair_source': '|'.join(sorted({p['source'] for p in gated})),
         }
+        trigger = 're_review' if self._spotfix_retry_used else 'first_pass'
         if residual_p0 <= 0:
             # 通过：落盘定点修复稿（与 Phase 3 相同的 checkpoint 路径）
             summary = truncate(new_text, n=200, suffix='...')
@@ -471,7 +504,11 @@ class ConsistencyRepairer:
             note = {'revision_attempted': True, 'revision_passed': True,
                     'revision_spotfixed': True, 'residual_p0': 0,
                     'logic_result': new_logic, 'consistency_result': new_cons}
-            self._append_revision_log(part_num, p0_before, note, extra=spot_meta)
+            # R5-2: 重审通过的定点修复 → 违禁词典沉淀（applied_verified=True）
+            record_name_pairs(s.data, gated, part_num, trigger,
+                              applied_verified=True, gates_passed=True)
+            self._append_revision_log(part_num, p0_before, note, extra=spot_meta,
+                                      trigger=trigger)
             await s.emitter.emit(EventType.LOG, {
                 'message': (f'✅ Part {part_num} 姓名定点修复完成'
                             f'（{spot_meta["wrong_name"]}→{spot_meta["right_name"]}，'
@@ -483,7 +520,10 @@ class ConsistencyRepairer:
         s._save_chunk_progress(part_num, part_text, truncate(part_text, n=200, suffix='...'))
         note = {'revision_attempted': True, 'revision_passed': False,
                 'revision_spotfixed': True, 'residual_p0': residual_p0}
-        self._append_revision_log(part_num, p0_before, note, extra=spot_meta)
+        # R5-2: 过闸但重审未通过 → 沉淀为 advisory（applied_verified 不置位）
+        record_name_pairs(s.data, gated, part_num, trigger, gates_passed=True)
+        self._append_revision_log(part_num, p0_before, note, extra=spot_meta,
+                                  trigger=trigger)
         await s.emitter.emit(EventType.LOG, {
             'message': (f'↩️ Part {part_num} 姓名定点修复后仍有 {residual_p0} 个 P0，'
                         f'回退保留原文（{spot_meta["wrong_name"]}→{spot_meta["right_name"]}）'),
@@ -500,6 +540,7 @@ class ConsistencyRepairer:
         introduced: list = []
         round_logic, round_cons = logic_result, consistency_result
         current_p0_before = p0_before
+        departed_names = [n for n in (s.data.get('character_state_track') or {}) if n]
         # 名称类指令（配对存在但闸未过 / 无名称类 issue 时为空）
         name_pairs = derive_name_pairs(part_text, consistency_result, registry)
 
@@ -526,13 +567,38 @@ class ConsistencyRepairer:
             new_cons = await self._re_review(self.consistency_agent, 'consistency', part_num, new_text, state_mock)
             residual_p0 = count_p0(new_logic, new_cons)
 
+            # R5-2: 重审稿的姓名先修后判 —— 重写引入名字问题此前只能整篇回退
+            # （P0-1 根因 2）。每轮最多 1 次（局部布尔量；MAX_REWRITE_ROUNDS=2
+            # → 最多 2 次额外双审），修完原样进入既有劣化/保留/二跳判定。
+            name_fix_used = False
+            name_fix_pairs: list = []
+            if has_name_issue(new_cons, registry) and not name_fix_used:
+                name_fix_used = True
+                rpairs = derive_name_pairs(new_text, new_cons, registry)
+                rgated = apply_safety_gates(rpairs, registry, departed_names)
+                if rgated:
+                    rfixed, rok, rreason = apply_name_spotfix(new_text, rgated)
+                    if rok:
+                        new_logic = await self._re_review(self.logic_agent, 'logic', part_num, rfixed, state_mock)
+                        new_cons = await self._re_review(self.consistency_agent, 'consistency', part_num, rfixed, state_mock)
+                        residual_p0 = count_p0(new_logic, new_cons)
+                        new_text = rfixed
+                        name_fix_pairs = rgated
+                        # 先按未验证沉淀；保留分支再置 applied_verified（只升不降）
+                        record_name_pairs(s.data, rgated, part_num, 're_review',
+                                          gates_passed=True)
+                    else:
+                        logger.info(f'[ConsistencyRepairer] Part {part_num} 重写稿姓名定点校验失败'
+                                    f'（{rreason}），按重审原稿判定')
+            trigger = 're_review' if name_fix_pairs else 'first_pass'
+
             # R4-5 变坏回退显式化：residual 没变好或出现首检没有的新 P0 类别
             if is_revision_degraded(current_p0_before, residual_p0,
                                     round_cons, new_cons, round_logic, new_logic):
                 s._save_chunk_progress(part_num, part_text, truncate(part_text, n=200, suffix='...'))
                 note = {'revision_attempted': True, 'revision_passed': False,
                         'residual_p0': residual_p0, 'revision_degraded': True}
-                self._append_revision_log(part_num, p0_before, note)
+                self._append_revision_log(part_num, p0_before, note, trigger=trigger)
                 await s.emitter.emit(EventType.LOG, {
                     'message': (f'↩️ Part {part_num} 重写导致劣化'
                                 f'（{current_p0_before}→{residual_p0} 或引入新问题类别），'
@@ -549,7 +615,12 @@ class ConsistencyRepairer:
                 state_mock.final_draft[part_key] = new_text
                 note = {'revision_attempted': True, 'revision_passed': True,
                         'logic_result': new_logic, 'consistency_result': new_cons}
-                self._append_revision_log(part_num, p0_before, note)
+                if name_fix_pairs:
+                    # 修复稿被保留 → 该配对确曾被"重审通过"的定点修复应用
+                    note['revision_spotfixed'] = True
+                    record_name_pairs(s.data, name_fix_pairs, part_num, 're_review',
+                                      applied_verified=True, gates_passed=True)
+                self._append_revision_log(part_num, p0_before, note, trigger=trigger)
                 await s.emitter.emit(EventType.LOG, {
                     'message': f'✅ Part {part_num} 重写修复完成（重审 P0 归零，{len(new_text)} 字）',
                     'work_id': s.work_id}, work_id=s.work_id)
@@ -570,7 +641,7 @@ class ConsistencyRepairer:
             # 未改善或已达 2 轮硬顶：保留原文（恢复落盘），仅留痕
             s._save_chunk_progress(part_num, part_text, truncate(part_text, n=200, suffix='...'))
             note = {'revision_attempted': True, 'revision_passed': False, 'residual_p0': residual_p0}
-            self._append_revision_log(part_num, p0_before, note)
+            self._append_revision_log(part_num, p0_before, note, trigger=trigger)
             await s.emitter.emit(EventType.LOG, {
                 'message': f'↩️ Part {part_num} 重写后仍有 {residual_p0} 个 P0，保留原文',
                 'work_id': s.work_id}, work_id=s.work_id)
@@ -687,11 +758,14 @@ class ConsistencyRepairer:
         return '【前文已确立事实清单——重写内容不得与本表矛盾】\n' + block
 
     def _append_revision_log(self, part_num: int, p0_before: int, note: dict,
-                             extra: dict = None) -> None:
+                             extra: dict = None, trigger: str = 'first_pass') -> None:
         """修订痕迹落盘（s.data['revision_log']，resume 可查）。
 
         R4-2: extra 携带定点修复专属字段（type='name_spotfix' +
         wrong_name/right_name/pair_source）—— 只增不改既有字段。
+        R5-2: trigger 记录修复动作的检查点来源（first_pass 首检分诊 /
+        re_review 复检二次定点 / final_audit 终审），全量跑后可统计各检查点
+        贡献；旧条目补默认值 'first_pass' 保持形态稳定。
         """
         entry = {
             'part': part_num,
@@ -700,6 +774,7 @@ class ConsistencyRepairer:
             'revision_passed': bool(note.get('revision_passed')),
             'residual_p0': note.get('residual_p0'),
             'revision_error': note.get('revision_error'),
+            'trigger': trigger,
             'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
         }
         # R4-5: 变坏回退事件显式落痕（仅劣化时出现，旧条目形态不变）

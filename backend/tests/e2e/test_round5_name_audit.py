@@ -330,6 +330,104 @@ def test_is_blocking_layers():
     logger.info('[test_blocking_layers] PASS: blocking/advisory 分层符合公式')
 
 
+# ---------------- R5-2: 修复动作硬接线到每个检查点 ----------------
+
+# 重写稿（首检 consistency 无名称 P0 → 落全文重写；重写稿自身漂移出"林渊"）
+R5_REWRITE_TEXT = (
+    '林渊跪伏在地，额头触地，口称恭迎巡界使大人。林渊抬头时满脸是血，'
+    '林万重扶住林渊的肩膀，连声追问大长老的伤势。林渊嘶声吼道他来了，'
+    '林渊终究还是来了。林万重与大长老同时跪伏，祠堂内黑气尖啸着退散。'
+) * 12
+
+
+def test_rewrite_name_fix_before_judgement():
+    """R5-2 验收 1: 重写重审 consistency 报名称 P0 → 先定点修复再判 pass。
+
+    首检 consistency 无名称 P0（落重写）→ 重写稿漂移出"林渊" → 重审报名称
+    P0 且 description 含规范名 + 引文 span → (2) 触发：重写稿被先定点修复
+    再判 pass；revision_log trigger=='re_review'；spotfixed 计数正确。
+    """
+    reg = build_name_registry(SMOKE_A_CHARACTERS)
+    service = _FakeService({'name_registry': reg, 'character_state_track': {},
+                            'parts': {'2': SMOKE_A_PART2_EXCERPT}})
+    rewrite_name_issue = {
+        'level': 'P0', 'dimension': '名称一致性', 'character': '林万重',
+        'location': 'Part 2 重写稿多处',
+        'description': "重写稿中'林渊'应统一为'林万重'，仍构成 P0 级名称不一致",
+        'suggestion': "将所有'林渊'改为'林万重'"}
+    repairer = _repairer(service, [_clean_logic(0), _clean_logic(0)],
+                         [_clean_cons([rewrite_name_issue]), _clean_cons()])
+    rewrite_calls = []
+
+    async def fake_rewrite(self, part_num, brief):
+        rewrite_calls.append(brief)
+        return R5_REWRITE_TEXT, ''
+
+    with patch.object(ConsistencyRepairer, '_rewrite_once', fake_rewrite):
+        note = asyncio.run(repairer.maybe_repair_part(
+            2, SMOKE_A_PART2_EXCERPT, _clean_logic(2, verdict='v1'), _clean_cons(),
+            state_mock=type('M', (), {'parts': {}, 'final_draft': {}})()))
+
+    assert len(rewrite_calls) == 1, '首检无名称 P0 应走重写'
+    assert note.get('revision_passed') is True, note
+    assert note.get('revision_spotfixed') is True, '重写稿姓名定点应计入 spotfixed'
+    fixed = service.saved_chunks[2]
+    assert fixed.count('林渊') == 0 and fixed.count('林万重') == \
+        R5_REWRITE_TEXT.count('林万重') + R5_REWRITE_TEXT.count('林渊')
+    entry = service.data['revision_log'][-1]
+    assert entry['trigger'] == 're_review', entry
+    # revision_stats.spotfixed 计数正确（聚合器从 entry revision_* 字段汇总）
+    from services.review_aggregator import aggregate_review_results
+    report = aggregate_review_results([{
+        'part': 2, 'logic_result': _clean_logic(), 'emotion_result': {},
+        'consistency_result': _clean_cons(), **note}])
+    assert report['revision_stats']['spotfixed'] == 1, report['revision_stats']
+    # 违禁词典沉淀：applied_verified=True → blocking
+    drift = service.data[DRIFT_DICT_KEY]
+    assert is_blocking(drift['林渊']) is True and drift['林渊']['applied_verified'] is True
+    logger.info('[test_rewrite_name_fix] PASS: 重写稿先修后判，trigger=re_review')
+
+
+def test_spotfix_retry_bounded_once():
+    """R5-2 验收 2: _spotfix_names 首轮重审不过且新 cons 含名称 P0 →
+    (1) 触发二次定点且只重试 1 次（脚本 agent 调用次数断言）。"""
+    reg = build_name_registry(R4_SMOKE_CHARACTERS)
+    part_text = (
+        '林尘跌入古井，井中意识在深渊中苏醒，井中意识低语古老咒言。'
+        '林啸天率族人封锁井口，古井意识却占据林战的双眼。'
+        '井中意识许诺林尘神力，古井意识终将吞没三千世界。'
+    )
+    service = _FakeService({'name_registry': reg, 'character_state_track': {},
+                            'parts': {'2': part_text}})
+    retry_issue = {
+        'level': 'P0', 'dimension': '名称一致性', 'character': '井中神族意识',
+        'location': 'Part 2 修复稿多处',
+        'description': "修复稿中'古井意识'应统一为'井中神族意识'，仍构成 P0 名称不一致",
+        'suggestion': "统一使用规范名"}
+    logic_agent = _ScriptedAgent([_clean_logic(1, verdict='仍有矛盾'), _clean_logic(0)])
+    cons_agent = _ScriptedAgent([_clean_cons([retry_issue]), _clean_cons()])
+    repairer = ConsistencyRepairer(service, logic_agent, cons_agent)
+    note = asyncio.run(repairer.maybe_repair_part(
+        2, part_text, _clean_logic(2, verdict='v1'), {'issues': [R4_P1_NAME_ISSUE]},
+        state_mock=type('M', (), {'parts': {}, 'final_draft': {}})()))
+
+    assert note.get('revision_passed') is True, note
+    assert note.get('revision_spotfixed') is True
+    fixed = service.saved_chunks[2]
+    assert fixed.count('井中意识') == 0 and fixed.count('古井意识') == 0
+    assert fixed.count('井中神族意识') == part_text.count('井中意识') + part_text.count('古井意识')
+    # 有界：logic/consistency 各只重审 2 次（首轮 + 二次定点后），无第三次
+    assert len(logic_agent.calls) == 2, logic_agent.calls
+    assert len(cons_agent.calls) == 2, cons_agent.calls
+    entry = service.data['revision_log'][-1]
+    assert entry['trigger'] == 're_review'
+    assert entry['wrong_name'] == '井中意识|古井意识', entry
+    assert entry['right_name'] == '井中神族意识|井中神族意识', entry
+    drift = service.data[DRIFT_DICT_KEY]
+    assert is_blocking(drift['古井意识']) is True, '二次定点过闸+重审通过 → blocking'
+    logger.info('[test_spotfix_retry] PASS: 二次定点触发且有界 1 次（各 2 次重审）')
+
+
 if __name__ == '__main__':
     logger.info('=' * 60)
     logger.info('test_round5_name_audit.py —— Round 5 姓名审计回归（mock LLM）')
@@ -341,7 +439,9 @@ if __name__ == '__main__':
                test_has_name_issue_includes_verdict,
                test_load_drift_dict_tolerates_dirty_data,
                test_record_name_pairs_create_and_monotonic,
-               test_is_blocking_layers):
+               test_is_blocking_layers,
+               test_rewrite_name_fix_before_judgement,
+               test_spotfix_retry_bounded_once):
         fn()
         print(f'PASS {fn.__name__}')
     logger.info('\nALL PASS')
