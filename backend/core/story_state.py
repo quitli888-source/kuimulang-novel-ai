@@ -13,7 +13,7 @@ V6.1 改动：
 import json
 from core.config import MEMORY_DIR
 from core.sliding_window import SlidingWindow
-from core.established_facts import EstablishedFacts
+from core.established_facts import EstablishedFacts, DEPARTED_PREDICATES
 
 
 class StoryState:
@@ -140,6 +140,13 @@ class StoryState:
                 sections = []
                 if self.current_plot_state:
                     sections.append(f"【当前剧情进度】{self.current_plot_state}")
+                    sections.append("")
+                # R1-E: 已退场角色严禁出场清单（与 TempStoryState 双轨一致；
+                # 数据源 character_state_track 中描述含退场谓词的条目）
+                departed_lines = self._departed_character_lines()
+                if departed_lines:
+                    sections.append("【已退场角色——严禁出场】")
+                    sections.append(departed_lines)
                     sections.append("")
                 completed_parts = sorted(
                     [k for k in self.part_summaries.keys() if int(k) < pn]
@@ -278,6 +285,17 @@ class StoryState:
             if name not in self.character_state_track:
                 self.character_state_track[name] = {}
             self.character_state_track[name][str(part_num)] = state_desc
+
+    def _departed_character_lines(self) -> str:
+        """R1-E: 从 character_state_track 筛描述含退场谓词的条目（与 TempStoryState 同语义）。"""
+        track = self.character_state_track or {}
+        lines = []
+        for name, desc in track.items():
+            if not name or not isinstance(desc, str) or not desc:
+                continue
+            if any(p in desc for p in DEPARTED_PREDICATES):
+                lines.append(f"  - {name}: {desc}（严禁在本 Part 出场；如以回忆/他人提及形式出现，不得与其现状矛盾）")
+        return "\n".join(lines)
 
     def _build_character_state_snapshot(self, current_part: int) -> str:
         """V4增强：优先使用结构化角色状态追踪，摘要文本匹配降级为补充"""

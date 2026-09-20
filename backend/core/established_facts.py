@@ -43,6 +43,14 @@ _CATEGORY_LABELS: dict = {
     "knowledge": "【角色信息边界】",
 }
 
+# R1-D: 不参与全局 max_total 倒序截断的类别 —— 关键物品/地点/关系/世界规则
+# 在 20+ Part 长跑后段必须仍可注入（此前全局截 30 条会先砍掉早期关键事实，
+# "油纸包"类物品状态漂移正源于此）。event/trait 等叙事类仍受 max_total 约束。
+_PROTECTED_CATEGORIES = ("object", "location", "relationship", "world_rule")
+
+# R1-E: 退场谓词 —— derive_departed_characters 精确匹配 + prompt 注入子串匹配共用
+DEPARTED_PREDICATES = ("死亡", "离开", "失踪", "退场")
+
 
 @dataclass
 class Fact:
@@ -197,8 +205,13 @@ class EstablishedFacts:
 
         # P1-91: 全局按 part_num 倒序选最近 max_total 条，再按 category 分组。
         # 这样既保证保留最新事实，又避免后期 Part 90+ 时把所有历史事实全过一遍再截 8。
+        # R1-D: object/location/relationship/world_rule 四类豁免全局截断（关键实体
+        # 状态后段必须可见），max_total 只约束 event/trait 等叙事类；每类仍受
+        # max_per_category 约束，被覆盖的旧事实已在上面 filtered。
         selected.sort(key=lambda x: x.part_num, reverse=True)
-        selected = selected[:max_total]
+        protected = [f for f in selected if f.category in _PROTECTED_CATEGORIES]
+        others = [f for f in selected if f.category not in _PROTECTED_CATEGORIES][:max_total]
+        selected = protected + others
 
         # 按 category 分组
         grouped: dict = {}
@@ -311,7 +324,8 @@ def facts_from_extractor_payload(payload: dict, part_num: int) -> List[Fact]:
     if not isinstance(raw_list, list):
         return []
     out: List[Fact] = []
-    for i, raw in enumerate(raw_list[:15], start=1):
+    # R1-F: 与 prompts/established_facts.txt 的 ADD-only 协议对齐，条数指引 15 → 10
+    for i, raw in enumerate(raw_list[:10], start=1):
         if not isinstance(raw, dict):
             continue
         text = (raw.get("text") or "").strip()
@@ -327,6 +341,41 @@ def facts_from_extractor_payload(payload: dict, part_num: int) -> List[Fact]:
             subject=(raw.get("subject") or "").strip(),
             predicate=(raw.get("predicate") or "").strip(),
         ))
+    return out
+
+
+def derive_departed_characters(facts, character_names) -> dict:
+    """R1-E: 从已确立事实派生"已退场角色"账本（纯函数，零 LLM 成本）。
+
+    筛 category=='character' 且 predicate ∈ DEPARTED_PREDICATES（死亡/离开/失踪/退场）、
+    subject ∈ character_names（只用 Phase 2 正式角色名，防常见词误报）的 fact，
+    输出 {角色名: f'Part{part_num} {predicate}: {text}'}。
+
+    predicate 显式入值：fact.text 可能用"战死/陨落"等近义表述而不含"死亡"字面量，
+    下游 prompt 注入按退场谓词子串筛条目，缺了 predicate 会静默漏判。
+
+    Args:
+        facts: EstablishedFacts 实例或其 .facts 列表（容忍 None）
+        character_names: 正式角色名可迭代对象
+
+    Returns:
+        {角色名: "PartN 死亡: 事实描述"}；无退场事实时返回 {}。
+    """
+    raw = getattr(facts, "facts", facts) or []
+    names = {str(n).strip() for n in (character_names or []) if n and str(n).strip()}
+    out: dict = {}
+    for f in raw:
+        if getattr(f, "category", "") != "character":
+            continue
+        predicate = (getattr(f, "predicate", "") or "").strip()
+        if predicate not in DEPARTED_PREDICATES:
+            continue
+        subject = (getattr(f, "subject", "") or "").strip()
+        if not subject or subject not in names:
+            continue
+        part_num = getattr(f, "part_num", 0)
+        text = (getattr(f, "text", "") or "").strip()
+        out[subject] = f"Part{part_num} {predicate}: {text}".strip()
     return out
 
 

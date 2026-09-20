@@ -12,6 +12,7 @@ from typing import Optional
 from api.sse import SSEEmitter, EventType
 from api.works import get_work_file
 from core.config import get_app_config
+from core.established_facts import EstablishedFacts, DEPARTED_PREDICATES
 from core.progress_manager import progress_manager
 from core.error_handler import error_handler
 from core.memory_manager import get_all_memory
@@ -41,9 +42,41 @@ class TempStoryState:
         self.part_summaries = data.get('part_summaries', {})
         self.current_plot_state = data.get('current_plot_state', '')
         self.character_state_track = data.get('character_state_track', {})
+        # R1-D: e2e 路径消费链接通 —— 此前 TempStoryState 没有 established_facts，
+        # PartWriterAgent 取事实块时 AttributeError 被吞、恒为空，事实只产不消。
+        # 从 work JSON 反序列化，resume 后不归零（配合 Phase3Runner 每 Part 落盘）。
+        self.established_facts = EstablishedFacts()
+        _raw_ef = data.get('established_facts')
+        if isinstance(_raw_ef, dict):
+            try:
+                self.established_facts.from_dict(_raw_ef)
+            except Exception as ef_err:
+                logger.info(f'[TempStoryState] established_facts 反序列化失败（不影响主流程）: {ef_err}')
+        # R1-G: 剧情状态增量（rolling 触发点生成，叠加层不回写 outline 本体）
+        self.story_deltas = data.get('story_deltas', {}) or {}
         self.memory = memory
         self.window = SlidingWindow(window_size=3)
         self.vector_store = vector_store
+
+    def build_established_facts_block(self, current_part: int, categories=None) -> str:
+        """R1-D: 与 StoryState.build_established_facts_block 同语义同标题文案。
+
+        PartWriterAgent / LogicReviewAgent 的 hasattr 守卫命中本方法后，
+        writer prompt 与 Logic 评审才第一次拿到"前文已确立事实清单"。
+        """
+        ef = getattr(self, 'established_facts', None)
+        if ef is None:
+            return ""
+        try:
+            block = ef.render_for_prompt(
+                categories=categories,
+                before_part_num=current_part,
+            )
+        except Exception:
+            return ""
+        if not block:
+            return ""
+        return "【前文已确立事实清单——只能对照本表评判一致性】\n" + block
 
     def get_part_context(self, part_num):
         """获取指定部分的上下文信息（V6.1：委托给 SlidingWindow，失败回退旧实现）"""
@@ -57,6 +90,19 @@ class TempStoryState:
                 if self.current_plot_state:
                     sections.append(f'【当前剧情进度】{self.current_plot_state}')
                     sections.append('')
+                # R1-E: 已退场角色严禁出场清单（数据源 character_state_track 中
+                # 描述含退场谓词的条目；确定性账本，零 LLM 成本）
+                departed_lines = self._departed_character_lines()
+                if departed_lines:
+                    sections.append('【已退场角色——严禁出场】')
+                    sections.append(departed_lines)
+                    sections.append('')
+                # R1-G: 最近 2 个 Part 的剧情状态增量（与静态大纲冲突时以增量为准）
+                delta_lines = self._story_delta_lines()
+                if delta_lines:
+                    sections.append('【剧情状态增量（大纲生成以来的实际变化；增量与大纲冲突时以增量为准）】')
+                    sections.append(delta_lines)
+                    sections.append('')
                 return '\n'.join(sections)
             vector_query = None
             if self.vector_store is not None and self.vector_store.enabled:
@@ -65,9 +111,76 @@ class TempStoryState:
                     core_event = outline.get('core_event', '')
                     emotion_target = outline.get('emotion_target', '')
                     vector_query = ' '.join((s for s in (core_event, emotion_target) if s)) or None
-            return self.window.build(part_num, characters=self.characters, world_setting=self.world_setting, extra_context_provider=_legacy_extras, vector_store=self.vector_store, vector_query=vector_query)
+            # R1-H: 关键词检索通道专名（object/location/world_rule 类 subject，
+            # 近期优先取最多 10 个；供 sliding_window 子串匹配最近提及 Part）
+            key_entities = self._key_entities_for_retrieval(part_num)
+            return self.window.build(part_num, characters=self.characters, world_setting=self.world_setting, extra_context_provider=_legacy_extras, vector_store=self.vector_store, vector_query=vector_query, key_entities=key_entities)
         except Exception:
             return self._legacy_get_part_context(part_num)
+
+    def _departed_character_lines(self) -> str:
+        """R1-E: 从 character_state_track 筛描述含退场谓词的条目，渲染严禁出场段。"""
+        track = self.character_state_track or {}
+        lines = []
+        for name, desc in track.items():
+            if not name or not isinstance(desc, str) or not desc:
+                continue
+            if any(p in desc for p in DEPARTED_PREDICATES):
+                lines.append(f'- {name}: {desc}（严禁在本 Part 出场；如以回忆/他人提及形式出现，不得与其现状矛盾）')
+        return '\n'.join(lines)
+
+    def _story_delta_lines(self) -> str:
+        """R1-G: 最近 2 个 Part 的剧情增量拼接（增量与大纲冲突时以增量为准）。"""
+        deltas = self.story_deltas or {}
+        if not isinstance(deltas, dict) or not deltas:
+            return ''
+
+        def _key(k):
+            try:
+                return int(k)
+            except (TypeError, ValueError):
+                return 0
+
+        lines = []
+        for k in sorted(deltas.keys(), key=_key)[-2:]:
+            d = deltas.get(k)
+            if not isinstance(d, dict):
+                continue
+            seg = []
+            if d.get('departed_characters'):
+                seg.append(f"退场角色: {d['departed_characters']}")
+            if d.get('new_objects'):
+                seg.append(f"新物品/线索: {d['new_objects']}")
+            if d.get('foreshadow_planted'):
+                seg.append(f"新埋伏笔: {d['foreshadow_planted']}")
+            if d.get('foreshadow_revealed'):
+                seg.append(f"已揭晓伏笔: {d['foreshadow_revealed']}")
+            if d.get('outline_adjustments'):
+                seg.append(f"大纲修正: {d['outline_adjustments']}")
+            if seg:
+                lines.append(f'Part {k}: ' + '；'.join(str(x) for x in seg))
+        return '\n'.join(lines)
+
+    def _key_entities_for_retrieval(self, part_num: int) -> list:
+        """R1-H: 关键词通道专名列表 —— established_facts 中 object/location/
+        world_rule 三类当前有效 subject（近期 Part 优先，天然过滤被覆盖旧事实）。"""
+        ef = getattr(self, 'established_facts', None)
+        if ef is None:
+            return []
+        try:
+            facts = ef.before_part(part_num)
+        except Exception:
+            return []
+        names = []
+        seen = set()
+        for f in reversed(facts):
+            if f.category not in ('object', 'location', 'world_rule'):
+                continue
+            subject = (f.subject or '').strip()
+            if len(subject) >= 2 and subject not in seen:
+                seen.add(subject)
+                names.append(subject)
+        return names
 
     def _sync_window(self, part_num: int) -> None:
         """把 self.parts 中 < part_num 的所有 Part 灌入窗口。"""
@@ -391,9 +504,30 @@ class WritingService:
         R2：三个 Review Agent 都依赖 state.part_outline / part_summaries /
         characters / world_setting / foreshadowing / parts / final_draft。
         P1-87: 携带 work_id 让 review agents 把 cost 计入 per-work tracker。
+        R1-D: 挂上 build_established_facts_block（从 work JSON 加载已确立事实渲染），
+        LogicReviewAgent 的 hasattr 守卫即自动生效，评审首次拿到前文事实基线。
         """
         from types import SimpleNamespace
-        return SimpleNamespace(work_id=self.work_id, inspiration=self.data.get('inspiration', ''), core_elements=self.data.get('core_elements', {}), market_positioning=self.data.get('market_positioning', {}), world_setting=self.data.get('world_setting', ''), characters=self.data.get('characters', []), part_outline=self.data.get('part_outline', []), foreshadowing=self.data.get('foreshadowing', []), parts=dict(self.data.get('parts', {}) or {}), part_summaries=dict(self.data.get('part_summaries', {}) or {}), current_plot_state=self.data.get('current_plot_state', ''), character_state_track=self.data.get('character_state_track', {}), memory=None, final_draft=dict(self.data.get('final_draft', {}) or self.data.get('parts', {}) or {}))
+        mock = SimpleNamespace(work_id=self.work_id, inspiration=self.data.get('inspiration', ''), core_elements=self.data.get('core_elements', {}), market_positioning=self.data.get('market_positioning', {}), world_setting=self.data.get('world_setting', ''), characters=self.data.get('characters', []), part_outline=self.data.get('part_outline', []), foreshadowing=self.data.get('foreshadowing', []), parts=dict(self.data.get('parts', {}) or {}), part_summaries=dict(self.data.get('part_summaries', {}) or {}), current_plot_state=self.data.get('current_plot_state', ''), character_state_track=self.data.get('character_state_track', {}), memory=None, final_draft=dict(self.data.get('final_draft', {}) or self.data.get('parts', {}) or {}))
+        review_facts = EstablishedFacts()
+        raw_ef = self.data.get('established_facts')
+        if isinstance(raw_ef, dict):
+            try:
+                review_facts.from_dict(raw_ef)
+            except Exception as ef_err:
+                logger.info(f'[_build_review_state_mock] established_facts 反序列化失败（不影响主流程）: {ef_err}')
+
+        def _build_facts_block(current_part, categories=None):
+            try:
+                block = review_facts.render_for_prompt(categories=categories, before_part_num=current_part)
+            except Exception:
+                return ''
+            if not block:
+                return ''
+            return '【前文已确立事实清单——只能对照本表评判一致性】\n' + block
+
+        mock.build_established_facts_block = _build_facts_block
+        return mock
 
     @staticmethod
     def _review_failure(kind: str, part_num: int, err: Exception) -> dict:
@@ -498,7 +632,9 @@ class WritingService:
         tmp_path = self.work_path.with_suffix(f'.json.tmp.{os.getpid()}')
         try:
             tmp_path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding='utf-8')
-            _os.replace(tmp_path, self.work_path)
+            # R1-B: 此前误写 _os.replace（本模块只 import os，无 _os 别名）——
+            # 每个 chunk checkpoint 必抛 NameError 回退全量 _save()，轻量路径死亡。
+            os.replace(tmp_path, self.work_path)
         except Exception as e:
             logger.info(f'[WritingService] _save_chunk_progress 失败，回退 _save: {e}')
             try:

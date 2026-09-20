@@ -154,6 +154,8 @@ class Phase3Runner:
             await s._check_pause()
             from services.writing_service import _writing_state
             _writing_state[s.work_id]['current_part'] = i
+            # R1-E: 本 Part 迭代用的正式角色名（Phase 2 档案；防常见词误报）
+            char_names = [c.get('name', '') for c in (s.data.get('characters') or []) if isinstance(c, dict) and c.get('name')]
             done_ratio = (i - start_from) / max(total - start_from + 1, 1)
             part_progress = 55 + done_ratio * 25
             s.progress_callback(int(part_progress), f'开始创作 Part {i}/{total}')
@@ -174,6 +176,50 @@ class Phase3Runner:
                     s.data['parts'][str(i)] = part_text
                     summary = truncate(part_text, n=200, suffix="...")
                     s.data['part_summaries'][str(i)] = summary
+                    # R1-D: 事实块与 parts/summaries 同批落盘 —— 此前只挂 temp_state
+                    # 实例不写 work JSON，resume 后从零开始；此处保证每 Part 边界
+                    # established_facts 已持久化（下面 s._save() 同批写出）。
+                    try:
+                        ef_obj = getattr(temp_state, 'established_facts', None)
+                        if ef_obj is not None:
+                            s.data['established_facts'] = ef_obj.to_dict()
+                    except Exception as ef_save_err:
+                        logger.info(f'[Phase3Runner] established_facts 落盘失败（不影响主流程）: {ef_save_err}')
+                    # R1-E: 退场账本 —— 从已确立事实确定性派生"已死/离开/失踪/退场"
+                    # 角色，合并写入 character_state_track（不清空历史），刷新
+                    # temp_state 让滑动窗口/milestone 首次拿到非空角色状态。
+                    try:
+                        from core.established_facts import derive_departed_characters
+                        departed = derive_departed_characters(getattr(temp_state, 'established_facts', None), char_names)
+                        if departed:
+                            track = dict(s.data.get('character_state_track') or {})
+                            track.update(departed)
+                            s.data['character_state_track'] = track
+                            temp_state.character_state_track = track
+                    except Exception as dep_err:
+                        logger.info(f'[Phase3Runner] 退场账本派生失败（不影响主流程）: {dep_err}')
+                    # R1-E: 确定性预检 —— 本 Part 正文再现"前文已退场"角色只告警不阻断
+                    # （回忆/他人提及形式合法，终判交 Phase 4）。退场清单只取
+                    # part_num < i 的事实，避免把"本 Part 内的死亡场景本身"算作出场。
+                    try:
+                        from core.established_facts import derive_departed_characters as _ddc
+                        ef_facts = [f for f in (getattr(temp_state, 'established_facts', None).facts
+                                                if getattr(temp_state, 'established_facts', None) is not None else [])
+                                    if getattr(f, 'part_num', 0) < i]
+                        departed_before = _ddc(ef_facts, char_names)
+                        for c_name in departed_before:
+                            hits = part_text.count(c_name)
+                            if hits:
+                                logger.warning(
+                                    f'[Phase3Runner] R1-E 预检: Part {i} 中已退场角色 "{c_name}" '
+                                    f'出现 {hits} 次（退场记录: {departed_before[c_name]}）——仅告警不阻断'
+                                )
+                                flags = list(s.data.get('consistency_flags') or [])
+                                flags.append({'part': i, 'character': c_name, 'count': hits,
+                                              'departed_record': departed_before[c_name]})
+                                s.data['consistency_flags'] = flags
+                    except Exception as pre_err:
+                        logger.info(f'[Phase3Runner] 退场角色预检失败（不影响主流程）: {pre_err}')
                     try:
                         temp_state.window.add_part(i, part_text, summary)
                         temp_state.window.update_foreshadowing(s.data.get('foreshadowing', []) or [])
@@ -194,6 +240,17 @@ class Phase3Runner:
                             roll_result = temp_state.window.maybe_generate_rolling_summary(i, world_setting=world_setting, work_id=getattr(temp_state, 'work_id', None))
                             if roll_result.get('generated'):
                                 await s.emitter.emit(EventType.LOG, {'message': f'📚 Part {i} 二级滚动摘要已生成（{roll_result.get("char_count", 0)} 字）', 'work_id': s.work_id}, work_id=s.work_id)
+                                # R1-G: 剧情状态增量与 rolling 摘要同触点合并一次轻量调用
+                                # （每 3 Part 一次，不回写 outline 本体，叠加层注入 prompt）
+                                try:
+                                    delta = await self._generate_story_delta(i)
+                                    if delta:
+                                        deltas = dict(s.data.get('story_deltas') or {})
+                                        deltas[str(i)] = delta
+                                        s.data['story_deltas'] = deltas
+                                        await s.emitter.emit(EventType.LOG, {'message': f'🧭 Part {i} 剧情状态增量已记录', 'work_id': s.work_id}, work_id=s.work_id)
+                                except Exception as delta_err:
+                                    logger.info(f'[Phase3Runner] story_delta 生成失败（不影响主流程）: {delta_err}')
                         except Exception as roll_err:
                             logger.info(f'[Phase3Runner] 二级滚动摘要生成失败（不影响主流程）: {roll_err}')
                     if temp_state.window.should_create_milestone(i):
@@ -252,6 +309,49 @@ class Phase3Runner:
                 except Exception as cost_err:
                     logger.info(f'[Phase3Runner] 成本熔断检查失败（不影响主流程）: {cost_err}')
 
+    async def _generate_story_delta(self, part_num: int) -> dict:
+        """R1-G: rolling 触发点合并一次轻量 LLM 调用，输出本 Part 相对静态大纲的增量。
+
+        输入本 Part 摘要 + 下一 Part outline 条目，输出 JSON：
+        {"departed_characters": [], "new_objects": [], "foreshadow_planted": [],
+         "foreshadow_revealed": [], "outline_adjustments": "..."}
+        调用方写入 s.data['story_deltas'][str(part_num)]（叠加层，不回写 outline）。
+        仅在 PartWriterAgent 已成功生成 rolling 摘要后调用，失败不影响主流程。
+        """
+        from core.llm_client import call_llm_json
+        s = self.service
+        summary = (s.data.get('part_summaries', {}) or {}).get(str(part_num), '')
+        outline = s.data.get('part_outline') or []
+        next_entry = outline[part_num] if part_num < len(outline) else None
+        if not summary or not isinstance(next_entry, dict):
+            return {}
+        system_prompt = (
+            '你是长篇小说剧情状态追踪员。根据"本 Part 实际剧情摘要"和"下一 Part 的原定大纲"，'
+            '输出本 Part 相对静态大纲已发生的实际变化。只输出一个 JSON 对象，不要任何其他内容。'
+        )
+        user_prompt = (
+            f'## 本 Part（Part {part_num}）实际剧情摘要\n{summary}\n\n'
+            f'## 下一 Part（Part {part_num + 1}）原定大纲\n'
+            f'核心事件：{next_entry.get("core_event", "")}\n'
+            f'结尾钩子：{next_entry.get("end_hook", "")}\n'
+            f'因果关系：{next_entry.get("causality", "")}\n\n'
+            '请输出 JSON：\n'
+            '{"departed_characters": ["本 Part 中死亡/离开/失踪的角色名"],'
+            ' "new_objects": ["本 Part 新出现且后续关键物品/线索名"],'
+            ' "foreshadow_planted": ["本 Part 新埋设的伏笔（一句话）"],'
+            ' "foreshadow_revealed": ["本 Part 已揭晓的伏笔（一句话）"],'
+            ' "outline_adjustments": "下一 Part 写作时需要按实际剧情修正的点（没有则空字符串）"}'
+        )
+        payload = call_llm_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            temperature=0.3,
+            max_tokens=2000,
+            agent='story_delta',
+            work_id=s.work_id,
+        )
+        return payload if isinstance(payload, dict) else {}
+
 
 class Phase4Runner:
     """风格优化 + 评审阶段 —— StyleOptimizer + Logic/Emotion/Consistency Review"""
@@ -284,31 +384,45 @@ class Phase4Runner:
             emotion_agent = EmotionReviewAgent()
             consistency_agent = ConsistencyReviewAgent()
             per_part_results: list = []
+            # R1-I: 三评审并行 —— 此前串行 20 Part = 60 次顺序 LLM 调用（估 40-60min）。
+            # 三个 agent 为独立实例、call_llm_json 每次自建 client，无共享可变状态；
+            # Semaphore(3) 防 provider 限流。AGENT_CALL start 全部先发、end 按完成顺序发。
+            review_semaphore = asyncio.Semaphore(3)
+
+            async def _run_review(agent, kind: str, part_num: int, part_text: str) -> dict:
+                async with review_semaphore:
+                    try:
+                        return await asyncio.to_thread(agent.execute, state_mock, part_num, part_text)
+                    except Exception as e:
+                        logger.info(f'[Phase4Runner] {kind} Part {part_num} 失败: {e}')
+                        return s._review_failure(kind, part_num, e)
+
             for idx, part_num in enumerate(part_nums, start=1):
                 part_key = str(part_num)
                 part_text = s.data['parts'][part_key]
                 await s.emitter.emit(EventType.AGENT_CALL, {'agent': 'logic_review_agent', 'part': part_num, 'status': 'start', 'message': f'审查 Part {part_num} 逻辑...', 'work_id': s.work_id}, work_id=s.work_id)
-                try:
-                    logic_result = await asyncio.to_thread(logic_agent.execute, state_mock, part_num, part_text)
-                except Exception as e:
-                    logger.info(f'[Phase4Runner] LogicReview Part {part_num} 失败: {e}')
-                    logic_result = s._review_failure('logic', part_num, e)
-                await s.emitter.emit(EventType.AGENT_CALL, {'agent': 'logic_review_agent', 'part': part_num, 'status': 'end', 'message': f'Part {part_num} 逻辑审查完成', 'work_id': s.work_id}, work_id=s.work_id)
                 await s.emitter.emit(EventType.AGENT_CALL, {'agent': 'emotion_review_agent', 'part': part_num, 'status': 'start', 'message': f'评估 Part {part_num} 情感...', 'work_id': s.work_id}, work_id=s.work_id)
-                try:
-                    emotion_result = await asyncio.to_thread(emotion_agent.execute, state_mock, part_num, part_text)
-                except Exception as e:
-                    logger.info(f'[Phase4Runner] EmotionReview Part {part_num} 失败: {e}')
-                    emotion_result = s._review_failure('emotion', part_num, e)
-                await s.emitter.emit(EventType.AGENT_CALL, {'agent': 'emotion_review_agent', 'part': part_num, 'status': 'end', 'message': f"Part {part_num} 情感评估: {emotion_result.get('emotion_score', 'N/A')}", 'work_id': s.work_id}, work_id=s.work_id)
                 await s.emitter.emit(EventType.AGENT_CALL, {'agent': 'consistency_review_agent', 'part': part_num, 'status': 'start', 'message': f'检查 Part {part_num} 一致性...', 'work_id': s.work_id}, work_id=s.work_id)
-                try:
-                    consistency_result = await asyncio.to_thread(consistency_agent.execute, state_mock, part_num, part_text)
-                except Exception as e:
-                    logger.info(f'[Phase4Runner] ConsistencyReview Part {part_num} 失败: {e}')
-                    consistency_result = s._review_failure('consistency', part_num, e)
+                logic_result, emotion_result, consistency_result = await asyncio.gather(
+                    _run_review(logic_agent, 'logic', part_num, part_text),
+                    _run_review(emotion_agent, 'emotion', part_num, part_text),
+                    _run_review(consistency_agent, 'consistency', part_num, part_text),
+                )
+                await s.emitter.emit(EventType.AGENT_CALL, {'agent': 'logic_review_agent', 'part': part_num, 'status': 'end', 'message': f'Part {part_num} 逻辑审查完成', 'work_id': s.work_id}, work_id=s.work_id)
+                await s.emitter.emit(EventType.AGENT_CALL, {'agent': 'emotion_review_agent', 'part': part_num, 'status': 'end', 'message': f"Part {part_num} 情感评估: {emotion_result.get('emotion_score', 'N/A')}", 'work_id': s.work_id}, work_id=s.work_id)
                 await s.emitter.emit(EventType.AGENT_CALL, {'agent': 'consistency_review_agent', 'part': part_num, 'status': 'end', 'message': f'Part {part_num} 一致性检查完成', 'work_id': s.work_id}, work_id=s.work_id)
                 per_part_results.append({'part': part_num, 'logic_result': logic_result if isinstance(logic_result, dict) else {}, 'emotion_result': emotion_result if isinstance(emotion_result, dict) else {}, 'consistency_result': consistency_result if isinstance(consistency_result, dict) else {}})
+                # R1-J: P0 定向修复回路（最多 1 轮重写；无 P0 时零行为变化）
+                try:
+                    from services.consistency_repair import ConsistencyRepairer
+                    repairer = ConsistencyRepairer(s, logic_agent, consistency_agent)
+                    repair_note = await repairer.maybe_repair_part(
+                        part_num, part_text, logic_result, consistency_result, state_mock)
+                    if repair_note:
+                        per_part_results[-1].update(repair_note)
+                        logger.info(f'[Phase4Runner] Part {part_num} 修复回路: {repair_note.get("revision_passed")}')
+                except Exception as repair_err:
+                    logger.info(f'[Phase4Runner] Part {part_num} 修复回路异常（保留原文，不影响主流程）: {repair_err}')
                 if part_nums:
                     part_progress = 85 + idx / len(part_nums) * 10
                     s.progress_callback(int(part_progress), f'Part {part_num} 评审完成 ({idx}/{len(part_nums)})')

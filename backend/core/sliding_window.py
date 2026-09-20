@@ -174,7 +174,44 @@ class SlidingWindow:
         if character_state:
             self.character_state = dict(character_state)
 
-    def build(self, part_num: int, *, characters: Optional[list]=None, world_setting: Optional[str]=None, outline: Optional[dict]=None, extra_context_provider=None, vector_store=None, vector_query: Optional[str]=None, vector_top_k: int=3) -> str:
+    def _extract_key_entity_hits(self, part_num: int, key_entities: list,
+                                 max_names: int = 10, max_parts_per_name: int = 2) -> list:
+        """R1-H: 关键词子串通道 —— 在全部一级摘要（含滑动窗口外）中找专名最近提及的 Part。
+
+        与 hash 向量语义通道互补（罕见专名的字符 2-gram 哈希检索能力有限）。
+        专名过滤：长度 ≥2、最多 max_names 个、每专名最多 max_parts_per_name 个 Part
+        （防 prompt 爆炸）。
+
+        Returns:
+            [(part_num, entity_name), ...] 按 Part 倒序（最近优先）。
+        """
+        names: list = []
+        seen = set()
+        for n in (key_entities or []):
+            n = (n or '').strip() if isinstance(n, str) else ''
+            if len(n) >= 2 and n not in seen:
+                seen.add(n)
+                names.append(n)
+            if len(names) >= max_names:
+                break
+        if not names:
+            return []
+        hits: list = []
+        for name in names:
+            matched = 0
+            for p_num in sorted(self.summaries.keys(), reverse=True):
+                if p_num >= part_num:
+                    continue
+                summary = self.summaries.get(p_num) or ''
+                if name in summary:
+                    hits.append((p_num, name))
+                    matched += 1
+                    if matched >= max_parts_per_name:
+                        break
+        hits.sort(key=lambda x: x[0], reverse=True)
+        return hits
+
+    def build(self, part_num: int, *, characters: Optional[list]=None, world_setting: Optional[str]=None, outline: Optional[dict]=None, extra_context_provider=None, vector_store=None, vector_query: Optional[str]=None, vector_top_k: int=3, key_entities: Optional[list]=None) -> str:
         """
         组装 PartWriter 所需的完整 prompt 上下文。
 
@@ -188,6 +225,8 @@ class SlidingWindow:
             vector_store: R7-P0-4 可选 VectorStore 实例；为 None 或 disabled 时整段跳过。
             vector_query: R7-P0-4 用作语义检索 query 的文本（一般是 outline 的 core_event / emotion_target）。
             vector_top_k: 检索 Top-K 数。
+            key_entities: R1-H 关键词通道专名列表（object/location/world_rule 类 subject，
+                由调用方从 established_facts 派生）；None 时通道关闭，旧调用方行为不变。
 
         返回: 多段拼装的 prompt 上下文文本。
         """
@@ -247,12 +286,34 @@ class SlidingWindow:
                     sections.append(legacy)
             except Exception:
                 logger.debug('sliding_window: silent except (P2-19)', exc_info=True)
+        # R1-H: 关键词子串通道（先于向量检索执行，入注入 Part 集合供向量段去重）
+        keyword_injected_parts: set = set()
+        if key_entities:
+            try:
+                hits = self._extract_key_entity_hits(part_num, key_entities)
+                if hits:
+                    sections.append('【关键实体最近提及】')
+                    for hit_part, entity_name in hits:
+                        keyword_injected_parts.add(hit_part)
+                        summary = self.summaries.get(hit_part) or ''
+                        line = f'--- Part {hit_part}（实体：{entity_name}）摘要：{summary}'
+                        text = self.parts.get(hit_part) or ''
+                        if text:
+                            # 原文仍在窗口内驻留时附末尾 600 字，便于核对实体当前状态
+                            excerpt = text[-600:] if len(text) > 600 else text
+                            line += f'\n（该 Part 原文驻留，末尾摘录）\n{excerpt}'
+                        sections.append(line)
+                    sections.append('')
+            except Exception as kw_err:
+                logger.info(f'[SlidingWindow] 关键词通道失败（已跳过）: {kw_err}')
         if vector_store is not None and vector_query:
             try:
                 hits = vector_store.query(vector_query, top_k=vector_top_k, exclude_part_num=part_num)
                 if hits:
                     sections.append('【相关前文片段（向量检索 Top-K）】')
                     for hit_part_num, sim in hits:
+                        if hit_part_num in keyword_injected_parts:
+                            continue  # R1-H: 与关键词段去重（同 Part 不重复注入）
                         text = vector_store.get_text(hit_part_num)
                         if not text:
                             continue
