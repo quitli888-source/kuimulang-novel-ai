@@ -14,6 +14,7 @@ R8 新增 —— 解决 Logic Agent 评 Part N 时只看到"前文摘要 + 末�
 """
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional, Iterable
+import time
 
 
 # 合法 category 集合（与 prompts/established_facts.txt 协议保持一致）
@@ -342,6 +343,60 @@ def facts_from_extractor_payload(payload: dict, part_num: int) -> List[Fact]:
             predicate=(raw.get("predicate") or "").strip(),
         ))
     return out
+
+
+def register_name_variants(registry_dict: dict, variants: list, part_num: int) -> list:
+    """R4-4: 把 facts 抽取回报的疑似别名候选登记进 name_registry（只追加，不合并）。
+
+    协议（prompts/established_facts.txt 新增可选字段）：variants 元素形如
+    {"variant": "<名册外写法>", "canonical": "<名册规范名>", "evidence": "<原文 quote>"}。
+
+    规则（回应 Round 1 拒绝理由：本函数代码里不存在任何合并逻辑）：
+    - 只写 registry[canonical]['alias_candidates']（append
+      {variant, part_num, evidence, timestamp}）
+    - 不做任何 subject 改写、不动既有 facts、不改历史文本
+    - canonical 不在 registry 中 → 跳过（不发明 canonical 名）
+    - 晋升在渲染侧（core/name_registry.py）：同一 variant 出现 ≥2 次或带非空
+      evidence → 展示为"已登记别名"；单次无证据候选只记录不注入 prompt
+
+    Args:
+        registry_dict: name_registry（build_name_registry 产物，原地修改）
+        variants: payload['name_variants']（LLM 回报，容忍脏数据）
+        part_num: 当前 Part 编号
+
+    Returns:
+        实际登记的条目列表 [{variant, canonical, part_num, evidence}, ...]
+    """
+    if not isinstance(registry_dict, dict) or not registry_dict:
+        return []
+    if not isinstance(variants, list):
+        return []
+    registered: list = []
+    now = time.strftime('%Y-%m-%d %H:%M:%S')
+    for item in variants:
+        if not isinstance(item, dict):
+            continue
+        variant = (item.get('variant') or '').strip()
+        canonical = (item.get('canonical') or '').strip()
+        evidence = (item.get('evidence') or '').strip()[:30]
+        if not variant or not canonical or canonical not in registry_dict:
+            continue
+        info = registry_dict.get(canonical)
+        if not isinstance(info, dict):
+            continue
+        candidates = info.get('alias_candidates')
+        if not isinstance(candidates, list):
+            candidates = []
+            info['alias_candidates'] = candidates
+        candidates.append({
+            'variant': variant,
+            'part_num': part_num,
+            'evidence': evidence,
+            'timestamp': now,
+        })
+        registered.append({'variant': variant, 'canonical': canonical,
+                           'part_num': part_num, 'evidence': evidence})
+    return registered
 
 
 def derive_departed_characters(facts, character_names) -> dict:

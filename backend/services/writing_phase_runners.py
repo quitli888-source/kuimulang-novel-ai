@@ -103,6 +103,20 @@ class Phase2Runner:
             plot_result = await asyncio.to_thread(plot_agent.execute, temp_state)
             s.data['world_setting'] = plot_result.get('world_setting', '')
             s.data['characters'] = plot_result.get('characters', [])
+            # R4-1: 角色规范名注册表 —— 从 Phase 2 characters 一次性冻结权威名源
+            # （无合并逻辑：不推断/不合并，回应 Round 1 拒绝理由）。幂等：已有非空
+            # registry 时不覆盖（resume/重跑安全）；characters 为空则不写（Phase 2
+            # 质量问题由名册缺失暴露给评审，不用空名册掩盖）。
+            try:
+                from core.name_registry import build_name_registry
+                _characters = s.data.get('characters') or []
+                if _characters and not (s.data.get('name_registry') or {}):
+                    s.data['name_registry'] = build_name_registry(_characters)
+                    logger.info(f'[Phase2Runner] R4-1 名册冻结: {len(s.data["name_registry"])} 个规范名')
+                elif not _characters:
+                    logger.info('[Phase2Runner] R4-1 characters 为空，不写 name_registry')
+            except Exception as nr_err:
+                logger.info(f'[Phase2Runner] R4-1 name_registry 构建失败（不影响主流程）: {nr_err}')
             s.data['part_outline'] = plot_result.get('part_outline', [])
             s.data['foreshadowing'] = plot_result.get('foreshadowing', [])
             # R2-4 防线 2 挂载点 B: Phase 2 出口再归一化一次 —— 覆盖"prompt 修了但

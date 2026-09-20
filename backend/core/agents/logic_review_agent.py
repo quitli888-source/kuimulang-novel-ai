@@ -159,6 +159,15 @@ class LogicReviewAgent(BaseAgent):
         except Exception:
             facts_block = ""
 
+        # R4-1: 角色名册段（与 facts_block 同级）—— Logic 判"姓名/身份冲突"时
+        # 先看到权威名源；state 无 registry 时退化为 characters 名列表
+        roster_block = ""
+        try:
+            from core.name_registry import render_name_roster_for_state
+            roster_block = render_name_roster_for_state(state) or ""
+        except Exception:
+            roster_block = ""
+
         if part_num > 1 and part_num - 1 in state.parts:
             prev_tail = state.parts[part_num - 1][-500:]
             prev_context += f"\n【前一部分（Part {part_num-1}）结尾】\n{prev_tail}"
@@ -200,6 +209,7 @@ class LogicReviewAgent(BaseAgent):
 
 {facts_block}
 
+{roster_block}
 {prev_context}
 
 ## Part {part_num}正文

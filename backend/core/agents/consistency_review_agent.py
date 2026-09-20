@@ -107,6 +107,24 @@ class ConsistencyReviewAgent(BaseAgent):
             if p_num < part_num:
                 prev_summaries += f"Part {p_num}: {state.part_summaries[str(p_num)]}\n"
 
+        # R4-1: 角色名册段 + 名称判定指引 —— 名册是唯一权威名源，把评审从
+        # "印象式比对"变为"对照名册可判定"（state 无 registry 时退化为
+        # characters 名列表，兼容旧 work JSON）
+        roster_block = ""
+        try:
+            from core.name_registry import render_name_roster_for_state
+            roster_block = render_name_roster_for_state(state) or ""
+        except Exception:
+            roster_block = ""
+        name_guidance = ""
+        if roster_block:
+            name_guidance = (
+                "\n## 名称一致性判定指引（R4-1）\n"
+                "- 名字不在名册内即为 P0 名称不一致（无名字路人除外）\n"
+                "- 名册外写法若上下文表明与名册角色为同一人，同样判 P0，"
+                "并在 description 中给出两种写法\n"
+            )
+
         # 前文结尾
         prev_tail = ""
         final_draft = self._get_final_draft(state) or {}
@@ -119,6 +137,7 @@ class ConsistencyReviewAgent(BaseAgent):
 ## 角色档案
 {characters_info}
 
+{roster_block}{name_guidance}
 ## 前文剧情摘要
 {prev_summaries}
 

@@ -13,6 +13,7 @@ from api.sse import SSEEmitter, EventType
 from api.works import get_work_file
 from core.config import get_app_config
 from core.established_facts import EstablishedFacts, DEPARTED_PREDICATES
+from core.name_registry import render_name_roster_for_state  # R4-1
 from core.progress_manager import progress_manager
 from core.error_handler import error_handler
 from core.memory_manager import get_all_memory
@@ -42,6 +43,10 @@ class TempStoryState:
         self.part_summaries = data.get('part_summaries', {})
         self.current_plot_state = data.get('current_plot_state', '')
         self.character_state_track = data.get('character_state_track', {})
+        # R4-1: 角色规范名注册表（Phase 2 冻结；修复回路新建 TempStoryState 时
+        # 自动拿到 registry，零额外接线）。与 data 共享同一 dict 引用 ——
+        # alias_candidates 登记（R4-4）直接反映到 work JSON。
+        self.name_registry = data.get('name_registry', {}) or {}
         # R1-D: e2e 路径消费链接通 —— 此前 TempStoryState 没有 established_facts，
         # PartWriterAgent 取事实块时 AttributeError 被吞、恒为空，事实只产不消。
         # 从 work JSON 反序列化，resume 后不归零（配合 Phase3Runner 每 Part 落盘）。
@@ -87,6 +92,12 @@ class TempStoryState:
 
             def _legacy_extras(pn: int) -> str:
                 sections = []
+                # R4-1: 角色名册段置首（位置即优先级；渲染独立于 facts，
+                # 天然不受 established_facts max_total 截断影响）
+                roster = render_name_roster_for_state(self)
+                if roster:
+                    sections.append(roster)
+                    sections.append('')
                 if self.current_plot_state:
                     sections.append(f'【当前剧情进度】{self.current_plot_state}')
                     sections.append('')
@@ -208,6 +219,11 @@ class TempStoryState:
     def _legacy_get_part_context(self, part_num):
         """保留的旧实现，作为滑动窗口失败时的回退路径。"""
         parts = []
+        # R4-1: 名册段同样进回退路径（窗口 build 异常时名册不消失；≤6 行）
+        roster = render_name_roster_for_state(self)
+        if roster:
+            parts.append(roster)
+            parts.append('')
         if self.characters:
             parts.append('【角色档案】')
             for c in self.characters:
@@ -506,9 +522,11 @@ class WritingService:
         P1-87: 携带 work_id 让 review agents 把 cost 计入 per-work tracker。
         R1-D: 挂上 build_established_facts_block（从 work JSON 加载已确立事实渲染），
         LogicReviewAgent 的 hasattr 守卫即自动生效，评审首次拿到前文事实基线。
+        R4-1: 携带 name_registry（角色规范名注册表），两个评审 agent 的名册段
+        数据源；旧 work JSON 无该键时退化为 characters 名列表。
         """
         from types import SimpleNamespace
-        mock = SimpleNamespace(work_id=self.work_id, inspiration=self.data.get('inspiration', ''), core_elements=self.data.get('core_elements', {}), market_positioning=self.data.get('market_positioning', {}), world_setting=self.data.get('world_setting', ''), characters=self.data.get('characters', []), part_outline=self.data.get('part_outline', []), foreshadowing=self.data.get('foreshadowing', []), parts=dict(self.data.get('parts', {}) or {}), part_summaries=dict(self.data.get('part_summaries', {}) or {}), current_plot_state=self.data.get('current_plot_state', ''), character_state_track=self.data.get('character_state_track', {}), memory=None, final_draft=dict(self.data.get('final_draft', {}) or self.data.get('parts', {}) or {}))
+        mock = SimpleNamespace(work_id=self.work_id, inspiration=self.data.get('inspiration', ''), core_elements=self.data.get('core_elements', {}), market_positioning=self.data.get('market_positioning', {}), world_setting=self.data.get('world_setting', ''), characters=self.data.get('characters', []), part_outline=self.data.get('part_outline', []), foreshadowing=self.data.get('foreshadowing', []), parts=dict(self.data.get('parts', {}) or {}), part_summaries=dict(self.data.get('part_summaries', {}) or {}), current_plot_state=self.data.get('current_plot_state', ''), character_state_track=self.data.get('character_state_track', {}), name_registry=self.data.get('name_registry', {}) or {}, consistency_flags=self.data.get('consistency_flags', []) or [], memory=None, final_draft=dict(self.data.get('final_draft', {}) or self.data.get('parts', {}) or {}))
         review_facts = EstablishedFacts()
         raw_ef = self.data.get('established_facts')
         if isinstance(raw_ef, dict):

@@ -14,6 +14,7 @@ import json
 from core.config import MEMORY_DIR
 from core.sliding_window import SlidingWindow
 from core.established_facts import EstablishedFacts, DEPARTED_PREDICATES
+from core.name_registry import render_name_roster_for_state  # R4-1
 
 
 class StoryState:
@@ -138,6 +139,12 @@ class StoryState:
             def _legacy_extras(pn: int) -> str:
                 """把旧实现的"角色状态快照 + 关键事实 + 当前剧情进度"注入"""
                 sections = []
+                # R4-1: 名册段置首（与 TempStoryState 双轨一致；数据源
+                # getattr 兜底 —— 旧状态无 name_registry 时退化为 characters 名列表）
+                roster = render_name_roster_for_state(self)
+                if roster:
+                    sections.append(roster)
+                    sections.append("")
                 if self.current_plot_state:
                     sections.append(f"【当前剧情进度】{self.current_plot_state}")
                     sections.append("")

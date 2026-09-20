@@ -301,9 +301,21 @@ class PartWriterAgent(BaseAgent):
         if already_extracted:
             return 0
         try:
-            user_prompt = f'Part {part_num} 全文（约 {len(part_text)} 字）：\n\n{part_text}\n\n请按 system prompt 的协议输出 JSON。'
+            # R4-4: facts 抽取 user_prompt 头部加名册段（character 类 fact 的
+            # subject 必须逐字使用名册写法；state 无 registry 时退化为
+            # characters 名列表，兼容 S1 未生效的旧 work JSON）
+            roster_block = ''
+            try:
+                from core.name_registry import render_name_roster_for_state
+                roster_block = render_name_roster_for_state(state) or ''
+            except Exception:
+                roster_block = ''
+            roster_head = (f'## 角色名册（character 类 fact 的 subject 必须逐字使用下列规范名）\n'
+                           f'{roster_block}\n\n') if roster_block else ''
+            user_prompt = (roster_head
+                           + f'Part {part_num} 全文（约 {len(part_text)} 字）：\n\n{part_text}\n\n请按 system prompt 的协议输出 JSON。')
             # R1-C: 1800 会被 step-5-preview 的 reasoning 吃光（冒烟实证 3 次重试
-            # 全败、每 Part 白烧约 2 分钟）；统一走 get_json_max_tokens()（默认 6000）。
+            # 全败、每 Part 白烧约 2 分钟）；统一走 get_json_max_tokens()（R4-X 起默认 12000）。
             payload = call_llm_json(system_prompt=_FACTS_EXTRACTOR_SYSTEM_PROMPT, user_prompt=user_prompt, temperature=0.0, max_tokens=get_json_max_tokens(), agent='established_facts', work_id=getattr(state, 'work_id', None))
         except Exception as call_err:
             logger.info(f'[PartWriterAgent] R8-P0-1 事实抽取 LLM 调用失败: {call_err}')
@@ -321,6 +333,20 @@ class PartWriterAgent(BaseAgent):
                 added = ef.add_many(rule_facts)
             except Exception as _:
                 logger.debug('part_writer_agent: silent except (P2-19)', exc_info=True)
+        # R4-4: 疑似别名候选登记（只追加进 registry.alias_candidates，不合并不改写；
+        # 晋升规则见 core/name_registry.render_name_roster）
+        try:
+            registry = getattr(state, 'name_registry', None)
+            if isinstance(registry, dict) and registry:
+                raw_variants = payload.get('name_variants')
+                if isinstance(raw_variants, list) and raw_variants:
+                    from core.established_facts import register_name_variants
+                    registered = register_name_variants(registry, raw_variants, part_num)
+                    if registered:
+                        logger.info(f'[PartWriterAgent] R4-4 Part {part_num} 登记 {len(registered)} 条别名候选: '
+                                    + ', '.join(f"{r['variant']}→{r['canonical']}" for r in registered))
+        except Exception as nv_err:
+            logger.info(f'[PartWriterAgent] R4-4 别名候选登记失败（不影响主流程）: {nv_err}')
         if added:
             try:
                 self.update_progress(90, f'📑 Part {part_num} 已抽取 {added} 条事实写入 established_facts')
