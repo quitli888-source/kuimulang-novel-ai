@@ -131,7 +131,9 @@ def test_render_name_roster_candidate_promotion():
         {'variant': '林万重', 'part_num': 5, 'evidence': '', 'timestamp': 't2'}]
     out = render_name_roster(reg)
     assert '已登记别名：林万重 = 林渊' in out
-    assert '正文仍必须使用规范名"林渊"' in out
+    # R5-5: 疏堵结合引导语（替代旧"正文仍必须使用规范名"）
+    assert '行文确需简称时，本 Part 先用规范名全称"林渊"至少一次' in out
+    assert '未登记的简写仍属错误' in out
     # 场景 3: 单次但带 quote 证据 —— 晋升展示
     reg['林渊']['alias_candidates'] = [
         {'variant': '林万重', 'part_num': 2, 'evidence': '林万重踏上寻道之路', 'timestamp': 't'}]

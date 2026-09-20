@@ -32,7 +32,7 @@ _BACKEND = _HERE.parent.parent
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
-from core.name_registry import build_name_registry  # noqa: E402
+from core.name_registry import build_name_registry, render_name_roster  # noqa: E402
 from services.consistency_repair import (  # noqa: E402
     ConsistencyRepairer, apply_name_spotfix, apply_safety_gates,
     derive_name_pairs, has_name_issue,
@@ -738,6 +738,91 @@ def test_consistency_prompt_roster_procedure():
     logger.info('[test_roster_procedure] PASS: 两处同含三句工序，净增受控')
 
 
+# ---------------- R5-5: Phase 2 名长指引 + aliases 真实读取 + StyleOptimizer 名册 ----------------
+
+def test_build_name_registry_reads_aliases():
+    """R5-5 验收 1: build_name_registry 真实读取 characters 的 aliases。
+
+    合法 aliases 原样登记；无字段/脏类型（字符串被当 list 会逐字符切碎）→ []；
+    非字符串元素清洗；超 MAX_ALIASES_PER_CHARACTER=3 截断；重名/空名行为不变。
+    """
+    reg = build_name_registry([
+        {'name': '井中神族意识', 'role': '反派', 'aliases': ['井中意识', '神族意识']},
+        {'name': '林尘', 'role': '主角'},                                # 无 aliases 字段
+        {'name': '林战', 'role': '配角', 'aliases': 'not a list'},        # 脏类型
+        {'name': '林啸天', 'role': '配角', 'aliases': ['', '  ', 42, None, '执法长老']},
+        {'name': '殷刹', 'role': '反派', 'aliases': ['a1', 'a2', 'a3', 'a4']},  # 超 3 截断
+        {'name': '林尘', 'role': '主角', 'aliases': ['dup']},             # 重名仍跳过
+    ])
+    assert reg['井中神族意识']['aliases'] == ['井中意识', '神族意识']
+    assert reg['林尘']['aliases'] == []
+    assert reg['林战']['aliases'] == [], '字符串 aliases 不得被逐字符切碎'
+    assert reg['林啸天']['aliases'] == ['执法长老']
+    assert reg['殷刹']['aliases'] == ['a1', 'a2', 'a3']
+    assert set(reg.keys()) == {'井中神族意识', '林尘', '林战', '林啸天', '殷刹'}
+    # 正式 aliases 进名册渲染（已登记别名行）
+    out = render_name_roster(reg)
+    assert '- 已登记别名：井中意识 = 井中神族意识' in out
+    assert '- 已登记别名：神族意识 = 井中神族意识' in out
+    logger.info('[test_read_aliases] PASS: aliases 读取/清洗/截断/重名不变')
+
+
+def test_style_optimizer_injects_roster():
+    """R5-S5-b 验收: StyleOptimizer user_prompt 有名册段（有 registry 时）/
+    不含（无 registry 时）—— 风格优化此前的姓名盲区。"""
+    from core.agents.style_optimizer_agent import StyleOptimizerAgent
+    reg = build_name_registry(R4_SMOKE_CHARACTERS)
+    outline = [{'title': 'P1'}, {'title': 'P2', 'phase': '冲突升级',
+                                 'emotion_target': '紧张', 'end_hook': '钩子'}]
+    state = SimpleNamespace(part_outline=outline, name_registry=reg,
+                            characters=[], work_id='r5')
+    captured = {}
+
+    def fake_call(**kwargs):
+        captured['user_prompt'] = kwargs.get('user_prompt', '')
+        return '优化后的正文内容。' * 800
+
+    with patch('core.agents.style_optimizer_agent.call_llm', side_effect=fake_call):
+        StyleOptimizerAgent().execute(state, 2, '林尘跌入古井的原文。' * 400)
+    up = captured['user_prompt']
+    assert '## 角色名册（唯一正确写法，优化时严禁改动任何人名）' in up
+    assert '井中神族意识' in up and '全书唯一正确写法是"井中神族意识"' in up
+    # 无 registry 且无 characters → 不插段
+    state_empty = SimpleNamespace(part_outline=outline, name_registry={},
+                                  characters=[], work_id='r5')
+    captured2 = {}
+
+    def fake_call2(**kwargs):
+        captured2['user_prompt'] = kwargs.get('user_prompt', '')
+        return '优化后的正文内容。' * 800
+
+    with patch('core.agents.style_optimizer_agent.call_llm', side_effect=fake_call2):
+        StyleOptimizerAgent().execute(state_empty, 2, '林尘跌入古井的原文。' * 400)
+    assert '角色名册' not in captured2['user_prompt'], '无名册时不得插空段'
+    logger.info('[test_style_roster] PASS: StyleOptimizer 名册注入/空名册不插段')
+
+
+def test_plot_planner_prompt_name_length_guidance():
+    """R5-5 验收 4: plot_planner user_prompt 含角色名长度指引与 aliases schema 行。"""
+    from core.agents.plot_planner_agent import PlotPlannerAgent
+    state = SimpleNamespace(inspiration='少年被预言为天煞孤星', core_elements={},
+                            market_positioning={}, work_id='r5')
+    captured = {}
+
+    def fake_json(**kwargs):
+        captured['user_prompt'] = kwargs.get('user_prompt', '')
+        return {'world_setting': '玄幻世界', 'characters': [], 'foreshadowing': [],
+                'part_outline': []}
+
+    with patch('core.agents.plot_planner_agent.call_llm_json', side_effect=fake_json):
+        PlotPlannerAgent().execute(state)
+    up = captured['user_prompt']
+    assert '**角色名长度**：主要角色名控制在 2-4 字' in up
+    assert 'aliases（1-2 个口头简称，2-4 字）' in up
+    assert '"aliases": ["口头简称/别名（2-4 字；name≥5 字时必填，否则空数组）"]' in up
+    logger.info('[test_plot_name_length] PASS: 名长指引 + aliases schema 行进 prompt')
+
+
 if __name__ == '__main__':
     logger.info('=' * 60)
     logger.info('test_round5_name_audit.py —— Round 5 姓名审计回归（mock LLM）')
@@ -759,7 +844,10 @@ if __name__ == '__main__':
                test_evaluate_g4_name_audit_quadrants,
                test_summarize_name_audit_residual_accounting,
                test_recover_drift_dict_from_revision_log,
-               test_consistency_prompt_roster_procedure):
+               test_consistency_prompt_roster_procedure,
+               test_build_name_registry_reads_aliases,
+               test_style_optimizer_injects_roster,
+               test_plot_planner_prompt_name_length_guidance):
         fn()
         print(f'PASS {fn.__name__}')
     logger.info('\nALL PASS')

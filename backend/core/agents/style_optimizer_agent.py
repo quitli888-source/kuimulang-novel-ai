@@ -46,7 +46,17 @@ class StyleOptimizerAgent(BaseAgent):
         else:
             mode_instruction = ''
         effective_max = max(original_len, target_max)
-        user_prompt = f"请优化Part {part_num}的语言表达。\n\n## Part信息\n阶段：{outline.get('phase', '')}\n情绪目标：{outline.get('emotion_target', '')}\n结尾钩子：{outline.get('end_hook', '')}\n\n{optimization_notes}{mode_instruction}\n## 字数约束\n原文：{original_len}字\n目标：保持与原文相近的字数（{effective_max}字以内）\n{('可以适当精简' if is_over else '不要删减内容，只优化表达质量')}\n\n## 原文\n{part_text}\n\n请输出优化后的正文。只输出正文，不要任何标注。"
+        # R5-S5-b: 名册注入 —— 风格优化此前对姓名完全无约束（user_prompt 没有任何
+        # 人名约束），是姓名漂移可能被重新引入的唯一未设防环节；预防 + S1 终审兜底。
+        roster_block = ''
+        try:
+            from core.name_registry import render_name_roster_for_state
+            roster_block = render_name_roster_for_state(state) or ''
+        except Exception:
+            roster_block = ''
+        roster_segment = (f'\n## 角色名册（唯一正确写法，优化时严禁改动任何人名）\n{roster_block}\n'
+                          if roster_block else '')
+        user_prompt = f"请优化Part {part_num}的语言表达。\n\n## Part信息\n阶段：{outline.get('phase', '')}\n情绪目标：{outline.get('emotion_target', '')}\n结尾钩子：{outline.get('end_hook', '')}\n{roster_segment}\n{optimization_notes}{mode_instruction}\n## 字数约束\n原文：{original_len}字\n目标：保持与原文相近的字数（{effective_max}字以内）\n{('可以适当精简' if is_over else '不要删减内容，只优化表达质量')}\n\n## 原文\n{part_text}\n\n请输出优化后的正文。只输出正文，不要任何标注。"
         # R2-5: 硬编码 effective_max + 500 → 任务级单点 get_task_max_tokens('polish')
         # （默认 PART_WORD_MAX*2+2000：润色要重写全文，而推理模型的 reasoning token
         #  计入 max_tokens —— Round 1 实证 10500 被吃光只剩 431 字，直接毁稿）。

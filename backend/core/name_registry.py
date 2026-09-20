@@ -10,6 +10,8 @@ Part 2"林万重"漂移被 consistency 判 P0。注册表把名字升格为"显�
 - **无合并逻辑**：不推断、不合并；不用编辑距离 / 2-gram / embedding / 相似度。
   注册表只从 Phase 2 characters 档案冻结 canonical 名，合并决策从代码中彻底移除
 - 别名只以"已登记别名 / 候选"**追加展示**，不改写任何历史 fact 或正文
+- R5-5: aliases 真实读取 Phase 2 characters（此前硬编码 []）；≥5 字长名按
+  Phase 2 名长指引给出 1-2 个口头简称，名册行改"疏堵结合"引导语
 - 候选晋升（graphiti 式"不确定不生效"）：同一 variant 出现 ≥2 次或带非空 quote
   证据 → render 展示为"已登记别名"；单次无证据候选只记录不注入 prompt
 - 数据与渲染分离：build_name_registry 纯数据、render_name_roster 纯渲染，均可单测
@@ -25,6 +27,9 @@ logger = get_logger('name_registry')
 # 候选晋升规则：同一 variant 出现次数下限（或带非空 evidence）—— 单次无证据候选
 # 只记录不注入 prompt，防止抽取侧误报把两个真实不同角色在 prompt 里绑成同一人
 PROMOTION_MIN_OCCURRENCES = 2
+
+# R5-5: 每个角色最多登记的 aliases 数（Phase 2 名长指引约定 1-2 个，留 1 余量）
+MAX_ALIASES_PER_CHARACTER = 3
 
 _ROSTER_TITLE = '【角色名册——唯一正确写法（最高优先级）】'
 _ROSTER_RULE = '规则：本段与【角色档案】冲突时以本段为准；禁止发明名册之外的有名有姓角色'
@@ -57,10 +62,19 @@ def build_name_registry(characters: list) -> dict:
             # 重名不做合并（Round 1 拒绝理由的负面清单）—— 跳过并留痕
             logger.info(f'[name_registry] 跳过重名角色 "{name}"（Phase 2 质量问题，不做合并）')
             continue
+        # R5-5: 真实读取 Phase 2 characters 的 aliases（此前硬编码 []，名册
+        # "已登记别名"行对正式简称永远为空）。只做字面清洗 + 截断，不推断不合并；
+        # 非 list（脏类型）按无别名处理（防字符串被逐字符切碎成"别名"）。
+        raw_aliases = c.get('aliases')
+        aliases = ([a.strip() for a in raw_aliases
+                    if isinstance(a, str) and a.strip()][:MAX_ALIASES_PER_CHARACTER]
+                   if isinstance(raw_aliases, list) else [])
+        if aliases:
+            logger.info(f'[name_registry] 角色 "{name}" 登记 {len(aliases)} 个别名: {aliases}')
         registry[name] = {
             'role': (c.get('role') or '').strip(),
             'introduced_part': 1,
-            'aliases': [],
+            'aliases': aliases,
             'alias_candidates': [],
         }
     return registry
@@ -111,7 +125,8 @@ def _registered_alias_lines(registry: dict) -> list:
             part_num = cand.get('part_num', '?')
             lines.append(
                 f'- 已登记别名：{variant} = {name}（Part{part_num} 误写登记；'
-                f'正文仍必须使用规范名"{name}"）')
+                f'行文确需简称时，本 Part 先用规范名全称"{name}"至少一次，随后可使用该简称；'
+                f'未登记的简写仍属错误）')
     return lines
 
 
