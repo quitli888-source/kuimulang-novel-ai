@@ -708,6 +708,36 @@ def test_recover_drift_dict_from_revision_log():
     logger.info('[test_recover_dict] PASS: revision_log 恢复 + applied_verified 语义')
 
 
+# ---------------- R5-4: consistency prompt 名册核对工序 ----------------
+
+_ROSTER_STEPS = ('第一步·名册逐一核对', '第二步·判定', '第三步·引证')
+
+
+def test_consistency_prompt_roster_procedure():
+    """R5-4 验收: prompt 文件与内嵌 fallback 同含名册核对三句工序。
+
+    prompt_loader 文件优先，但内嵌副本不同步会在缺文件的部署上行为分裂，
+    故两处必须同改（02_review §2.4）。
+    """
+    prompts_file = _HERE.parents[2] / 'prompts' / 'consistency_review.txt'
+    txt = prompts_file.read_text(encoding='utf-8')
+    for step in _ROSTER_STEPS:
+        assert step in txt, f'prompt 文件缺工序句: {step}'
+    assert '写法→出现次数' in txt and '该写法在正文中的出现次数' in txt
+    # 内嵌 fallback（load_prompt 的第二参）同改
+    agent_src = (_BACKEND / 'core' / 'agents' / 'consistency_review_agent.py').read_text(encoding='utf-8')
+    for step in _ROSTER_STEPS:
+        assert step in agent_src, f'内嵌 fallback 缺工序句: {step}'
+    # 代码侧 name_guidance 三条规则句未被触碰（test_round4_names.py:222 锁定）
+    assert '名字不在名册内即为 P0 名称不一致' in agent_src
+    # 净增受控：三句工序合计 ≤200 汉字（原文两句 44 字 → 211 字）
+    import re
+    section = txt[txt.index('1. **角色名称一致性'):txt.index('2. **角色状态连续性')]
+    cjk = len(re.findall(r'[一-鿿]', section))
+    assert 150 <= cjk <= 220, f'工序段汉字数异常: {cjk}'
+    logger.info('[test_roster_procedure] PASS: 两处同含三句工序，净增受控')
+
+
 if __name__ == '__main__':
     logger.info('=' * 60)
     logger.info('test_round5_name_audit.py —— Round 5 姓名审计回归（mock LLM）')
@@ -728,7 +758,8 @@ if __name__ == '__main__':
                test_audit_name_drift_dirty_data_fail_open,
                test_evaluate_g4_name_audit_quadrants,
                test_summarize_name_audit_residual_accounting,
-               test_recover_drift_dict_from_revision_log):
+               test_recover_drift_dict_from_revision_log,
+               test_consistency_prompt_roster_procedure):
         fn()
         print(f'PASS {fn.__name__}')
     logger.info('\nALL PASS')
