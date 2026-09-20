@@ -19,6 +19,30 @@ def _issues_by_level(issues: list, level: str) -> list:
     return [i for i in issues if isinstance(i, dict) and i.get("level") == level]
 
 
+def _count_by_level(result: dict, level: str, count_key: str) -> list:
+    """R2-8: 按 level 取 issue 列表 —— issues 数组优先，为空时回退到 per-part 数值字段。
+
+    背景：logic_review 的 V5 短 JSON 协议（prompts/logic_review.txt:44,62）明确
+    "issues 列表在主 JSON 中省略"，agent 只输出数值 p0_count/p1_count 字段
+    （logic_review_agent.py:228,245,248）。此前聚合器只从 issues 数组派生计数 →
+    logic.p0_count 恒 0，门禁 total_p0 = logic.p0_count + consistency.p0_count
+    永远漏掉 logic 维度的 P0（G4 指标系统性低估）。"issues 优先、数值兜底"对
+    旧式带 issues 的结果行为不变（向后兼容）。
+    """
+    issues = _issues_by_level(result.get("issues", []), level)
+    if issues:
+        return issues
+    count = result.get(count_key)
+    try:
+        n = int(count or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n > 0:
+        # 数值兜底：合成占位 issue 计数（V5 协议无 issue 明细，top_issue 显示提示）
+        return [{'level': level, 'description': f'（V5 短协议：{count_key}={n}，无 issue 明细）'} for _ in range(n)]
+    return []
+
+
 def _avg(xs: list) -> float:
     return round(sum(xs) / len(xs), 2) if xs else 0.0
 
@@ -80,12 +104,15 @@ def aggregate_review_results(per_part_results: list) -> dict:
         emotion_pass.append(bool(er.get("pass", e_score >= 6)))
         consistency_pass.append(bool(cr.get("pass", c_score >= 6)))
 
-        l_p0 = _issues_by_level(lr.get("issues", []), "P0")
-        l_p1 = _issues_by_level(lr.get("issues", []), "P1")
-        c_p0 = _issues_by_level(cr.get("issues", []), "P0")
-        c_p1 = _issues_by_level(cr.get("issues", []), "P1")
+        # R2-8: issues 优先、数值兜底（V5 短协议下 logic 只有 p0_count/p1_count 数值）
+        l_p0 = _count_by_level(lr, "P0", "p0_count")
+        l_p1 = _count_by_level(lr, "P1", "p1_count")
+        c_p0 = _count_by_level(cr, "P0", "p0_count")
+        c_p1 = _count_by_level(cr, "P1", "p1_count")
         e_p1 = er.get("weaknesses", []) if isinstance(er.get("weaknesses"), list) else []
-        e_p0 = er.get("enhancement_suggestions", []) if isinstance(er.get("enhancement_suggestions"), list) else []
+        # R2-8: e_p0 修正 —— enhancement_suggestions 是情感增强建议，不是 P0 issues，
+        # 此前误计入 parts[].p0_issues 污染报告展示（不影响门禁口径，但误导排查）
+        e_p0 = []
 
         logic_p0.extend(l_p0)
         logic_p1.extend(l_p1)

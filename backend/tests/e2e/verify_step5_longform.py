@@ -167,6 +167,18 @@ async def main():
     service._request_confirm = _no_confirm
     progress_manager.reset_progress(work_id)
 
+    if SKIP_PHASE4:
+        # P1-1: 此前 SKIP_PHASE4 只跳 G4 门禁打印、Phase 4 照跑（冒烟 32min vs 文档
+        # 承诺的"分钟级"）。这里 monkeypatch Phase4Runner.run 为 async no-op ——
+        # _phase4_optimize 在运行时才解析 .run，打补丁即生效；不动 WritingService
+        # 主流程签名，避免波及其他调用方与 test_resume。
+        from services.writing_phase_runners import Phase4Runner
+
+        async def _skip_phase4(self):
+            print('[SKIP] KML_SKIP_PHASE4=1，Phase 4（风格优化+三评审）已跳过', flush=True)
+
+        Phase4Runner.run = _skip_phase4
+
     t_start = time.time()
     print(f'\n[Step 2] 开始完整创作流程（Phase 1-4）...', flush=True)
     try:
