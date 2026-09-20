@@ -1,27 +1,46 @@
 """
 R1-J: P0 定向修复回路 —— Phase 4 评审检出 P0 后系统内自愈。
+R4-2: 姓名漂移定点修复（确定性字符串归一 + 4 条安全闸 + 计数复检 + 回退）。
+R4-5: 修复回路四段式（分流 / 变坏回退 / 条件性第二跳 / 失败汇总与告警）。
 
 背景：评审发现 P0 后此前仅记录进 review_report，全管线无重写路径，
 G4（logic+consistency P0 总数 = 0）只能靠"预防全对"，容错为零。
 
-设计（Reviewer 批准缩窄版）：
-- 某 Part 聚合后 p0_count > 0 时，用该 Part 的 issues + 相关 established_facts
-  生成 revision brief，调用 PartWriterAgent 带更强约束重写**一次**
-- 仅重审该 Part 的 Logic + Consistency 两个 agent（Emotion 不受影响）
-- 仍不过则**保留原文**，并在 review_report 对应 Part 标注
-  revision_attempted / revision_passed；修订痕迹写入 s.data['revision_log']
-- 重写走与 Phase 3 相同的 _save_chunk_progress 落盘路径
-- 不静默丢内容；最多 1 轮（20 Part 墙钟约束，不做 2 轮）
+设计（Reviewer 批准缩窄版 + Round 4 收紧）：
+- 分诊（R4-2）：名称类 P0 → 定点修复（零 LLM 的字符串替换 + 确定性复检）；
+  结构/logic 类 → 全文重写。定点修复的 (错误名, 正确名) 配对只认显式来源
+  （名册已晋升别名候选 / consistency issue 字段字面包含），歧义即放弃；
+  **禁止编辑距离/相似度猜配对**（Round 1 拒绝理由负面清单）
+- 定点修复 4 条安全闸全部满足才替换：配对来源显式 / len(错误名)>=2 /
+  错误名与注册名·已登记别名·退场名互不为子串（双向）/ 错误名不在退场名单
+- 替换后重审 Logic + Consistency（Emotion 不参与）；P0 归零才保留，
+  否则回退保留原文（现有兜底语义不变）
+- 重写最多 2 轮（R4-5 hard cap）：第二轮仅在第一轮严格改善时条件触发，
+  brief 必须附第一轮新引入的问题清单；重写导致劣化（residual 不降 / 出现
+  首检没有的新 P0 类别）→ 立即回退原文并标注 revision_degraded
+- 修订痕迹写入 s.data['revision_log']（定点修复条目带
+  type='name_spotfix' + wrong_name/right_name/pair_source，只增不改既有字段）
+- 不静默丢内容；重写走与 Phase 3 相同的 _save_chunk_progress 落盘路径
 """
 import asyncio
+import re
 import time
 
 from api.sse import EventType
 from core.established_facts import EstablishedFacts
 from core.logger import get_logger
+from core.name_registry import promoted_candidates, render_name_roster
 from core.text_utils import truncate
 
 logger = get_logger('consistency_repair')
+
+# R4-5: 重写硬顶 2 轮（第二轮仅条件触发；对照 chinese-novelist-skill 3 轮 /
+# self-refine 4 次，2 轮在 20 Part × 多小时约束下更稳）
+MAX_REWRITE_ROUNDS = 2
+
+# consistency issue 的 character 字段可能是"林万重/林渊"这类复合写法，
+# 按常见分隔符切分出候选错误名 token（只做字面切分，不做任何模糊匹配）
+_CHAR_FIELD_SPLIT_RE = re.compile(r'[/、,，;；|\s]+')
 
 
 class _RevisionStateProxy:
@@ -68,8 +87,210 @@ def count_p0(logic_result: dict, consistency_result: dict) -> int:
     return logic_p0 + len(cons_issues)
 
 
+# ----------------- R4-2: 名称类分诊与配对推导（纯函数，可单测） -----------------
+
+def _p0_issues(result: dict) -> list:
+    return [i for i in ((result or {}).get('issues') or [])
+            if isinstance(i, dict) and i.get('level') == 'P0']
+
+
+def is_name_issue(issue: dict) -> bool:
+    """名称类 P0 判定：dimension=='名称一致性'。"""
+    return isinstance(issue, dict) and (issue.get('dimension') or '').strip() == '名称一致性'
+
+
+def has_name_issue(consistency_result: dict, registry: dict) -> bool:
+    """R4-2 分诊：是否存在名称类 P0。
+
+    名称类 = consistency P0 issue 的 dimension=='名称一致性'，或其
+    description/location 含名册已晋升的别名对（variant 字面出现）。
+    """
+    if not isinstance(registry, dict) or not registry:
+        return False
+    for issue in _p0_issues(consistency_result):
+        if is_name_issue(issue):
+            return True
+        text = f"{issue.get('description') or ''} {issue.get('location') or ''}"
+        for info in registry.values():
+            if not isinstance(info, dict):
+                continue
+            for cand in promoted_candidates(info):
+                if (cand.get('variant') or '') and cand['variant'] in text:
+                    return True
+    return False
+
+
+def derive_name_pairs(part_text: str, consistency_result: dict, registry: dict) -> list:
+    """R4-2: 推导显式 (错误名, 正确名) 配对（确定性，零相似度）。
+
+    来源仅两类：
+      (a) registry alias_candidates 中已按晋升规则生效的条目
+          （同一 variant ≥2 次或带非空 evidence）；
+      (b) consistency P0 issue 的 character 字段 token + description/location
+          中**同时字面包含**该 token（不在 registry）与某个 registry canonical 名。
+
+    歧义即放弃：description/location 含多个 canonical 候选、不含任何
+    canonical 名、或错误名本身在 registry 中 → 不产配对（调用方落回重写）。
+    只保留在正文中实际出现过的错误名（count > 0）。
+
+    Returns:
+        [{"wrong", "right", "source", "evidence"}, ...]（source ∈
+        {'alias_candidate', 'issue_character'}）
+    """
+    if not isinstance(registry, dict) or not registry:
+        return []
+    part_text = part_text or ''
+    canonicals = [n for n in registry if n]
+    pairs: list = []
+    seen: set = set()
+
+    def _add(wrong, right, source, evidence=''):
+        wrong = (wrong or '').strip()
+        right = (right or '').strip()
+        if not wrong or not right or wrong == right:
+            return
+        if right not in registry or wrong in registry:
+            return  # 正确名必须在名册、错误名必须不在名册
+        if part_text.count(wrong) <= 0:
+            return  # 正文没有这个错误名 —— 替换无意义
+        key = (wrong, right)
+        if key in seen:
+            return
+        seen.add(key)
+        pairs.append({'wrong': wrong, 'right': right, 'source': source,
+                      'evidence': (evidence or '').strip()[:30]})
+
+    # (a) 名册已晋升的别名候选
+    for name, info in registry.items():
+        if not isinstance(info, dict):
+            continue
+        for cand in promoted_candidates(info):
+            _add(cand.get('variant'), name, 'alias_candidate', cand.get('evidence', ''))
+
+    # (b) consistency issue 的 character 字段 + description/location 字面包含
+    for issue in _p0_issues(consistency_result):
+        desc = (issue.get('description') or '').strip()
+        loc = (issue.get('location') or '').strip()
+        text = f'{desc} {loc}'
+        if not desc:
+            continue
+        # 歧义判定只看 description：含多个 canonical 候选即放弃
+        # （location 常顺带提及他人，如"……同时扑向林尘"，不作为歧义依据）
+        present = [n for n in canonicals if n in desc]
+        if len(present) != 1:
+            continue  # 歧义（0 个或 ≥2 个 canonical）即放弃
+        canonical = present[0]
+        char_field = (issue.get('character') or '').strip()
+        for token in _CHAR_FIELD_SPLIT_RE.split(char_field):
+            token = token.strip()
+            if token and token not in registry and token in text and token != canonical:
+                _add(token, canonical, 'issue_character', desc)
+    return pairs
+
+
+def apply_safety_gates(pairs: list, registry: dict, departed_names=None) -> list:
+    """R4-2: 4 条安全闸（全部满足才保留配对；任一不满足 → 丢弃该配对）。
+
+    (a) 配对来源显式（derive_name_pairs 已保证：alias_candidate / issue_character）
+    (b) len(错误名) >= 2
+    (c) 错误名与任何注册名 / 已登记别名 / 退场名互不为子串（双向检查）
+    (d) 错误名不在 departed 名单
+    """
+    reg_names = [n for n in (registry or {}) if n]
+    aliases: list = []
+    for info in (registry or {}).values():
+        if isinstance(info, dict):
+            aliases.extend(a.strip() for a in (info.get('aliases') or [])
+                           if isinstance(a, str) and a.strip())
+    departed = [n for n in (departed_names or []) if n]
+    check_names = reg_names + aliases + departed
+    valid: list = []
+    for p in pairs or []:
+        wrong = (p.get('wrong') or '').strip()
+        if len(wrong) < 2:  # 闸 (b)
+            logger.info(f'[ConsistencyRepairer] 安全闸(b): 错误名 "{wrong}" 长度 <2，放弃该配对')
+            continue
+        clash = next((n for n in check_names if wrong in n or n in wrong), None)
+        if clash:  # 闸 (c)
+            logger.info(f'[ConsistencyRepairer] 安全闸(c): 错误名 "{wrong}" 与 "{clash}" 互为子串，放弃该配对')
+            continue
+        if wrong in departed:  # 闸 (d)
+            logger.info(f'[ConsistencyRepairer] 安全闸(d): 错误名 "{wrong}" 在退场名单，放弃该配对')
+            continue
+        valid.append(p)
+    return valid
+
+
+def apply_name_spotfix(part_text: str, pairs: list) -> tuple:
+    """R4-2: 确定性替换 + 计数校验（替代 Scout 的长度相等假设——中文名不等长时
+    计数恒等式仍成立）。
+
+    Returns:
+        (new_text, ok, reason)——ok=False 时 new_text == part_text（未改动）。
+    """
+    new_text = part_text or ''
+    for p in pairs or []:
+        wrong, right = p.get('wrong', ''), p.get('right', '')
+        cur = new_text
+        if cur.count(wrong) == 0:
+            continue
+        nxt = cur.replace(wrong, right)
+        if nxt.count(wrong) != 0:
+            return part_text, False, f'替换后 "{wrong}" 未清零'
+        if nxt.count(right) != cur.count(right) + cur.count(wrong):
+            return part_text, False, f'"{right}" 计数恒等式不成立'
+        new_text = nxt
+    return new_text, True, ''
+
+
+def _issue_signature(issue: dict) -> tuple:
+    """issue 去重签名（dimension + description 前 40 字 + character）。"""
+    return ((issue.get('dimension') or '').strip(),
+            (issue.get('description') or '').strip()[:40],
+            (issue.get('character') or '').strip())
+
+
+def is_revision_degraded(p0_before: int, residual_p0: int,
+                         first_cons: dict, new_cons: dict,
+                         first_logic: dict, new_logic: dict) -> bool:
+    """R4-5: 变坏回退判据 —— residual 没变好，或重审出现首检没有的新 P0。
+
+    consistency 按 dimension/description 差集判定；logic V5 短协议无明细，
+    用 p0_count 与 verdict 文本比对（p0_count 上升即变坏）。
+    """
+    if residual_p0 >= p0_before:
+        return True
+    first_sigs = {_issue_signature(i) for i in _p0_issues(first_cons)}
+    if any(_issue_signature(i) not in first_sigs for i in _p0_issues(new_cons)):
+        return True
+    if int((new_logic or {}).get('p0_count') or 0) > int((first_logic or {}).get('p0_count') or 0):
+        return True
+    return False
+
+
+def newly_introduced_problems(first_logic: dict, first_cons: dict,
+                              new_logic: dict, new_cons: dict) -> list:
+    """R4-5: 第一轮新引入的问题清单（首检 issues 与一审重审 issues 的差集 +
+    logic verdict 变化）—— 第二轮 brief 必须附带，防重复犯错。"""
+    first_sigs = {_issue_signature(i) for i in _p0_issues(first_cons)}
+    problems = []
+    for i in _p0_issues(new_cons):
+        if _issue_signature(i) not in first_sigs:
+            loc = (i.get('location') or '').strip()
+            desc = (i.get('description') or '').strip()[:120]
+            problems.append(f'[{loc}] {desc}' if loc else desc)
+    fl, nl = first_logic or {}, new_logic or {}
+    f_p0 = int(fl.get('p0_count') or 0)
+    n_p0 = int(nl.get('p0_count') or 0)
+    if n_p0 > f_p0:
+        problems.append(f'逻辑 P0 数量上升: {f_p0} → {n_p0}；结论: {(nl.get("verdict") or "")[:120]}')
+    elif (nl.get('verdict') or '') != (fl.get('verdict') or '') and n_p0 > 0:
+        problems.append(f'逻辑结论变化: {(nl.get("verdict") or "")[:120]}')
+    return problems
+
+
 class ConsistencyRepairer:
-    """R1-J: 单 Part 的 P0 定向修复（最多 1 轮重写 + 重审）。"""
+    """R1-J/R4-2/R4-5: 单 Part 的 P0 定向修复（名称类定点 + 最多 2 轮重写）。"""
 
     def __init__(self, service, logic_agent, consistency_agent):
         self.service = service
@@ -89,14 +310,184 @@ class ConsistencyRepairer:
         p0 = count_p0(logic_result, consistency_result)
         if p0 <= 0:
             return {}
-        logger.info(f'[ConsistencyRepairer] Part {part_num} 检出 {p0} 个 P0，启动定向修复（最多 1 轮重写）')
+        logger.info(f'[ConsistencyRepairer] Part {part_num} 检出 {p0} 个 P0，启动定向修复'
+                    f'（名称类定点修复 / 其余全文重写，最多 {MAX_REWRITE_ROUNDS} 轮）')
         await s.emitter.emit(EventType.LOG, {
-            'message': f'🔧 Part {part_num} 检出 {p0} 个 P0 问题，启动定向重写修复...',
+            'message': f'🔧 Part {part_num} 检出 {p0} 个 P0 问题，启动定向修复...',
             'work_id': s.work_id}, work_id=s.work_id)
 
-        brief = self._build_revision_brief(part_num, logic_result, consistency_result)
-        new_text = ''
-        rewrite_error = ''
+        # R4-2 分诊：名称类 P0 → 定点修复（零 LLM 替换 + 确定性复检）
+        registry = s.data.get('name_registry') or {}
+        if not isinstance(registry, dict):
+            registry = {}
+        if has_name_issue(consistency_result, registry):
+            pairs = derive_name_pairs(part_text, consistency_result, registry)
+            if pairs:
+                note = await self._spotfix_names(
+                    part_num, part_text, pairs, registry, p0,
+                    logic_result, consistency_result, state_mock)
+                if note is not None:
+                    return note
+                logger.info(f'[ConsistencyRepairer] Part {part_num} 定点修复不可用，落回全文重写')
+            else:
+                logger.info(f'[ConsistencyRepairer] Part {part_num} 名称类 P0 但配对推导为空（歧义即放弃），走全文重写')
+
+        return await self._rewrite_repair(
+            part_num, part_text, p0, logic_result, consistency_result, state_mock, registry)
+
+    # ----------------- R4-2: 姓名漂移定点修复 -----------------
+
+    async def _spotfix_names(self, part_num: int, part_text: str, pairs: list,
+                             registry: dict, p0_before: int,
+                             logic_result: dict, consistency_result: dict,
+                             state_mock) -> dict | None:
+        """姓名定点修复。返回 note dict；返回 None 表示放弃定点修复（落回重写）。"""
+        s = self.service
+        departed_names = [n for n in (s.data.get('character_state_track') or {}) if n]
+        gated = apply_safety_gates(pairs, registry, departed_names)
+        if not gated:
+            return None
+        new_text, ok, reason = apply_name_spotfix(part_text, gated)
+        if not ok:
+            logger.info(f'[ConsistencyRepairer] Part {part_num} 定点替换校验失败（{reason}），放弃定点修复')
+            return None
+
+        # 重审 Logic + Consistency（Emotion 不参与，不影响其评审结果）
+        new_logic = await self._re_review(self.logic_agent, 'logic', part_num, new_text, state_mock)
+        new_cons = await self._re_review(self.consistency_agent, 'consistency', part_num, new_text, state_mock)
+        residual_p0 = count_p0(new_logic, new_cons)
+
+        spot_meta = {
+            'type': 'name_spotfix',
+            'wrong_name': '|'.join(p['wrong'] for p in gated),
+            'right_name': '|'.join(p['right'] for p in gated),
+            'pair_source': '|'.join(sorted({p['source'] for p in gated})),
+        }
+        if residual_p0 <= 0:
+            # 通过：落盘定点修复稿（与 Phase 3 相同的 checkpoint 路径）
+            summary = truncate(new_text, n=200, suffix='...')
+            s._save_chunk_progress(part_num, new_text, summary)
+            part_key = str(part_num)
+            state_mock.parts[part_key] = new_text
+            state_mock.final_draft[part_key] = new_text
+            note = {'revision_attempted': True, 'revision_passed': True,
+                    'revision_spotfixed': True, 'residual_p0': 0,
+                    'logic_result': new_logic, 'consistency_result': new_cons}
+            self._append_revision_log(part_num, p0_before, note, extra=spot_meta)
+            await s.emitter.emit(EventType.LOG, {
+                'message': (f'✅ Part {part_num} 姓名定点修复完成'
+                            f'（{spot_meta["wrong_name"]}→{spot_meta["right_name"]}，'
+                            f'重审 P0 归零，零重写零内容损失）'),
+                'work_id': s.work_id}, work_id=s.work_id)
+            return note
+
+        # 仍不过：回退保留原文（现有兜底语义不变），留痕供全量跑后审计
+        s._save_chunk_progress(part_num, part_text, truncate(part_text, n=200, suffix='...'))
+        note = {'revision_attempted': True, 'revision_passed': False,
+                'revision_spotfixed': True, 'residual_p0': residual_p0}
+        self._append_revision_log(part_num, p0_before, note, extra=spot_meta)
+        await s.emitter.emit(EventType.LOG, {
+            'message': (f'↩️ Part {part_num} 姓名定点修复后仍有 {residual_p0} 个 P0，'
+                        f'回退保留原文（{spot_meta["wrong_name"]}→{spot_meta["right_name"]}）'),
+            'work_id': s.work_id}, work_id=s.work_id)
+        return note
+
+    # ----------------- R4-5: 全文重写四段式 -----------------
+
+    async def _rewrite_repair(self, part_num: int, part_text: str, p0_before: int,
+                              logic_result: dict, consistency_result: dict,
+                              state_mock, registry: dict) -> dict:
+        """四段式：分流（调用方已完成）→ 变坏回退 → 条件性第二跳 → 失败汇总。"""
+        s = self.service
+        introduced: list = []
+        round_logic, round_cons = logic_result, consistency_result
+        current_p0_before = p0_before
+        # 名称类指令（配对存在但闸未过 / 无名称类 issue 时为空）
+        name_pairs = derive_name_pairs(part_text, consistency_result, registry)
+
+        for round_no in range(1, MAX_REWRITE_ROUNDS + 1):
+            brief = self._build_revision_brief(
+                part_num, round_logic, round_cons,
+                name_pairs=name_pairs, introduced_problems=introduced,
+                part_text=part_text)
+            new_text, rewrite_error = await self._rewrite_once(part_num, brief)
+
+            # 重写产物不可用（空/过短/异常）—— 保留原文，仅留痕
+            min_acceptable = max(500, len(part_text) // 3)
+            if not new_text or len(new_text) < min_acceptable:
+                note = {'revision_attempted': True, 'revision_passed': False,
+                        'revision_error': rewrite_error or 'rewrite_empty_or_too_short'}
+                self._append_revision_log(part_num, p0_before, note)
+                await s.emitter.emit(EventType.LOG, {
+                    'message': f'↩️ Part {part_num} 重写产物不可用，保留原文',
+                    'work_id': s.work_id}, work_id=s.work_id)
+                return note
+
+            # 重审 Logic + Consistency（Emotion 不参与，不影响其评审结果）
+            new_logic = await self._re_review(self.logic_agent, 'logic', part_num, new_text, state_mock)
+            new_cons = await self._re_review(self.consistency_agent, 'consistency', part_num, new_text, state_mock)
+            residual_p0 = count_p0(new_logic, new_cons)
+
+            # R4-5 变坏回退显式化：residual 没变好或出现首检没有的新 P0 类别
+            if is_revision_degraded(current_p0_before, residual_p0,
+                                    round_cons, new_cons, round_logic, new_logic):
+                s._save_chunk_progress(part_num, part_text, truncate(part_text, n=200, suffix='...'))
+                note = {'revision_attempted': True, 'revision_passed': False,
+                        'residual_p0': residual_p0, 'revision_degraded': True}
+                self._append_revision_log(part_num, p0_before, note)
+                await s.emitter.emit(EventType.LOG, {
+                    'message': (f'↩️ Part {part_num} 重写导致劣化'
+                                f'（{current_p0_before}→{residual_p0} 或引入新问题类别），'
+                                f'已回退原文'),
+                    'work_id': s.work_id}, work_id=s.work_id)
+                return note
+
+            if residual_p0 <= 0:
+                # 通过：落盘修订稿（与 Phase 3 相同的 checkpoint 路径）
+                summary = truncate(new_text, n=200, suffix='...')
+                s._save_chunk_progress(part_num, new_text, summary)
+                part_key = str(part_num)
+                state_mock.parts[part_key] = new_text
+                state_mock.final_draft[part_key] = new_text
+                note = {'revision_attempted': True, 'revision_passed': True,
+                        'logic_result': new_logic, 'consistency_result': new_cons}
+                self._append_revision_log(part_num, p0_before, note)
+                await s.emitter.emit(EventType.LOG, {
+                    'message': f'✅ Part {part_num} 重写修复完成（重审 P0 归零，{len(new_text)} 字）',
+                    'work_id': s.work_id}, work_id=s.work_id)
+                return note
+
+            # 未归零：仅当严格改善且未达硬顶时允许第二轮（brief 附新引入问题清单）
+            if residual_p0 < current_p0_before and round_no < MAX_REWRITE_ROUNDS:
+                introduced = newly_introduced_problems(round_logic, round_cons, new_logic, new_cons)
+                round_logic, round_cons = new_logic, new_cons
+                current_p0_before = residual_p0
+                await s.emitter.emit(EventType.LOG, {
+                    'message': (f'🔁 Part {part_num} 第 {round_no} 轮重写严格改善'
+                                f'（残留 {residual_p0} 个 P0），进入第 {round_no + 1} 轮'
+                                f'（附第一轮新引入问题清单 {len(introduced)} 条）'),
+                    'work_id': s.work_id}, work_id=s.work_id)
+                continue
+
+            # 未改善或已达 2 轮硬顶：保留原文（恢复落盘），仅留痕
+            s._save_chunk_progress(part_num, part_text, truncate(part_text, n=200, suffix='...'))
+            note = {'revision_attempted': True, 'revision_passed': False, 'residual_p0': residual_p0}
+            self._append_revision_log(part_num, p0_before, note)
+            await s.emitter.emit(EventType.LOG, {
+                'message': f'↩️ Part {part_num} 重写后仍有 {residual_p0} 个 P0，保留原文',
+                'work_id': s.work_id}, work_id=s.work_id)
+            return note
+
+        # 理论不可达（循环内每个分支都 return）；防御性保留原文
+        s._save_chunk_progress(part_num, part_text, truncate(part_text, n=200, suffix='...'))
+        note = {'revision_attempted': True, 'revision_passed': False,
+                'residual_p0': current_p0_before}
+        self._append_revision_log(part_num, p0_before, note)
+        return note
+
+    async def _rewrite_once(self, part_num: int, brief: str) -> tuple:
+        """调用 PartWriterAgent 带 brief 重写一次。返回 (new_text, error)。"""
+        s = self.service
         try:
             from services.writing_service import TempStoryState
             from core.memory_manager import get_all_memory
@@ -107,50 +498,11 @@ class ConsistencyRepairer:
             writer.set_progress_callback(s.progress_callback)
             result = await asyncio.to_thread(writer.execute, proxy, part_num)
             if isinstance(result, dict) and result.get('success'):
-                new_text = result.get('content', '') or ''
+                return (result.get('content', '') or ''), ''
+            return '', 'rewrite_failed'
         except Exception as e:
-            rewrite_error = str(e)[:200]
             logger.info(f'[ConsistencyRepairer] Part {part_num} 重写失败（保留原文）: {e}')
-
-        # 重写产物不可用（空/过短/异常）—— 保留原文，仅留痕
-        min_acceptable = max(500, len(part_text) // 3)
-        if not new_text or len(new_text) < min_acceptable:
-            note = {'revision_attempted': True, 'revision_passed': False,
-                    'revision_error': rewrite_error or 'rewrite_empty_or_too_short'}
-            self._append_revision_log(part_num, p0, note)
-            await s.emitter.emit(EventType.LOG, {
-                'message': f'↩️ Part {part_num} 重写产物不可用，保留原文',
-                'work_id': s.work_id}, work_id=s.work_id)
-            return note
-
-        # 重审 Logic + Consistency（Emotion 不参与，不影响其评审结果）
-        new_logic = await self._re_review(self.logic_agent, 'logic', part_num, new_text, state_mock)
-        new_cons = await self._re_review(self.consistency_agent, 'consistency', part_num, new_text, state_mock)
-        residual_p0 = count_p0(new_logic, new_cons)
-
-        if residual_p0 <= 0:
-            # 通过：落盘修订稿（与 Phase 3 相同的 checkpoint 路径）
-            summary = truncate(new_text, n=200, suffix='...')
-            s._save_chunk_progress(part_num, new_text, summary)
-            part_key = str(part_num)
-            state_mock.parts[part_key] = new_text
-            state_mock.final_draft[part_key] = new_text
-            note = {'revision_attempted': True, 'revision_passed': True,
-                    'logic_result': new_logic, 'consistency_result': new_cons}
-            self._append_revision_log(part_num, p0, note)
-            await s.emitter.emit(EventType.LOG, {
-                'message': f'✅ Part {part_num} 重写修复完成（重审 P0 归零，{len(new_text)} 字）',
-                'work_id': s.work_id}, work_id=s.work_id)
-            return note
-
-        # 仍不过：保留原文（恢复落盘），仅留痕
-        s._save_chunk_progress(part_num, part_text, truncate(part_text, n=200, suffix='...'))
-        note = {'revision_attempted': True, 'revision_passed': False, 'residual_p0': residual_p0}
-        self._append_revision_log(part_num, p0, note)
-        await s.emitter.emit(EventType.LOG, {
-            'message': f'↩️ Part {part_num} 重写后仍有 {residual_p0} 个 P0，保留原文',
-            'work_id': s.work_id}, work_id=s.work_id)
-        return note
+            return '', str(e)[:200]
 
     async def _re_review(self, agent, kind: str, part_num: int, part_text: str, state_mock) -> dict:
         try:
@@ -159,8 +511,18 @@ class ConsistencyRepairer:
             logger.info(f'[ConsistencyRepairer] 重审 {kind} Part {part_num} 失败: {e}')
             return self.service._review_failure(kind, part_num, e)
 
-    def _build_revision_brief(self, part_num: int, logic_result: dict, consistency_result: dict) -> str:
-        """用 issues + 相关 established_facts 生成 revision brief。"""
+    def _build_revision_brief(self, part_num: int, logic_result: dict,
+                              consistency_result: dict, name_pairs: list = None,
+                              introduced_problems: list = None,
+                              part_text: str = '') -> str:
+        """用 issues + 相关 established_facts + 角色名册生成 revision brief。
+
+        R4-2 增强：名册段置尾（权威名源）；名称类指令具体到
+        "错误写法'X'（本 Part 出现 N 次，例：<quote 锚点>）→ 正确写法'Y'；
+        只改名字，其余一字不动"；logic V5 短协议无明细时明确要求对照名册与
+        前文事实清单逐项自查人名/物品名/角色状态。
+        R4-5 增强：第二轮 brief 附第一轮新引入的问题清单。
+        """
         l_p0 = [i for i in ((logic_result or {}).get('issues') or [])
                 if isinstance(i, dict) and i.get('level') == 'P0']
         c_p0 = [i for i in ((consistency_result or {}).get('issues') or [])
@@ -169,6 +531,8 @@ class ConsistencyRepairer:
         lr = logic_result or {}
         if lr.get('p0_count') and not l_p0:
             lines.append(f"- 逻辑审查判定 P0 共 {lr.get('p0_count')} 处；结论: {(lr.get('verdict') or '')[:120]}")
+            lines.append('- 逻辑审查未给出问题明细：请对照下方角色名册与前文已确立事实清单，'
+                         '逐项自查人名/物品名/角色状态/时间线，逐一修正')
         for i in l_p0 + c_p0:
             desc = (i.get('description') or '').strip()
             sugg = (i.get('suggestion') or '').strip()
@@ -176,7 +540,32 @@ class ConsistencyRepairer:
             if not desc:
                 continue
             lines.append(f"- [{loc}] {desc}" + (f' → 修正建议: {sugg}' if sugg else ''))
+        for p in (name_pairs or []):
+            n = (part_text or '').count(p.get('wrong', ''))
+            anchor = (p.get('evidence') or '').strip()
+            if not anchor:
+                idx = (part_text or '').find(p.get('wrong', ''))
+                if idx >= 0:
+                    anchor = (part_text or '')[max(0, idx - 10):idx + len(p['wrong']) + 10].replace('\n', ' ')
+            lines.append(
+                f"- 【姓名定点修正】错误写法'{p['wrong']}'（本 Part 出现 {n} 次"
+                + (f'，例：{anchor}' if anchor else '')
+                + f"）→ 正确写法'{p['right']}'；只改名字，其余一字不动")
+        if introduced_problems:
+            lines.append('- 【第一轮重写新引入的问题，本轮必须避免】')
+            lines.extend(f'  - {x}' for x in introduced_problems)
         brief = '\n'.join(lines) if lines else '- 评审检出 P0 一致性问题，请对照前文事实清单全面自查。'
+        # R4-2: 名册段（权威名源；与 facts 段并列）
+        try:
+            registry = self.service.data.get('name_registry') or {}
+            if isinstance(registry, dict) and registry:
+                departed = self.service.data.get('character_state_track') or {}
+                roster = render_name_roster(
+                    registry, departed if isinstance(departed, dict) else None)
+                if roster:
+                    brief += '\n\n' + roster
+        except Exception as nr_err:
+            logger.info(f'[ConsistencyRepairer] 名册段渲染失败（不影响 brief）: {nr_err}')
         facts_block = self._facts_block(part_num)
         if facts_block:
             brief += '\n\n' + facts_block
@@ -199,8 +588,13 @@ class ConsistencyRepairer:
             return ''
         return '【前文已确立事实清单——重写内容不得与本表矛盾】\n' + block
 
-    def _append_revision_log(self, part_num: int, p0_before: int, note: dict) -> None:
-        """修订痕迹落盘（s.data['revision_log']，resume 可查）。"""
+    def _append_revision_log(self, part_num: int, p0_before: int, note: dict,
+                             extra: dict = None) -> None:
+        """修订痕迹落盘（s.data['revision_log']，resume 可查）。
+
+        R4-2: extra 携带定点修复专属字段（type='name_spotfix' +
+        wrong_name/right_name/pair_source）—— 只增不改既有字段。
+        """
         entry = {
             'part': part_num,
             'p0_before': p0_before,
@@ -210,6 +604,13 @@ class ConsistencyRepairer:
             'revision_error': note.get('revision_error'),
             'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
         }
+        # R4-5: 变坏回退事件显式落痕（仅劣化时出现，旧条目形态不变）
+        if note.get('revision_degraded'):
+            entry['revision_degraded'] = True
+        if extra:
+            for k, v in extra.items():
+                if k not in entry:
+                    entry[k] = v
         try:
             log = list(self.service.data.get('revision_log') or [])
             log.append(entry)
