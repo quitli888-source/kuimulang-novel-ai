@@ -24,6 +24,7 @@ from typing import Dict, Any
 # 旧版 _strip_padding_chars 本地实现已删除，统一改用 strip_padding_chars。
 from core.agents.base_agent import BaseAgent
 from core.llm_client import call_llm, call_llm_json
+from core.error_handler import PROGRAMMING_ERRORS
 from core.config import PART_COUNT, PART_WORD_MIN, PART_WORD_MAX, TARGET_WORD_COUNT, get_json_max_tokens, get_task_max_tokens
 from core.prompt_loader import load_prompt
 from core.established_facts import facts_from_extractor_payload
@@ -197,7 +198,15 @@ class PartWriterAgent(BaseAgent):
                     # 顺带保护 G2 的"短块无声漏过"。
                     chunk_text = call_llm(system_prompt=PART_CHUNK_SYSTEM_PROMPT, user_prompt=chunk_user_prompt, temperature=0.8, max_tokens=cur_max, agent=self.name, work_id=getattr(state, 'work_id', None), expected_min_len=chunk_target // 2)
                 except Exception as e:
-                    logger.info(f'[PartWriterAgent] Part {part_num} 片段 {chunk_idx} 第 {retry_attempt + 1} 次调用异常: {e}')
+                    # R3-S3: 编程错误（NameError/AttributeError/TypeError/...）重试永远
+                    # 不可能成功 —— Round 2 的 chunk_target NameError 曾被这里吞成
+                    # 空内容、烧掉 3 次 attempt 伪装"模型空返"（108 次 INFO 噪音）。
+                    # 立即 raise + error 级 traceback，由 execute 外层按既有语义
+                    # 返回失败占位（G1 抓住）；其余异常维持 warning+重试。
+                    if isinstance(e, PROGRAMMING_ERRORS):
+                        logger.error(f'[PartWriterAgent] Part {part_num} 片段 {chunk_idx} 编程错误（不重试，立即失败）: {e!r}', exc_info=True)
+                        raise
+                    logger.warning(f'[PartWriterAgent] Part {part_num} 片段 {chunk_idx} 第 {retry_attempt + 1} 次调用异常（可重试）: {e}')
                     chunk_text = ''
                 if chunk_text and chunk_text.strip():
                     break

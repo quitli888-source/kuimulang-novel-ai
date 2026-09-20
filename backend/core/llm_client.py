@@ -13,7 +13,7 @@ import os
 from typing import Optional
 from openai import OpenAI
 from core.config import get_llm_config_for_agent, get_llm_config
-from core.error_handler import LLMError, NetworkError, SystemError
+from core.error_handler import LLMError, NetworkError, SystemError, PROGRAMMING_ERRORS
 from core.logger import get_logger
 # R2-8: 删除死导入 strip_padding_chars（全文件未使用；truncate 保留）
 from core.text_utils import truncate
@@ -282,6 +282,13 @@ def call_llm(system_prompt: str, user_prompt: str, temperature: float=0.7, max_t
                 pass
             return content
         except Exception as e:
+            # R3-S3: 编程错误（NameError/AttributeError/TypeError/...）重试永远不可能
+            # 成功 —— 立即原样 raise（不包 LLMError、不进 sleep 阶梯），与
+            # part_writer_agent 的 chunk 循环同约定。4xx 客户端错误的 fail-fast
+            # 先例见下方 _is_client_error。
+            if isinstance(e, PROGRAMMING_ERRORS):
+                logger.error(f'  [LLM] 编程错误（不重试，立即失败）: {e!r}', exc_info=True)
+                raise
             logger.info(f'  [LLM] 第{attempt + 1}次调用失败: {e}')
             # R4-P1-x: 4xx 客户端错误（鉴权失败/参数错误/模型不存在）重试永远不会成功，
             # 此前一律重试 3 次 + 线性 sleep，纯浪费配额与用户时间。
@@ -366,6 +373,12 @@ def call_llm_json(system_prompt: str, user_prompt: str, temperature: float=0.3, 
                 logger.info(f'  [JSON] 提高max_tokens到{current_max_tokens}重试...')
                 time.sleep(2)
         except Exception as e:
+            # R3-S3: 编程错误不重试（同 call_llm 约定）—— 立即原样 raise，
+            # 不包 LLMError、不进 sleep 阶梯。上方 except ValueError（JSON 解析
+            # 重试）是合法重试路径，保持不动。
+            if isinstance(e, PROGRAMMING_ERRORS):
+                logger.error(f'  [LLM-JSON] 编程错误（不重试，立即失败）: {e!r}', exc_info=True)
+                raise
             err_str = str(e)
             if use_response_format and ('response_format' in err_str.lower() or 'json_object' in err_str.lower() or 'invalid' in err_str.lower() or ('not supported' in err_str.lower())):
                 logger.info(f'  [JSON] 模型 {model} 不支持 response_format，自动降级为 prompt 引导模式')

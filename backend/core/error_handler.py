@@ -68,6 +68,16 @@ class UserError(StoryError):
         super().__init__(ErrorType.USER_ERROR, message, details)
 
 
+# R3-S3: 编程错误黑名单 —— NameError/AttributeError/TypeError/KeyError/IndexError
+# （UnboundLocalError 是 NameError 子类，自动覆盖）。这类错误重试永远不可能成功，
+# 必须立即 raise + error 级 traceback（langgraph RetryPolicy 白名单模式：未声明
+# 可重试的异常绝不静默吞）。Round 1 `_os is not defined` / Round 2
+# `chunk_target is not defined` 各被"重试后伪装空内容"吞过一次。
+# 其余异常（网络/限流/供应商侧）维持现状 warning+重试；openai SDK 的
+# APITimeoutError/RateLimitError（OpenAIError 家族）不在本名单，不受影响。
+PROGRAMMING_ERRORS = (NameError, AttributeError, TypeError, KeyError, IndexError)
+
+
 class ErrorHandler:
     """错误处理系统"""
     @staticmethod

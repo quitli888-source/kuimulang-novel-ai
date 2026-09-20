@@ -11,6 +11,8 @@ Round 2 修复回归测试（R2-3/R2-4/R2-5/R2-6/R2-8）—— 全部离线断�
   R2-6  KML_SKIP_PHASE4 真跳过（monkeypatch Phase4Runner.run 后 run() 不再进 Phase 4）
   R2-8  聚合器 logic.p0_count 数值兜底（V5 短协议）+ 旧式 issues 向后兼容 +
         enhancement_suggestions 不再计入 p0_issues
+  R3-S3  编程错误 fail-fast：call_llm 的 except 遇 TypeError 等编程错误立即
+        raise（零重试、零 sleep），不包 LLMError
 
 既支持 pytest 也支持 `python backend/tests/e2e/test_round2_fixes.py` 直接跑。
 """
@@ -22,6 +24,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
 
 from core.logger import get_logger
 
@@ -234,6 +238,31 @@ def test_call_llm_short_return_escalates():
     assert len(calls) == 2, f'应升级重试一次: {len(calls)}'
     assert calls[1]['max_tokens'] == calls[0]['max_tokens'] * 2, calls
     assert out == '完整内容。' * 2000, '应返回重试后的完整内容'
+
+
+# ---------------- R3-S3: 编程错误 fail-fast ----------------
+
+def test_call_llm_programming_error_fails_fast():
+    """R3-S3: fake client 第 1 次 create 抛 TypeError（编程错误）→ 立即 raise 且
+    只调用 1 次；不进 sleep 阶梯（patch time.sleep 断言未被调用，防"偷偷重试"）。"""
+    from core import llm_client
+
+    class _BoomCompletions:
+        def __init__(self):
+            self.calls = 0
+
+        def create(self, **kwargs):
+            self.calls += 1
+            raise TypeError('create() got an unexpected keyword argument')
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=_BoomCompletions()))
+    with patch.object(llm_client, '_get_client_for_agent', lambda agent: (client, 'step-5-preview')), \
+         patch.object(llm_client.time, 'sleep') as sleep_mock:
+        with pytest.raises(TypeError):
+            llm_client.call_llm(system_prompt='s', user_prompt='u', max_tokens=1000)
+    assert client.chat.completions.calls == 1, '编程错误不得重试'
+    sleep_mock.assert_not_called()
+    logger.info('[test_call_llm_programming_error] PASS: TypeError 立即 raise，零重试零 sleep')
 
 
 # ---------------- R2-4: 大纲字数传导 ----------------
@@ -455,6 +484,7 @@ if __name__ == '__main__':
                test_style_optimizer_short_return_retries_then_raises,
                test_call_llm_no_escalation_without_expected_min_len,
                test_call_llm_short_return_escalates,
+               test_call_llm_programming_error_fails_fast,
                test_normalize_outline_word_counts_two_stage,
                test_part_target_words_floor_and_early_exit,
                test_task_max_tokens_defaults_and_env,
