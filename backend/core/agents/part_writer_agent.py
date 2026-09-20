@@ -161,7 +161,10 @@ class PartWriterAgent(BaseAgent):
         while len(accumulated) < target_words and chunk_idx < MAX_CHUNKS:
             chunk_idx += 1
             remaining = target_words - len(accumulated)
-            is_last_target_chunk = chunk_idx >= MAX_CHUNKS or remaining < CHUNK_WORDS
+            # R3-S1: 循环内局部变量单源 —— :179 传 prompt 的片段目标与 :195 的
+            # expected_min_len 同源同值（此前 :195 引用不存在的 chunk_target，
+            # NameError 被 except 吞成空内容，Phase 3 全线瘫痪；round2 P0-1）。
+            chunk_target = min(CHUNK_WORDS, remaining + 200)
             prev_tail = accumulated[-CHUNK_OVERLAP:] if accumulated else ''
             if chunk_idx == 1:
                 next_plan = f"本章目标: {target_words}字\n核心事件: {outline.get('core_event', '')}\n情绪目标: {outline.get('emotion_target', '')}\n关键对白: {outline.get('key_dialogue', '')}\n结尾钩子: {outline.get('end_hook', '')}\n节奏要求: {outline.get('pacing', '自然流畅')}\n因果关系: {outline.get('causality', '')}"
@@ -176,7 +179,7 @@ class PartWriterAgent(BaseAgent):
                 else:
                     stage_hint = '完成结尾钩子，干净收尾'
                 next_plan = f"本章目标: {target_words}字 (已写 {len(accumulated)}字, 还需约 {remaining}字)\n本片段建议推进: {stage_hint}\n本章核心事件: {outline.get('core_event', '')}\n本章结尾钩子: {outline.get('end_hook', '')}"
-            chunk_user_prompt = self._build_chunk_prompt(part_num=part_num, chunk_idx=chunk_idx, is_first_chunk=chunk_idx == 1, prev_tail=prev_tail, next_plan=next_plan, context=context if chunk_idx == 1 else '', foreshadow_info=foreshadow_info if chunk_idx == 1 else '', outline=outline, chunk_target=min(CHUNK_WORDS, remaining + 200), target_words=target_words, hard_max=hard_max, written_so_far=len(accumulated), state=state)
+            chunk_user_prompt = self._build_chunk_prompt(part_num=part_num, chunk_idx=chunk_idx, is_first_chunk=chunk_idx == 1, prev_tail=prev_tail, next_plan=next_plan, context=context if chunk_idx == 1 else '', foreshadow_info=foreshadow_info if chunk_idx == 1 else '', outline=outline, chunk_target=chunk_target, target_words=target_words, hard_max=hard_max, written_so_far=len(accumulated), state=state)
             # 长篇超 Part（>=3500 字）容易触发 token 截断 —— 一次给足 max_tokens。
             # R1-C: 此前首试 14600 被 reasoning 吃光（冒烟实证 completion=14600、
             # content 空、浪费 267.6s 才重试成功），首试上调到 20000 降低空返重试率

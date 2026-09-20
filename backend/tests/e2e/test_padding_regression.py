@@ -114,12 +114,18 @@ def test_unit_functions_gate_semantics():
 
 
 def test_unicode_run_collapsed_even_at_low_density():
-    """R2-1 验收 2: 3 连 Unicode run 在低密度下也必须清零（构造性保证，非密度触发的运气）。"""
+    """R2-1 验收 2: 3 连 Unicode run 在低密度下也必须清零（构造性保证，非密度触发的运气）。
+
+    R3-S5 适配: 本构造例仅 53 字 —— density_check 新增"过短文本 FAIL"前置分支后
+    判 text_too_short（门禁不再给 53 字文本虚 PASS，那正是 S5 要消灭的模式）；
+    清洗器的 run 收敛断言（低密度下 3 连必须清零）逐字保持不变。
+    """
     text = '他抬起头。' + '………' + '然后低声说了一句什么，转身离去。' * 3
     cleaned = strip_padding_chars(text)
     assert re.search(r'…{3,}', cleaned) is None, '3 连 Unicode 省略号未被收敛'
     assert re.search(r'——{2,}', cleaned) is None
-    assert density_check(cleaned)['verdict'] == 'PASS'
+    result = density_check(cleaned)
+    assert result['verdict'] == 'FAIL' and result['reason'] == 'text_too_short', result
 
 
 def test_budget_loop_converges_after_deletion():
@@ -183,13 +189,37 @@ def test_anti_padding_prompt_covers_ascii_variants():
         logger.info(f'[test_prompt] {path.name}: ASCII 变体 + 替代写法均在位')
 
 
+# ---------------- R3-S5: 空/占位/过短文本必须 FAIL（G3 不再虚 PASS） ----------------
+
+def test_density_check_empty_and_placeholder_fail():
+    """R3-S5: 空串与失败占位（[Part N生成失败: ...]）必须 FAIL。
+
+    Round 2 冒烟 G3 在 26 字占位文本上虚 PASS 的根因：n=max(len,1) 让密度全 0。
+    """
+    for text in ('', '   \n  ', '[Part 1生成失败: x]'):
+        result = density_check(text)
+        assert result['verdict'] == 'FAIL', f'{text[:20]!r} 不应 PASS: {result}'
+        assert result['reason'] == 'empty_or_placeholder', result
+
+
+def test_density_check_too_short_fails_boundary():
+    """R3-S5: <1000 字判 text_too_short；1000 字干净文本边界 PASS（防阈值写歪）。"""
+    base = '少年林尘站在古井边，寒风吹动衣角。' * 100   # 1,700 字干净文本
+    short = density_check(base[:999])
+    assert short['verdict'] == 'FAIL' and short['reason'] == 'text_too_short', short
+    ok = density_check(base[:1000])
+    assert ok['verdict'] == 'PASS', f'1000 字边界应 PASS: {ok}'
+
+
 if __name__ == '__main__':
     for fn in (test_fixture_samples_pass_density_gate, test_fixture_raw_text_fails_gate,
                test_run_regexes_cover_ascii_variants, test_unit_functions_gate_semantics,
                test_unicode_run_collapsed_even_at_low_density,
                test_budget_loop_converges_after_deletion,
                test_ascii_run_normalization_is_unit_neutral,
-               test_anti_padding_prompt_covers_ascii_variants):
+               test_anti_padding_prompt_covers_ascii_variants,
+               test_density_check_empty_and_placeholder_fail,
+               test_density_check_too_short_fails_boundary):
         fn()
         print(f'PASS {fn.__name__}')
     print('all padding regression tests passed')

@@ -1,0 +1,8 @@
+# 开发/测试期依赖（不进入运行时 requirements.txt）
+# 安装: pip install -r requirements-dev.txt
+
+# R3-S4: ruff 静态门禁依赖 —— backend/tests/e2e/test_static_analysis.py 的
+# F821（未定义名）检查。未安装时该测试自动 skip（门禁空转风险见
+# rounds/round3/03_optimization.md；Round 2 P0-1 chunk_target NameError 这类
+# 一行级回归由此在提交前 1 秒被抓）。
+ruff>=0.5

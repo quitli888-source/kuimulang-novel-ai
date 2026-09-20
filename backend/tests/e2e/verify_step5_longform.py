@@ -64,6 +64,17 @@ RUN_DIR.mkdir(parents=True, exist_ok=True)
 def density_check(text: str) -> dict:
     # R2-1: 口径单点来自 core.text_utils（ellipsis_units/emdash_units + run 正则），
     # 与 strip_padding_chars 共用；判定逻辑与输出字段不变。
+    # R3-S5: 空/占位/过短文本前置 FAIL —— 此前 n=max(len,1) 让 13 字失败占位
+    # （[Part N生成失败: ...]）密度全 0 虚 PASS（Round 2 冒烟 26 字占位 G3 PASS，
+    # 唯一抓住 Phase 3 瘫痪的只有 G1）。字段与原返回字典同构 + 新增 reason。
+    if not text or not text.strip() or text.strip().startswith('[Part '):
+        return {'chars': 0, 'ellipsis_per_1k': 0, 'emdash_per_1k': 0, 'ellipsis_runs_3plus': 0,
+                'emdash_runs_2plus': 0, 'verdict': 'FAIL', 'reason': 'empty_or_placeholder'}
+    if len(text) < 1000:
+        # 远低于 Part 正常体量（e2e part_word_min=2500 / R2-4 写作端 floor 3500），
+        # 1000 ≈ 前者的 40%：只拦"明显没有正文"，不误伤任何真实 Part
+        return {'chars': len(text), 'ellipsis_per_1k': 0, 'emdash_per_1k': 0, 'ellipsis_runs_3plus': 0,
+                'emdash_runs_2plus': 0, 'verdict': 'FAIL', 'reason': 'text_too_short'}
     n = max(len(text), 1)
     ell = ellipsis_units(text)
     emd = emdash_units(text)
