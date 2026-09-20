@@ -14,6 +14,7 @@ Round 4 姓名一致性回归测试（R4-1 角色规范名注册表 / R4-4 facts
 
 既支持 pytest 也支持 `python backend/tests/e2e/test_round4_names.py` 直接跑。
 """
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -296,6 +297,71 @@ def test_payload_with_name_variants_parses_facts():
     logger.info('[test_payload_variants] PASS: name_variants 不影响 facts 解析与 10 条上限')
 
 
+# ---------------- R4-1: Phase2Runner 名册冻结（幂等） ----------------
+
+def _make_phase2_work(tmp_path: Path, work_id: str, characters: list):
+    work = {
+        'id': work_id, 'title': 'smoke r4 p2', 'inspiration': '少年林尘被预言为天煞孤星。',
+        'phase': 'phase1',
+        'core_elements': {'protagonist': {'identity': '少年'}},
+        'market_positioning': {},
+        'world_setting': '', 'characters': [], 'part_outline': [],
+        'foreshadowing': [], 'parts': {}, 'part_summaries': {},
+    }
+    (tmp_path / f'{work_id}.json').write_text(json.dumps(work, ensure_ascii=False), encoding='utf-8')
+    return characters
+
+
+def test_phase2_freezes_name_registry_idempotent(tmp_path):
+    """R4-1: Phase2Runner 从 characters 冻结名册；幂等（已有非空 registry 不覆盖）；
+    characters 为空则不写（不用空名册掩盖 Phase 2 质量问题）。"""
+    import asyncio
+    import core.config as config_mod
+    import api.works as works_api
+    from services.writing_service import WritingService
+    from services.writing_phase_runners import Phase2Runner
+    from api.sse import SSEEmitter
+
+    characters = [{'name': '林渊', 'role': '主角', 'identity': '少年'},
+                  {'name': '林忠', 'role': '核心配角', 'identity': '老仆'}]
+    plot_result = {'world_setting': '玄幻世界', 'characters': characters,
+                   'part_outline': [{'title': 'Part 1', 'word_count': 5000}],
+                   'foreshadowing': []}
+    p0 = patch.object(config_mod, 'WORKS_DIR', tmp_path)
+    p1 = patch.object(works_api, 'WORKS_DIR', tmp_path)
+    with p0, p1:
+        # 场景 1: 正常冻结
+        work_id = 'smoke_r4_p2_freeze'
+        _make_phase2_work(tmp_path, work_id, characters)
+        svc = WritingService(work_id, SSEEmitter(), resume=False)
+        svc.cfg.confirm_mode = False
+        with patch('core.agents.plot_planner_agent.PlotPlannerAgent.execute',
+                   lambda self, state: dict(plot_result)):
+            asyncio.run(Phase2Runner(svc).run())
+        assert set(svc.data['name_registry'].keys()) == {'林渊', '林忠'}
+        assert svc.data['name_registry']['林渊']['role'] == '主角'
+        saved = json.loads((tmp_path / f'{work_id}.json').read_text(encoding='utf-8'))
+        assert 'name_registry' in saved, '名册必须随 work JSON 持久化（resume 恢复）'
+        # 幂等：重跑不覆盖已有 registry（模拟 resume 后重跑 Phase 2）
+        svc.data['name_registry']['林渊']['aliases'] = ['渊哥']
+        with patch('core.agents.plot_planner_agent.PlotPlannerAgent.execute',
+                   lambda self, state: dict(plot_result, characters=[{'name': '殷刹', 'role': '反派'}])):
+            asyncio.run(Phase2Runner(svc).run())
+        assert set(svc.data['name_registry'].keys()) == {'林渊', '林忠'}, '已有非空 registry 不得被覆盖'
+        assert svc.data['name_registry']['林渊']['aliases'] == ['渊哥']
+
+        # 场景 2: characters 为空 → 不写名册（由名册缺失暴露给评审）
+        work_id2 = 'smoke_r4_p2_empty'
+        _make_phase2_work(tmp_path, work_id2, [])
+        svc2 = WritingService(work_id2, SSEEmitter(), resume=False)
+        svc2.cfg.confirm_mode = False
+        with patch('core.agents.plot_planner_agent.PlotPlannerAgent.execute',
+                   lambda self, state: dict(plot_result, characters=[])):
+            asyncio.run(Phase2Runner(svc2).run())
+        assert 'name_registry' not in svc2.data, 'characters 为空不得写空名册'
+    logger.info('[test_phase2_freeze] PASS: Phase2 冻结/幂等/空 characters 不写')
+
+
 if __name__ == '__main__':
     logger.info('=' * 60)
     logger.info('test_round4_names.py —— Round 4 姓名一致性回归（mock LLM）')
@@ -308,6 +374,7 @@ if __name__ == '__main__':
                test_render_name_roster_candidate_promotion,
                test_render_name_roster_for_state_degraded,
                test_get_part_context_contains_full_roster,
+               test_phase2_freezes_name_registry_idempotent,
                test_review_agent_prompts_contain_roster,
                test_register_name_variants_append_only,
                test_payload_with_name_variants_parses_facts):
