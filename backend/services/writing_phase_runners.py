@@ -17,6 +17,7 @@ import traceback
 from typing import TYPE_CHECKING
 
 from api.sse import EventType
+from core.config import get_task_max_tokens
 from core.memory_manager import get_all_memory
 from core.text_utils import truncate
 from core.logger import get_logger
@@ -104,6 +105,18 @@ class Phase2Runner:
             s.data['characters'] = plot_result.get('characters', [])
             s.data['part_outline'] = plot_result.get('part_outline', [])
             s.data['foreshadowing'] = plot_result.get('foreshadowing', [])
+            # R2-4 防线 2 挂载点 B: Phase 2 出口再归一化一次 —— 覆盖"prompt 修了但
+            # 模型仍返回低值"（与 plot_planner_agent 内的挂载点 A 构成双保险，
+            # 纯本地确定性数字变换，零 LLM 成本、零文学性风险）
+            try:
+                from core.agents.plot_planner_agent import normalize_outline_word_counts
+                _before = sum((p.get('word_count', 0) for p in s.data['part_outline'] if isinstance(p, dict)))
+                s.data['part_outline'] = normalize_outline_word_counts(s.data['part_outline'], s.cfg.target_word_count)
+                _after = sum((p.get('word_count', 0) for p in s.data['part_outline'] if isinstance(p, dict)))
+                if _after != _before:
+                    logger.info(f'[Phase2Runner] R2-4 大纲字数归一化: {_before} -> {_after}（目标 {s.cfg.target_word_count}）')
+            except Exception as norm_err:
+                logger.info(f'[Phase2Runner] 大纲字数归一化失败（不影响主流程）: {norm_err}')
             outline_count = len(plot_result.get('part_outline', []))
             await s.emitter.emit(EventType.AGENT_CALL, {'agent': 'plot_planner_agent', 'status': 'end', 'message': f'生成{outline_count}个Part的蓝图', 'work_id': s.work_id}, work_id=s.work_id)
             s.data['phase'] = 'phase2'
@@ -262,6 +275,13 @@ class Phase3Runner:
                         except Exception as m_err:
                             logger.info(f'[Phase3Runner] 三级里程碑摘要生成失败（不影响主流程）: {m_err}')
                     word_count = len(part_text)
+                    # R2-4 附加（零成本可观测）: 每 Part 完成日志追加累计/预计总量，
+                    # 便于长跑中监控 G2 趋势（仅 logger，不改行为）
+                    _done_parts = len([k for k, v in s.data['parts'].items() if isinstance(v, str) and v.strip()])
+                    _total_chars = sum(len(v) for v in s.data['parts'].values() if isinstance(v, str))
+                    _avg_per_part = _total_chars // max(_done_parts, 1)
+                    logger.info(f'[Phase3Runner] R2-4 Part {i} 完成: 累计 {_total_chars} 字 / {_done_parts} Part'
+                                f'（均速 {_avg_per_part} 字/Part，按当前均速预计总量 {_avg_per_part * total} 字，目标 {s.cfg.target_word_count} 字）')
                     break
                 except Exception as e:
                     tb = traceback.format_exc()
@@ -346,7 +366,9 @@ class Phase3Runner:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             temperature=0.3,
-            max_tokens=2000,
+            # R2-5: 硬编码 2000 → 任务级单点 get_task_max_tokens('json_facts')
+            # （默认 8000：2000 对推理模型偏紧，reasoning 即可吃光）
+            max_tokens=get_task_max_tokens('json_facts'),
             agent='story_delta',
             work_id=s.work_id,
         )
@@ -437,11 +459,22 @@ class Phase4Runner:
             style_fail = 0
             for part_num in part_nums:
                 part_key = str(part_num)
+                original_text = s.data['parts'][part_key]
+                # R2-3 保险 1: 字数下限守卫 —— 此前只判 isinstance(str) and strip()，
+                # 431 字短返即可覆盖 5212 字原文（Round 1 实证 final_draft['1']=431）。
+                # 统一公式 max(2000, 原文*0.6) 无需 is_over 分支：Part 有硬上限
+                # hard_max=PART_WORD_MAX+200（超长即截断），合法润色稿只需压到
+                # target_max；要误伤需 原文*0.6 > target_max（即原文 > 1.67 倍上限），
+                # 而原文 ≤ 上限+200，条件不可达。
+                min_acceptable = max(2000, int(len(original_text) * 0.6))
                 try:
-                    optimized = await asyncio.to_thread(style_agent.execute, state_mock, part_num, s.data['parts'][part_key])
-                    if isinstance(optimized, str) and optimized.strip():
+                    optimized = await asyncio.to_thread(style_agent.execute, state_mock, part_num, original_text)
+                    if isinstance(optimized, str) and len(optimized.strip()) >= min_acceptable:
                         s.data['final_draft'][part_key] = optimized
                         style_ok += 1
+                    else:
+                        style_fail += 1
+                        logger.warning(f'[Phase4Runner] Part {part_num} 优化稿 {len(optimized or "")} 字 < 下限 {min_acceptable}（原文 {len(original_text)} 字），保留原文')
                 except Exception as e:
                     style_fail += 1
                     logger.info(f'[Phase4Runner] StyleOptimizer Part {part_num} 失败（保留原文）: {e}')

@@ -9,7 +9,7 @@
 ## 严格规则
 
 1. **因果链**：每个Part的核心事件必须由前一个Part的事件直接引发，不能凭空出现
-2. **字数控制**：每个Part严格在{PART_WORD_MIN}-{PART_WORD_MAX}字之间，全文字数控制在{TARGET_WORD_COUNT}字左右
+2. **字数控制**：每个Part严格在{PART_WORD_MIN}-{PART_WORD_MAX}字之间，全文字数控制在{TARGET_WORD_COUNT}字左右；各Part的word_count之和必须落在[{int(TARGET_WORD_COUNT * 0.95)}, {int(TARGET_WORD_COUNT * 1.05)}]（总和 = 总目标）；每个Part不得低于总均值{TARGET_WORD_COUNT // PART_COUNT}的70%，高潮Part可上浮至120%
 3. **禁止时间跳跃**：除非情节绝对必要，不要出现"三天后""一个月后"这类跳转
 4. **线性叙事**：Part内部事件必须按时间线性推进
 5. **黄金开篇**：Part 1的前200字必须包含核心冲突或重大悬念

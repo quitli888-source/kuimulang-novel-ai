@@ -24,7 +24,7 @@ from typing import Dict, Any
 # 旧版 _strip_padding_chars 本地实现已删除，统一改用 strip_padding_chars。
 from core.agents.base_agent import BaseAgent
 from core.llm_client import call_llm, call_llm_json
-from core.config import PART_WORD_MIN, PART_WORD_MAX, get_json_max_tokens
+from core.config import PART_COUNT, PART_WORD_MIN, PART_WORD_MAX, TARGET_WORD_COUNT, get_json_max_tokens, get_task_max_tokens
 from core.prompt_loader import load_prompt
 from core.established_facts import facts_from_extractor_payload
 from core.logger import get_logger
@@ -42,6 +42,32 @@ _FACTS_EXTRACTOR_SYSTEM_PROMPT = load_prompt('established_facts', '你是"小说
 # P3-70: load_prompt 优先读 prompts/established_facts.txt（已存在且内容更详细），
 # fallback 是上面内嵌的精简版；正常启动走外置文件路径。修改 prompt 直接改 prompts/established_facts.txt，
 # 无需触碰本行代码。
+
+# R2-4 防线 3/4 纯函数（可单测）：大纲字数目标传导的写作端兜底
+
+
+def _part_target_words(outline_word_count, hard_max: int) -> int:
+    """R2-4 防线 3: Part 目标字数 = max(大纲目标, 全局 floor)。
+
+    此前直接信 outline.word_count —— 大纲目标被 exemplar 锚低（2,700）时，续写
+    循环以它为停止线，上限再高（10,200）也没用（Round 1 实证总量 84k-92k < 90k）。
+    floor = min(hard_max, max(PART_WORD_MIN, 全局均值×70%))，不超硬上限。
+    """
+    floor = min(hard_max, max(PART_WORD_MIN, TARGET_WORD_COUNT // PART_COUNT * 7 // 10))
+    if not isinstance(outline_word_count, (int, float)) or isinstance(outline_word_count, bool) or outline_word_count <= 0:
+        outline_word_count = (PART_WORD_MIN + PART_WORD_MAX) // 2
+    return max(int(outline_word_count), floor)
+
+
+def _early_exit_threshold(target_words: int) -> int:
+    """R2-4 防线 4: 自然收尾早退门槛 = max(PART_WORD_MIN, 85%×target)。
+
+    此前门槛固定 PART_WORD_MIN 与 target 脱钩 —— target=5,000 的 Part 若首片段
+    自然收尾只回 2,600 字（干净结尾 + 片段 <2,100 字）会直接 break，Part 只有
+    目标的 52%（"大纲目标修好后仍漏字数"的暗渠）。MAX_CHUNKS 仍是硬帽。
+    """
+    return max(PART_WORD_MIN, int(target_words * 0.85))
+
 
 class PartWriterAgent(BaseAgent):
     name = 'Part写作Agent'
@@ -65,8 +91,9 @@ class PartWriterAgent(BaseAgent):
                 return {'success': False, 'error': f'Part {part_num}没有规划', 'content': ''}
             self.update_progress(30, '获取伏笔任务...')
             foreshadow_info = self._get_foreshadow_for_part(state, part_num)
-            target_words = outline.get('word_count', (PART_WORD_MIN + PART_WORD_MAX) // 2)
             hard_max = PART_WORD_MAX + 200
+            # R2-4 防线 3: 写作端 floor —— 大纲目标再低也不低于全局均值的 70%
+            target_words = _part_target_words(outline.get('word_count', (PART_WORD_MIN + PART_WORD_MAX) // 2), hard_max)
             self.update_progress(40, f'Part {part_num} 目标字数: {target_words}, 上限: {hard_max}, 将按 {CHUNK_WORDS}字/片段 分块生成')
             full_text, chunk_count, total_elapsed = self._write_part_chunked(state=state, part_num=part_num, context=context, outline=outline, foreshadow_info=foreshadow_info, target_words=target_words, hard_max=hard_max)
             word_count = len(full_text)
@@ -154,14 +181,18 @@ class PartWriterAgent(BaseAgent):
             # R1-C: 此前首试 14600 被 reasoning 吃光（冒烟实证 completion=14600、
             # content 空、浪费 267.6s 才重试成功），首试上调到 20000 降低空返重试率
             # （按量计费零成本）；重试阶梯 ×(1+retry_attempt) 不变。
-            chunk_max_tokens = max(CHUNK_WORDS * 4 + 500, 20000)
+            # R2-5: 硬编码收敛到任务级单点 get_task_max_tokens('chunk')（默认 20000）。
+            chunk_max_tokens = get_task_max_tokens('chunk')
             chunk_start = time.time()
             self.update_progress(45 + (chunk_idx - 1) * 5, f'Part {part_num} 片段 {chunk_idx}/{MAX_CHUNKS} 生成中...')
             chunk_text = ''
             for retry_attempt in range(3):
                 cur_max = chunk_max_tokens * (1 + retry_attempt)
                 try:
-                    chunk_text = call_llm(system_prompt=PART_CHUNK_SYSTEM_PROMPT, user_prompt=chunk_user_prompt, temperature=0.8, max_tokens=cur_max, agent=self.name, work_id=getattr(state, 'work_id', None))
+                    # R2-3 保险 3: expected_min_len=片段目标一半 —— finish_reason=length
+                    # 且输出不足时（reasoning 吃预算的无歧义签名）由 call_llm 翻倍重试，
+                    # 顺带保护 G2 的"短块无声漏过"。
+                    chunk_text = call_llm(system_prompt=PART_CHUNK_SYSTEM_PROMPT, user_prompt=chunk_user_prompt, temperature=0.8, max_tokens=cur_max, agent=self.name, work_id=getattr(state, 'work_id', None), expected_min_len=chunk_target // 2)
                 except Exception as e:
                     logger.info(f'[PartWriterAgent] Part {part_num} 片段 {chunk_idx} 第 {retry_attempt + 1} 次调用异常: {e}')
                     chunk_text = ''
@@ -184,7 +215,9 @@ class PartWriterAgent(BaseAgent):
             # P0 修复：移除 endswith('…') 早退分支 —— 之前把 end of chunk 的 `……` 当作合法退出信号，
             # 导致 minimax-m3 在后半 Part 学习用 `……` 凑字数提前结束循环。
             # 现在只允许 `。！？\n\n` 作为正常终止标点，`……` 不再触发提前退出。
-            if len(accumulated) >= PART_WORD_MIN:
+            # R2-4 防线 4: 早退门槛与 target 联动（85%），只允许自然收尾发生在达到
+            # Part 目标 85% 之后（此前固定 PART_WORD_MIN，2,600 字即可退）。
+            if len(accumulated) >= _early_exit_threshold(target_words):
                 tail_stripped = accumulated.rstrip()
                 if (tail_stripped.endswith('\n\n') or tail_stripped.endswith('。') or tail_stripped.endswith('！') or tail_stripped.endswith('？')) and len(chunk_text) < CHUNK_WORDS * 0.6:
                     break
