@@ -21,6 +21,7 @@ step-5-preview 内核全链路验收：完整产出 ~10 万字连贯小说
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -29,6 +30,13 @@ from pathlib import Path
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(BACKEND_ROOT))
+
+# R2-1: 密度口径单点统一 —— 门禁与清洗器（core.text_utils.strip_padding_chars）
+# 共用同一把尺子（此前门禁按字符计、清洗器按出现次数计，导致"清洗干净却门禁
+# 失败"的口径漂移）。判定逻辑（阈值 5/1k、6/1k、run=0）与输出字段保持不变。
+from core.text_utils import (ELLIPSIS_RUN_RE, EMDASH_RUN_RE,
+                             ELLIPSIS_DENSITY_MAX, EMDASH_DENSITY_MAX,
+                             ellipsis_units, emdash_units)
 
 PARTS = int(os.environ.get('KML_PARTS', '20'))
 WORDS_PER_PART = int(os.environ.get('KML_WORDS_PER_PART', '5000'))
@@ -42,10 +50,6 @@ SKIP_PHASE4 = os.environ.get('KML_SKIP_PHASE4', '') == '1'
 TARGET_MIN = int(os.environ.get('KML_TARGET_MIN', str(PARTS * WORDS_PER_PART * 9 // 10)))
 TARGET_MAX = int(os.environ.get('KML_TARGET_MAX', str(int(PARTS * WORDS_PER_PART * 1.15))))
 
-# 密度阈值（与 core.text_utils.strip_padding_chars 一致）
-ELLIPSIS_DENSITY_MAX = 5
-EMDASH_DENSITY_MAX = 6
-
 # 连贯性门禁阈值
 MAX_TOTAL_P0 = 0          # 逻辑/一致性 P0 总数必须为 0
 MIN_AVG_LOGIC_SCORE = 6   # 逻辑均分下限
@@ -58,12 +62,13 @@ RUN_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def density_check(text: str) -> dict:
-    import re
+    # R2-1: 口径单点来自 core.text_utils（ellipsis_units/emdash_units + run 正则），
+    # 与 strip_padding_chars 共用；判定逻辑与输出字段不变。
     n = max(len(text), 1)
-    ell = text.count('…') + text.count('...')
-    emd = text.count('——') + text.count('--')
-    ell_runs = re.findall(r'…{3,}|\.{3,}', text)
-    emd_runs = re.findall(r'——{2,}|-{2,}', text)
+    ell = ellipsis_units(text)
+    emd = emdash_units(text)
+    ell_runs = re.findall(ELLIPSIS_RUN_RE, text)
+    emd_runs = re.findall(EMDASH_RUN_RE, text)
     return {
         'chars': n,
         'ellipsis_per_1k': round(ell * 1000 / n, 2),
