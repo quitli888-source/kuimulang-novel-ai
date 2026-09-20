@@ -92,7 +92,7 @@ def aggregate_review_results(per_part_results: list) -> dict:
         consistency_p0.extend(c_p0)
         consistency_p1.extend(c_p1)
 
-        parts_out.append({
+        part_entry = {
             "part": part_num,
             "logic_score": l_score,
             "emotion_score": e_score,
@@ -104,7 +104,12 @@ def aggregate_review_results(per_part_results: list) -> dict:
                 f"情感{e_score}/10 "
                 f"一致{c_score}/10"
             ),
-        })
+        }
+        # R1-J: 修复回路标注 —— 仅在触发过修复时追加（无修复时输出与改前逐字节一致）
+        if "revision_attempted" in entry:
+            part_entry["revision_attempted"] = bool(entry.get("revision_attempted"))
+            part_entry["revision_passed"] = bool(entry.get("revision_passed"))
+        parts_out.append(part_entry)
 
     return {
         "logic": {
