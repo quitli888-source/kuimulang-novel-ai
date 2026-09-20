@@ -7,6 +7,7 @@ V4改动：
 from core.agents.base_agent import BaseAgent
 from core.agents._helpers import sorted_part_nums  # P2-65
 from core.llm_client import call_llm_json
+from core.config import get_json_max_tokens  # R1-C: JSON 调用显式 max_tokens 统一来源
 from core.prompt_loader import load_prompt
 
 SYSTEM_PROMPT = load_prompt("consistency_review", """你是一位专注于角色一致性的文学审校专家。
@@ -138,6 +139,8 @@ class ConsistencyReviewAgent(BaseAgent):
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 temperature=0.2,
+                # R1-C: 显式传 max_tokens（默认 4000 会被推理模型 reasoning 吃光）
+                max_tokens=get_json_max_tokens(),
                 agent=self.name,
                 work_id=getattr(state, 'work_id', None),  # P1-87: per-work 计费路由
             )

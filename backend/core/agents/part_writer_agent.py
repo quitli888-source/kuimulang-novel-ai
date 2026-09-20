@@ -24,7 +24,7 @@ from typing import Dict, Any
 # 旧版 _strip_padding_chars 本地实现已删除，统一改用 strip_padding_chars。
 from core.agents.base_agent import BaseAgent
 from core.llm_client import call_llm, call_llm_json
-from core.config import PART_WORD_MIN, PART_WORD_MAX
+from core.config import PART_WORD_MIN, PART_WORD_MAX, get_json_max_tokens
 from core.prompt_loader import load_prompt
 from core.established_facts import facts_from_extractor_payload
 from core.logger import get_logger
@@ -151,9 +151,10 @@ class PartWriterAgent(BaseAgent):
                 next_plan = f"本章目标: {target_words}字 (已写 {len(accumulated)}字, 还需约 {remaining}字)\n本片段建议推进: {stage_hint}\n本章核心事件: {outline.get('core_event', '')}\n本章结尾钩子: {outline.get('end_hook', '')}"
             chunk_user_prompt = self._build_chunk_prompt(part_num=part_num, chunk_idx=chunk_idx, is_first_chunk=chunk_idx == 1, prev_tail=prev_tail, next_plan=next_plan, context=context if chunk_idx == 1 else '', foreshadow_info=foreshadow_info if chunk_idx == 1 else '', outline=outline, chunk_target=min(CHUNK_WORDS, remaining + 200), target_words=target_words, hard_max=hard_max, written_so_far=len(accumulated), state=state)
             # 长篇超 Part（>=3500 字）容易触发 token 截断 —— 一次给足 max_tokens。
-            # 此前 min(7300, 12000)=7300 导致 completion=7300 = max_tokens → 整段被截为空串，
-            # 触发 3 次 retry，5 min/Part。直接给 14600 一次产出更稳定。
-            chunk_max_tokens = min(max(CHUNK_WORDS * 4 + 500, 14600), 16000)
+            # R1-C: 此前首试 14600 被 reasoning 吃光（冒烟实证 completion=14600、
+            # content 空、浪费 267.6s 才重试成功），首试上调到 20000 降低空返重试率
+            # （按量计费零成本）；重试阶梯 ×(1+retry_attempt) 不变。
+            chunk_max_tokens = max(CHUNK_WORDS * 4 + 500, 20000)
             chunk_start = time.time()
             self.update_progress(45 + (chunk_idx - 1) * 5, f'Part {part_num} 片段 {chunk_idx}/{MAX_CHUNKS} 生成中...')
             chunk_text = ''
@@ -256,7 +257,9 @@ class PartWriterAgent(BaseAgent):
             return 0
         try:
             user_prompt = f'Part {part_num} 全文（约 {len(part_text)} 字）：\n\n{part_text}\n\n请按 system prompt 的协议输出 JSON。'
-            payload = call_llm_json(system_prompt=_FACTS_EXTRACTOR_SYSTEM_PROMPT, user_prompt=user_prompt, temperature=0.0, max_tokens=1800, agent='established_facts', work_id=getattr(state, 'work_id', None))
+            # R1-C: 1800 会被 step-5-preview 的 reasoning 吃光（冒烟实证 3 次重试
+            # 全败、每 Part 白烧约 2 分钟）；统一走 get_json_max_tokens()（默认 6000）。
+            payload = call_llm_json(system_prompt=_FACTS_EXTRACTOR_SYSTEM_PROMPT, user_prompt=user_prompt, temperature=0.0, max_tokens=get_json_max_tokens(), agent='established_facts', work_id=getattr(state, 'work_id', None))
         except Exception as call_err:
             logger.info(f'[PartWriterAgent] R8-P0-1 事实抽取 LLM 调用失败: {call_err}')
             return 0

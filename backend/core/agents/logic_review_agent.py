@@ -13,6 +13,7 @@ import re
 from core.agents.base_agent import BaseAgent
 from core.agents._helpers import sorted_part_nums  # P2-65: 取代 _sorted_part_nums 薄包装
 from core.llm_client import call_llm_json
+from core.config import get_json_max_tokens  # R1-C: JSON 调用显式 max_tokens 统一来源
 from core.prompt_loader import load_prompt
 
 SYSTEM_PROMPT = load_prompt("logic_review", """你是顶级小说逻辑审查专家，评分严格但公平。
@@ -211,6 +212,9 @@ class LogicReviewAgent(BaseAgent):
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 temperature=0.2,
+                # R1-C: 显式传 max_tokens —— 此前吃默认 4000，推理模型 reasoning
+                # 计入 max_tokens，空 content 会直接走降级评分。
+                max_tokens=get_json_max_tokens(),
                 agent=self.name,
                 work_id=getattr(state, 'work_id', None),  # P1-87: per-work 计费路由
             )

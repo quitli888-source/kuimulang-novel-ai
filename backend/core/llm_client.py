@@ -315,6 +315,15 @@ def call_llm_json(system_prompt: str, user_prompt: str, temperature: float=0.3, 
                 raise ValueError('LLM 返回空 choices')
             raw = (resp.choices[0].message.content or '').strip()
             last_raw = raw  # R4-P1-x: 供最终失败时附 raw_text 给上层营救逻辑
+            finish_reason = getattr(resp.choices[0], 'finish_reason', None)
+            if not raw and finish_reason == 'length':
+                # R1-C: 与 call_llm:224-227 对齐的可观测日志 —— 推理模型把全部预算
+                # 花在 reasoning 上时 content 为空，此前 JSON 路径无痕迹，只能看到
+                # "解析失败"，无法区分"没输出"与"预算被推理吃光"。
+                logger.warning(
+                    f'    [JSON] 警告: finish_reason=length 且 content 为空'
+                    f'（model={model}, attempt={attempt + 1}, max_tokens={current_max_tokens}）'
+                )
             raw = _strip_think_tags(raw)
             try:
                 from core.cost_tracker import get_tracker
@@ -330,7 +339,9 @@ def call_llm_json(system_prompt: str, user_prompt: str, temperature: float=0.3, 
             last_error = e
             logger.info(f'  [JSON] 第{attempt + 1}次解析失败: {e}')
             if attempt < 2:
-                current_max_tokens = int(current_max_tokens * 1.5)
+                # R1-C: ×1.5 阶梯对推理模型不够（1800→2700→4050 仍可能被 reasoning
+                # 吃光，冒烟实证 3 连败）；直接翻倍并保底 6000。
+                current_max_tokens = max(6000, int(current_max_tokens * 2))
                 logger.info(f'  [JSON] 提高max_tokens到{current_max_tokens}重试...')
                 time.sleep(2)
         except Exception as e:

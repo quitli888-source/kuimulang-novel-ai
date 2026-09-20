@@ -82,6 +82,29 @@ def reload_env_cache():
     read_env.cache_clear()
 
 
+def _env_int(name: str, default: int) -> int:
+    """R1-C: 从进程环境变量读整数配置。
+
+    read_env 只解析 .env 文件、不读 os.environ（R1-A 实证该语义缺口会让
+    os.environ 设置被静默忽略），因此运行时覆盖类常量必须直接读 os.environ。
+    """
+    raw = os.environ.get(name, '')
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def get_json_max_tokens() -> int:
+    """R1-C: JSON 类 LLM 调用（facts 抽取 / 三个 Review Agent）的显式 max_tokens 统一来源。
+
+    step-5-preview 等推理模型的 reasoning token 计入 max_tokens，默认 4000 会被
+    推理吃光导致 content 空返回（冒烟实证：facts 抽取 1800 → 3 次重试全败）。
+    按量计费下调大上限零成本。env KML_JSON_MAX_TOKENS 可调。
+    """
+    return _env_int('KML_JSON_MAX_TOKENS', 6000)
+
+
 def write_env(key: str, value: str):
     """P2-102: 写入或更新 .env —— 保留原有 key 顺序 + 注释；
     新增 key 追加到末尾（不重排已有内容）。
