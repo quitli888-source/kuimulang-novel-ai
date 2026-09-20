@@ -95,13 +95,31 @@ async def main():
     os.environ['CUSTOM_TARGET_WORDS'] = str(PARTS * WORDS_PER_PART)
     os.environ['CUSTOM_PART_COUNT'] = str(PARTS)
 
-    from core.config import init_app_config, reload_config, get_llm_config_for_agent, load_llm_config
+    from core.config import init_app_config, reload_config, get_app_config, get_llm_config_for_agent, load_llm_config, DEFAULT_TEMPLATES, WritingTemplate
     init_app_config()
+    reload_config()
+
+    # R1-A: read_env 只读 .env 文件、不读 os.environ —— 上面第 95-96 行写入的
+    # CUSTOM_TARGET_WORDS / CUSTOM_PART_COUNT 对 AppConfig 完全无效，配置回退
+    # DEFAULT_TEMPLATES[0]「短篇」（3 Part / 4200 硬上限），20 Part 理论上限
+    # 84,000 < G2 下限 90,000，G2 结构性必败。这里显式 apply_template 把自定义
+    # 模板应用到配置单例，再 reload_config() 同步模块级 PART_WORD_MIN/MAX
+    # （必须在 import part_writer_agent 之前，否则其模块级常量冻结旧值）。
+    custom_template = next((t for t in DEFAULT_TEMPLATES if t.name == '自定义'),
+                           WritingTemplate('自定义', 0, 0, 0, 0))
+    cfg = get_app_config()
+    cfg.apply_template(custom_template,
+                       custom_target_words=PARTS * WORDS_PER_PART,
+                       custom_part_count=PARTS)
     reload_config()
 
     active = load_llm_config().active_provider_id
     cfg_llm = get_llm_config_for_agent('part_writer')
     print(f'\n[Step 0] active_provider={active} | model={cfg_llm.model} | base_url={cfg_llm.base_url}', flush=True)
+    # R1-A: 打印有效字数配置，防再次静默漂移（此前只打 provider/model，模板回退不可见）
+    print(f'[Step 0] 模板={cfg.template.name} | target_words={cfg.target_word_count} | '
+          f'part_count={cfg.part_count} | part_word_min={cfg.part_word_min} | '
+          f'part_word_max={cfg.part_word_max} | Part 硬上限={cfg.part_word_max + 200}', flush=True)
     if not cfg_llm.api_key:
         print('❌ API Key 未配置，终止', flush=True)
         return False
