@@ -126,3 +126,192 @@ def append_audit_log(data: dict, entry: dict) -> None:
         log = []
     log.append(entry)
     data[AUDIT_LOG_KEY] = log
+
+
+# ----------------- 双探测器（纯函数，零 LLM，毫秒级） -----------------
+
+def _part_sort_key(key):
+    """final_draft 按键排序（数字键升序；非数字键垫后）。"""
+    try:
+        return (0, int(key), '')
+    except (TypeError, ValueError):
+        return (1, 0, str(key))
+
+
+def _iter_facts(facts_raw):
+    """把 dict / EstablishedFacts / list[Fact] / list[dict] 统一成可迭代事实。"""
+    if facts_raw is None:
+        return []
+    facts = getattr(facts_raw, 'facts', None)
+    if facts is None and isinstance(facts_raw, dict):
+        facts = facts_raw.get('facts')
+    if not isinstance(facts, (list, tuple)):
+        return []
+    return [f for f in facts if f is not None]
+
+
+def _fact_field(fact, name: str):
+    if isinstance(fact, dict):
+        return fact.get(name)
+    return getattr(fact, name, None)
+
+
+def active_canonicals(facts_raw, registry: dict, part_num=None) -> set:
+    """从 established_facts 取 subject∈canonicals 且未 superseded 的规范名集合。
+
+    part_num 给定时只取 part_num <= 该值 的 fact —— "valid 区间覆盖该 Part"
+    的近似（Fact 无有效区间字段，02_review §1.2 裁定口径；角色后期才在场时
+    不会反向污染早期 Part）。容忍 dict/Fact/EstablishedFacts/None（fail-open）。
+    """
+    canonicals = ({n for n in registry if isinstance(n, str) and n}
+                  if isinstance(registry, dict) else set())
+    if not canonicals:
+        return set()
+    try:
+        limit = int(part_num) if part_num is not None else None
+    except (TypeError, ValueError):
+        limit = None
+    active: set = set()
+    for f in _iter_facts(facts_raw):
+        subject = _fact_field(f, 'subject')
+        if not isinstance(subject, str) or subject not in canonicals:
+            continue  # 非角色 subject（林家/玉佩 类）天然排除
+        if _fact_field(f, 'superseded_by'):
+            continue
+        try:
+            fp = int(_fact_field(f, 'part_num') or 0)
+        except (TypeError, ValueError):
+            fp = 0
+        if limit is not None and fp > limit:
+            continue
+        active.add(subject)
+    return active
+
+
+def scan_forbidden(part_text: str, drift_dict: dict) -> list:
+    """探测器 A（vale Terms 模式）：违禁对扫描。
+
+    Returns:
+        [{wrong, right, count, blocking, source, evidence}]（count =
+        part_text.count(wrong)；词典条目非 dict 跳过）。
+    """
+    if not isinstance(part_text, str) or not part_text:
+        return []
+    findings: list = []
+    for wrong, entry in (drift_dict or {}).items():
+        if not isinstance(wrong, str) or not wrong or not isinstance(entry, dict):
+            continue
+        count = part_text.count(wrong)
+        if count <= 0:
+            continue
+        findings.append({'wrong': wrong, 'right': entry.get('right', ''),
+                         'count': count, 'blocking': is_blocking(entry),
+                         'source': entry.get('source', ''),
+                         'evidence': entry.get('evidence', '')})
+    return findings
+
+
+def canonical_absent(part_text: str, canonicals) -> list:
+    """探测器 B 原料：规范名在（active）facts 有位但正文 0 次 → finding。
+
+    实测校准（02_review §1.2）：Part 1/Part 2 都会命中（Part 1 为假阳性——
+    角色以描写形式在场从未被点名），故 B 永久只告警、不进 G4、不改文本。
+    """
+    if not isinstance(part_text, str) or not part_text:
+        return []
+    out: list = []
+    for name in (canonicals or []):
+        if not isinstance(name, str) or not name:
+            continue
+        if part_text.count(name) == 0:
+            out.append({'canonical': name, 'kind': 'canonical_absent'})
+    return out
+
+
+def audit_name_drift(final_draft: dict, drift_dict: dict, facts_raw, registry: dict) -> dict:
+    """终审双探测器纯扫描（零 LLM）：A 违禁对 + B 规范名在位。
+
+    跳过 '[Part ' 开头的失败占位与非 str 值（G1 占位不是交付文本）。
+    任何脏数据（facts 非 dict / registry 为 list / final_draft 含占位）不抛
+    异常，fail-open 返回空/跳过并 logger.info。
+
+    Returns:
+        {'scanned', 'findings', 'fixed': [], 'residual_blocking': [],
+         'residual_advisory': [], 'canonical_absent': []}
+        （fixed 由调用方的定点修复动作回填；残留分类含 A/B 全部 finding）
+    """
+    result = {'scanned': 0, 'findings': [], 'fixed': [],
+              'residual_blocking': [], 'residual_advisory': [], 'canonical_absent': []}
+    if not isinstance(final_draft, dict):
+        logger.info('[name_audit] final_draft 非 dict，终审扫描跳过（fail-open）')
+        return result
+    drift = drift_dict if isinstance(drift_dict, dict) else {}
+    if not isinstance(registry, dict):
+        logger.info('[name_audit] registry 非 dict，探测器 B 跳过（fail-open）')
+        registry = {}
+    for key in sorted(final_draft.keys(), key=_part_sort_key):
+        text = final_draft.get(key)
+        if not isinstance(text, str) or not text.strip() or text.startswith('[Part '):
+            continue
+        try:
+            part_num = int(key)
+        except (TypeError, ValueError):
+            continue
+        result['scanned'] += 1
+        for f in scan_forbidden(text, drift):
+            rec = dict(f, part=part_num, kind='forbidden_name')
+            result['findings'].append(rec)
+            (result['residual_blocking'] if f['blocking']
+             else result['residual_advisory']).append(rec)
+        for f in canonical_absent(text, active_canonicals(facts_raw, registry, part_num)):
+            rec = dict(f, part=part_num)
+            result['findings'].append(rec)
+            result['canonical_absent'].append(rec)
+    return result
+
+
+def recover_drift_dict_from_revision_log(data: dict) -> dict:
+    """从 revision_log 的 name_spotfix 条目恢复违禁词典（resume/历史 run）。
+
+    来源 name_spotfix：applied_verified 按该条目的 revision_passed 置位；
+    gates_passed=True（历史上的定点修复按定义过了 4 条安全闸）。
+    只增不改（record_name_pairs 只升不降语义）。
+    """
+    log = data.get('revision_log') if isinstance(data, dict) else None
+    if not isinstance(log, list):
+        return load_drift_dict(data)
+    for entry in log:
+        if not isinstance(entry, dict) or entry.get('type') != 'name_spotfix':
+            continue
+        try:
+            part_num = int(entry.get('part'))
+        except (TypeError, ValueError):
+            part_num = 0
+        pairs = []
+        for wrong, right in zip(str(entry.get('wrong_name') or '').split('|'),
+                                str(entry.get('right_name') or '').split('|')):
+            wrong, right = wrong.strip(), right.strip()
+            if wrong and right and wrong != right:
+                pairs.append({'wrong': wrong, 'right': right,
+                              'source': 'name_spotfix', 'evidence': ''})
+        if pairs:
+            record_name_pairs(data, pairs, part_num, 'name_spotfix',
+                              applied_verified=bool(entry.get('revision_passed')),
+                              gates_passed=True)
+    return load_drift_dict(data)
+
+
+def review_reports_name(review: dict, wrong: str) -> bool:
+    """终审验证用：重审结果是否仍报**同一错误名**的名称类 P0。
+
+    修复未生效/判错 → True（调用方回退该 Part 的 final_draft）。
+    报其他名字的问题不阻断本配对（按 02_review §2.1 终审动作 1 的验证分工）。
+    """
+    for issue in (review or {}).get('issues') or []:
+        if not isinstance(issue, dict) or issue.get('level') != 'P0':
+            continue
+        text = (f"{issue.get('description') or ''}{issue.get('location') or ''}"
+                f"{issue.get('verdict') or ''}")
+        if wrong and wrong in text:
+            return True
+    return False

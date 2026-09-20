@@ -21,6 +21,7 @@ import importlib.util
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from core.logger import get_logger
@@ -37,9 +38,10 @@ from services.consistency_repair import (  # noqa: E402
     derive_name_pairs, has_name_issue,
 )
 from services.name_audit import (  # noqa: E402
-    AUDIT_LOG_KEY, DRIFT_DICT_KEY, is_blocking, load_drift_dict,
-    record_name_pairs,
+    AUDIT_LOG_KEY, DRIFT_DICT_KEY, audit_name_drift, is_blocking, load_drift_dict,
+    record_name_pairs, scan_forbidden,
 )
+from services.writing_phase_runners import Phase4Runner  # noqa: E402
 
 
 def _load_verify_module():
@@ -84,12 +86,34 @@ R4_P1_NAME_ISSUE = {
     'verdict': "存在名称漂移",
 }
 
-# Part 2 正文（井中意识×7、井中神族意识×0、其他规范名各 1 次）
+# Part 2 正文（井中意识×7、井中神族意识×0、其他规范名各 1 次 —— Round 4 冒烟
+# work.json final_draft['2'] 的实测形态：井中神族意识 ×0 / 井中意识 ×7）
 R4_P1_PART_TEXT = (
     '林尘跌入古井，井中意识在深渊中苏醒，井中意识低语着古老咒言。'
     '林啸天率族人封锁井口，井中意识却透过林战的眼睛窥视外界。'
-    '井中意识许诺林尘神力，井中意识诱他献出血脉，井中意识终将吞没三千世界。'
+    '井中意识许诺林尘神力，井中意识诱他献出血脉，井中意识在井底嘶鸣，'
+    '井中意识终将吞没三千世界。'
 )
+
+# Part 1 正文（井中意识×0、井中神族意识×0 —— Round 4 冒烟实测形态：该角色在
+# Part 1 以"井底青光"等描写形式在场、从未被点名；林尘/林啸天/林战在场）
+R4_P1_PART1_TEXT = (
+    '林尘跌入古井，井底青光萦绕不散。林啸天率族人封锁井口，'
+    '林战的眼睛却被青光占据，喃喃自语。林尘许下查明身世的誓言。'
+)
+
+# established_facts（Round 4 冒烟形态：subject 全部逐字规范名，R4-4 协议）
+# 井中神族意识 在 Part 1/Part 2 各有 fact → 探测器 B 在 Part 1/Part 2 双发
+R4_P1_FACTS = {'version': 1, 'facts': [
+    {'id': 'F1_1', 'part_num': 1, 'category': 'character', 'subject': '林尘',
+     'predicate': '身份', 'text': '林尘是被封禁十年的天煞孤星'},
+    {'id': 'F1_6', 'part_num': 1, 'category': 'character', 'subject': '井中神族意识',
+     'predicate': '苏醒', 'text': '井中神族意识在古井深处苏醒'},
+    {'id': 'F2_1', 'part_num': 2, 'category': 'character', 'subject': '林尘',
+     'predicate': '位置', 'text': '林尘位于井底'},
+    {'id': 'F2_8', 'part_num': 2, 'category': 'event', 'subject': '井中神族意识',
+     'predicate': '苏醒', 'text': '井中神族意识诱林尘献出血脉'},
+]}
 
 # 冒烟 A 历史 consistency P0 issue（test_round4_repair.py 逐字结构）
 SMOKE_A_NAME_ISSUE = {
@@ -122,7 +146,7 @@ SMOKE_A_CHARACTERS = [
 
 
 class _FakeService:
-    """ConsistencyRepairer 所需的最小 service 面（离线，无 work 文件）。"""
+    """ConsistencyRepairer / Phase4Runner 终审所需的最小 service 面（离线）。"""
 
     def __init__(self, data=None):
         self.data = data if isinstance(data, dict) else {}
@@ -131,6 +155,7 @@ class _FakeService:
         self.progress_callback = lambda *a, **k: None
         self.saved_chunks = {}
         self.save_count = 0
+        self.cfg = SimpleNamespace(part_count=2)
 
         class _Emitter:
             async def emit(self, *a, **k):
@@ -175,6 +200,18 @@ def _clean_logic(p0=0, verdict='ok'):
 def _clean_cons(p0_issues=None, score=8):
     return {'pass': True, 'overall_score': score, 'issues': p0_issues or [],
             'character_states': {}, 'verdict': 'ok'}
+
+
+def _clean_report():
+    """干净跑法的 review_report（R4-3 新键齐全，20 Part）。"""
+    return {
+        'logic': {'avg_score': 8, 'pass': True, 'total_issues': 0, 'p0_count': 0,
+                  'p1_count': 0, 'top_issue': '', 'parts_count': 20},
+        'consistency': {'avg_score': 8, 'pass': True, 'total_issues': 0, 'p0_count': 0,
+                        'p1_count': 0, 'top_issue': '', 'parts_count': 20},
+        'parts': [], 'first_pass_total_p0': 0, 'residual_total_p0': 0,
+        'revision_stats': {'attempted': 0, 'passed': 0, 'degraded': 0, 'spotfixed': 0},
+    }
 
 
 def _repairer(service, logic_script, cons_script):
@@ -428,6 +465,249 @@ def test_spotfix_retry_bounded_once():
     logger.info('[test_spotfix_retry] PASS: 二次定点触发且有界 1 次（各 2 次重审）')
 
 
+# ---------------- R5-1: 违禁词典 + final_draft 确定性终审 ----------------
+
+def _r4_drift_entry(**over):
+    """违禁词典条目（blocking：directive_confirmed + gates_passed）。"""
+    entry = {
+        'wrong': '井中意识', 'right': '井中神族意识', 'source': 'issue_quote',
+        'directive_confirmed': True, 'gates_passed': True, 'applied_verified': False,
+        'evidence': "被大量简写为'井中意识'", 'parts_seen': [2],
+        'first_seen_part': 2, 'last_seen_part': 2, 'occurrences': 7,
+        'timestamp': '2026-09-21 03:00:00',
+    }
+    entry.update(over)
+    return entry
+
+
+def _audit_service(drift_dict=None, with_facts=True):
+    return _FakeService({
+        'name_registry': build_name_registry(R4_SMOKE_CHARACTERS),
+        'character_state_track': {},
+        'established_facts': R4_P1_FACTS if with_facts else None,
+        'parts': {'1': R4_P1_PART1_TEXT, '2': R4_P1_PART_TEXT},
+        'final_draft': {'1': R4_P1_PART1_TEXT, '2': R4_P1_PART_TEXT},
+        'name_drift_dict': drift_dict if drift_dict is not None else {},
+    })
+
+
+def test_final_audit_round4_replay_spotfix():
+    """R5-1 验收 1: Round 4 冒烟真实数据回放 —— A 命中 blocking → 定点修复。
+
+    final_draft['2'] 含 井中意识×7 + 词典含该配对 → A 命中、blocking、
+    定点修复后 井中神族意识 0→7、井中意识 7→0、其他名字计数不变、
+    residual_blocking=0；parts 逐字节不变（禁走 _save_chunk_progress）。
+    """
+    service = _audit_service({'井中意识': _r4_drift_entry()})
+    cons_agent = _ScriptedAgent([_clean_cons()])  # 首次发现 → 1 次重审，干净 → 保留
+    runner = Phase4Runner(service)
+    scan = asyncio.run(runner._final_name_audit(
+        service, [1, 2], cons_agent, SimpleNamespace(final_draft={})))
+
+    assert scan['scanned'] == 2
+    fixed = service.data['final_draft']['2']
+    assert fixed.count('井中意识') == 0, '漂移名必须清零'
+    assert fixed.count('井中神族意识') == 7, '井中神族意识 0→7'
+    for name in ('林尘', '林啸天', '林战'):
+        assert fixed.count(name) == R4_P1_PART_TEXT.count(name), f'{name} 计数必须不变'
+    assert service.data['parts']['2'] == R4_P1_PART_TEXT, 'parts 必须逐字节不变'
+    assert service.saved_chunks == {}, '终审修复禁止走 _save_chunk_progress'
+    assert scan['residual_blocking'] == [], scan['residual_blocking']
+    # 留痕：name_audit_log + revision_log(final_audit) + 词典 applied_verified
+    audit_log = service.data[AUDIT_LOG_KEY]
+    spot = [e for e in audit_log if e.get('action') == 'spotfixed']
+    assert len(spot) == 1 and spot[0]['trigger'] == 'final_audit'
+    assert spot[0]['wrong'] == '井中意识' and spot[0]['count_before'] == 7
+    assert spot[0]['count_after'] == 0
+    rev = [e for e in service.data['revision_log'] if e.get('trigger') == 'final_audit']
+    assert len(rev) == 1 and rev[0]['type'] == 'name_spotfix'
+    assert service.data[DRIFT_DICT_KEY]['井中意识']['applied_verified'] is True
+    logger.info('[test_final_replay] PASS: 冒烟数据回放定点修复，parts 不变，残留 0')
+
+
+def test_final_audit_verified_entry_zero_llm():
+    """R5-1: applied_verified=True 的条目 → 零 LLM 直接修（验证分工）。"""
+    service = _audit_service({'井中意识': _r4_drift_entry(applied_verified=True)})
+    cons_agent = _ScriptedAgent([])  # 不应被调用
+
+    def _boom(*a, **k):
+        raise AssertionError('applied_verified 条目终审修复不应发生 LLM 调用')
+
+    cons_agent.execute = _boom
+    runner = Phase4Runner(service)
+    scan = asyncio.run(runner._final_name_audit(
+        service, [1, 2], cons_agent, SimpleNamespace(final_draft={})))
+    assert scan['residual_blocking'] == []
+    fixed = service.data['final_draft']['2']
+    assert fixed.count('井中意识') == 0 and fixed.count('井中神族意识') == 7
+    logger.info('[test_final_zero_llm] PASS: 已验证配对零 LLM 直接修')
+
+
+def test_final_audit_detector_b_double_fire():
+    """R5-1 验收 2: 空词典 → A 零命中，B 在 Part 1/Part 2 各 1 条（双发），
+    且 B 只告警不改文本、不进 G4。"""
+    reg = build_name_registry(R4_SMOKE_CHARACTERS)
+    fd = {'1': R4_P1_PART1_TEXT, '2': R4_P1_PART_TEXT}
+    scan = audit_name_drift(fd, {}, R4_P1_FACTS, reg)
+    a_findings = [f for f in scan['findings'] if f['kind'] == 'forbidden_name']
+    assert a_findings == [], '空词典 A 必须零命中'
+    b = scan['canonical_absent']
+    assert len(b) == 2, f'B 必须双发: {b}'
+    assert {f['part'] for f in b} == {1, 2}
+    assert all(f['canonical'] == '井中神族意识' for f in b)
+    # 全量跑终审：B 触发针对性重审但绝不改文本
+    service = _audit_service({})
+    before = dict(service.data['final_draft'])
+    cons_agent = _ScriptedAgent([_clean_cons(), _clean_cons()])
+    asyncio.run(Phase4Runner(service)._final_name_audit(
+        service, [1, 2], cons_agent, SimpleNamespace(final_draft={})))
+    assert service.data['final_draft'] == before, 'B 永不自动改文本'
+    # B 不进 G4：汇总 residual_blocking=0
+    data = {'final_draft': fd, 'name_drift_dict': {},
+            'name_audit_log': [{'part': 1, 'wrong': '', 'right': '井中神族意识',
+                                'count_before': 0, 'count_after': 0,
+                                'action': 'rereviewed', 'trigger': 'final_audit',
+                                'pair_source': 'canonical_absent'}]}
+    na = summarize_name_audit(data)
+    assert na['residual_blocking'] == 0 and na['canonical_absent'] == 1
+    g4, detail = evaluate_g4(_clean_report(), 20, na)
+    assert g4 is True and detail['name_audit']['residual_blocking'] == 0
+    logger.info('[test_final_detector_b] PASS: B 双发、不改文本、不影响 G4')
+
+
+def test_audit_name_drift_dirty_data_fail_open():
+    """R5-1 验收 4: 脏数据（facts 非 dict / registry 为 list / 占位）不抛异常。"""
+    fd = {'1': '林尘踏入禁地，发现古井。', '2': '[Part 2 创作失败]',
+          '3': None, 'x': 123}
+    drift = {'井中意识': _r4_drift_entry()}
+    scan = audit_name_drift(fd, drift, 'not a dict', ['not', 'a', 'dict'])
+    assert scan['scanned'] == 1, '只有 Part 1 是有效交付文本'
+    assert scan['findings'] == [], '占位/非 str/无命中 → 零 finding'
+    # facts 为 None / registry 正常 → B 无原料不误报
+    scan2 = audit_name_drift({'1': '林尘踏入禁地。'}, {}, None,
+                             build_name_registry(R4_SMOKE_CHARACTERS))
+    assert scan2['scanned'] == 1 and scan2['findings'] == []
+    # 非 dict final_draft / 非 dict drift → 空结果
+    assert audit_name_drift(None, drift, R4_P1_FACTS, {})['scanned'] == 0
+    assert audit_name_drift({'1': 'x'}, 'not a dict', R4_P1_FACTS, {})['findings'] == []
+    logger.info('[test_audit_dirty] PASS: 脏数据 fail-open，不阻断')
+
+
+def test_evaluate_g4_name_audit_quadrants():
+    """R5-1 验收 5: evaluate_g4 第三参四象限 + 旧格式逐字节不变 + env 关闭。"""
+    # 旧格式（无 name_audit）：detail 不得含 name_audit 键（逐字节兼容）
+    g4, detail = evaluate_g4(_clean_report(), 20)
+    assert g4 is True and 'name_audit' not in detail
+    # 干净 name_audit → 不改变判定
+    na_clean = summarize_name_audit({'final_draft': {}, 'name_drift_dict': {},
+                                     'name_audit_log': []})
+    g4, detail = evaluate_g4(_clean_report(), 20, na_clean)
+    assert g4 is True and detail['name_audit']['residual_blocking'] == 0
+    # blocking 残留 → FAIL（sound：交付文本含已证漂移名）
+    na_bad = dict(na_clean, residual_blocking=1)
+    g4, detail = evaluate_g4(_clean_report(), 20, na_bad)
+    assert g4 is False and detail['name_audit']['residual_blocking'] == 1
+    # advisory 残留不影响 G4
+    na_adv = dict(na_clean, residual_advisory=3)
+    assert evaluate_g4(_clean_report(), 20, na_adv)[0] is True
+    # env KML_NAME_AUDIT_GATE=0 可关闭条件，但 gate_enabled=False 原样落 detail
+    os.environ['KML_NAME_AUDIT_GATE'] = '0'
+    try:
+        na_off = summarize_name_audit({'final_draft': {}, 'name_drift_dict': {},
+                                       'name_audit_log': []})
+        assert na_off['gate_enabled'] is False
+        g4, detail = evaluate_g4(_clean_report(), 20, na_off)
+        assert g4 is True and detail['name_audit']['gate_enabled'] is False
+    finally:
+        os.environ.pop('KML_NAME_AUDIT_GATE', None)
+    # detail JSON 安全（report.json 落盘）
+    import json
+    text = json.dumps(evaluate_g4(_clean_report(), 20, na_clean)[1], ensure_ascii=False)
+    assert '"name_audit"' in text and '"residual_blocking": 0' in text
+    logger.info('[test_g4_name_audit] PASS: 四象限 + 旧格式兼容 + env 关闭不静默')
+
+
+def test_summarize_name_audit_residual_accounting():
+    """R5-1: residual 口径 —— 已修复/降级 advisory 不计 blocking；回退残留进 G4。"""
+    drift = {'井中意识': _r4_drift_entry()}
+    base = {'final_draft': {'1': R4_P1_PART1_TEXT, '2': R4_P1_PART_TEXT},
+            'name_drift_dict': drift}
+    fixed_text = R4_P1_PART_TEXT.replace('井中意识', '井中神族意识')
+    # 1) spotfixed 且 count_after==0 → 无残留
+    data_fixed = dict(base, final_draft={'1': R4_P1_PART1_TEXT, '2': fixed_text},
+                      name_audit_log=[
+        {'part': 2, 'wrong': '井中意识', 'right': '井中神族意识', 'count_before': 7,
+         'count_after': 0, 'action': 'spotfixed', 'trigger': 'final_audit',
+         'pair_source': 'issue_quote'}])
+    na = summarize_name_audit(data_fixed)
+    assert na['scanned'] == 2 and na['findings'] == 1 and na['fixed'] == 1
+    assert na['residual_blocking'] == 0 and na['residual_advisory'] == 0
+    # 2) unfixed_blocking（重审不过回退，正文仍有 7 处）→ blocking 残留
+    data_bad = dict(base, name_audit_log=[
+        {'part': 2, 'wrong': '井中意识', 'right': '井中神族意识', 'count_before': 7,
+         'count_after': 7, 'action': 'unfixed_blocking', 'trigger': 'final_audit',
+         'pair_source': 'issue_quote'}])
+    na_bad = summarize_name_audit(data_bad)
+    assert na_bad['residual_blocking'] == 1 and na_bad['fixed'] == 0
+    assert evaluate_g4(_clean_report(), 20, na_bad)[0] is False
+    # 3) 跨 Part 护栏降级 → advisory，不进 G4（漂移名只出现在陌生 Part 7）
+    data_down = dict(base, final_draft={'7': '第七章里井中意识仅出现一次。'},
+                     name_audit_log=[
+        {'part': 7, 'wrong': '井中意识', 'right': '井中神族意识', 'count_before': 1,
+         'count_after': 1, 'action': 'downgraded_advisory', 'trigger': 'final_audit',
+         'pair_source': 'issue_quote'}])
+    na_down = summarize_name_audit(data_down)
+    assert na_down['residual_blocking'] == 0 and na_down['residual_advisory'] == 1
+    assert evaluate_g4(_clean_report(), 20, na_down)[0] is True
+    # 4) advisory 条目（闸未过/无指令佐证）→ 只告警
+    adv_drift = {'井中意识': _r4_drift_entry(directive_confirmed=False,
+                                             gates_passed=False, source='issue_character')}
+    na_adv = summarize_name_audit(dict(base, name_drift_dict=adv_drift,
+                                       name_audit_log=[]))
+    assert na_adv['residual_advisory'] == 1 and na_adv['residual_blocking'] == 0
+    assert is_blocking(adv_drift['井中意识']) is False
+    # 5) resume 场景：上一轮 spotfixed 记录不得压制本轮新产生的 blocking 残留
+    #    （latest-entry 语义：最后一条是 unfixed_blocking → 仍计 blocking）
+    stale = dict(base, name_audit_log=[
+        {'part': 2, 'wrong': '井中意识', 'right': '井中神族意识', 'count_before': 7,
+         'count_after': 0, 'action': 'spotfixed', 'trigger': 'final_audit',
+         'pair_source': 'issue_quote'},
+        {'part': 2, 'wrong': '井中意识', 'right': '井中神族意识', 'count_before': 7,
+         'count_after': 7, 'action': 'unfixed_blocking', 'trigger': 'final_audit',
+         'pair_source': 'issue_quote'}])
+    na_stale = summarize_name_audit(stale)
+    assert na_stale['residual_blocking'] == 1, '旧 spotfixed 不得压制新残留'
+    # 6) 空/脏 work JSON → 0 条不炸
+    assert summarize_name_audit({})['residual_blocking'] == 0
+    assert summarize_name_audit({'final_draft': 'x', 'name_drift_dict': 1,
+                                 'name_audit_log': 'y'})['scanned'] == 0
+    logger.info('[test_summarize_residual] PASS: 残留口径六场景 + 脏数据')
+
+
+def test_recover_drift_dict_from_revision_log():
+    """R5-1 词典来源 3: revision_log 的 name_spotfix 条目恢复（resume/历史 run）。"""
+    from services.name_audit import recover_drift_dict_from_revision_log
+    data = {'revision_log': [
+        {'part': 2, 'type': 'name_spotfix', 'wrong_name': '井中意识',
+         'right_name': '井中神族意识', 'revision_passed': True},
+        {'part': 5, 'type': 'name_spotfix', 'wrong_name': '林战魂|古井意识',
+         'right_name': '林战|井中神族意识', 'revision_passed': False},
+        {'part': 6, 'revision_attempted': True},  # 非 name_spotfix → 跳过
+        'not a dict',
+    ]}
+    drift = recover_drift_dict_from_revision_log(data)
+    assert set(drift.keys()) == {'井中意识', '林战魂', '古井意识'}, drift
+    assert drift['井中意识']['applied_verified'] is True
+    assert drift['井中意识']['gates_passed'] is True
+    assert drift['林战魂']['applied_verified'] is False
+    assert drift['林战魂']['right'] == '林战' and drift['古井意识']['right'] == '井中神族意识'
+    assert drift['井中意识']['parts_seen'] == [2]
+    # 幂等恢复（只升不降，条目不丢）
+    drift2 = recover_drift_dict_from_revision_log(data)
+    assert set(drift2.keys()) == {'井中意识', '林战魂', '古井意识'}
+    logger.info('[test_recover_dict] PASS: revision_log 恢复 + applied_verified 语义')
+
+
 if __name__ == '__main__':
     logger.info('=' * 60)
     logger.info('test_round5_name_audit.py —— Round 5 姓名审计回归（mock LLM）')
@@ -441,7 +721,14 @@ if __name__ == '__main__':
                test_record_name_pairs_create_and_monotonic,
                test_is_blocking_layers,
                test_rewrite_name_fix_before_judgement,
-               test_spotfix_retry_bounded_once):
+               test_spotfix_retry_bounded_once,
+               test_final_audit_round4_replay_spotfix,
+               test_final_audit_verified_entry_zero_llm,
+               test_final_audit_detector_b_double_fire,
+               test_audit_name_drift_dirty_data_fail_open,
+               test_evaluate_g4_name_audit_quadrants,
+               test_summarize_name_audit_residual_accounting,
+               test_recover_drift_dict_from_revision_log):
         fn()
         print(f'PASS {fn.__name__}')
     logger.info('\nALL PASS')

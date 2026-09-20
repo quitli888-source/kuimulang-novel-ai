@@ -116,19 +116,22 @@ def first_pass_p0_budget(parts_expected: int):
     return parts_expected // 2
 
 
-def evaluate_g4(report: dict, parts_expected: int) -> tuple:
+def evaluate_g4(report: dict, parts_expected: int, name_audit: dict = None) -> tuple:
     """R4-3（S4）: G4 连贯性门禁判定（纯函数，可单测；此前内联在 main()）。
 
     混合案 (c) 口径：终稿语义（residual P0 = 0 且所有 revision_attempted 的
     Part revision_passed = True 且逻辑均分 ≥ 6 且一致性 pass）+ 首检 P0 率
     预算护栏（防"修复刷分"—— 重写引入新冲突却靠重审闭嘴进终稿）。
-    三个阈值常量（MAX_TOTAL_P0 / MIN_AVG_LOGIC_SCORE /
-    MIN_CONSISTENCY_PASS_RATE）一个不改；cons_pass / avg_logic 维持现状
-    （修复成功即重审结果进聚合，终稿口径，不引入第二套分数）。
+    R5-1（S1）: 第三参 name_audit 非 None 时追加确定性名册合规条件
+    （residual_blocking == 0；env KML_NAME_AUDIT_GATE=0 可关闭但
+    gate_enabled=False 原样落 report.json，不静默放宽）。三个阈值常量
+    （MAX_TOTAL_P0 / MIN_AVG_LOGIC_SCORE / MIN_CONSISTENCY_PASS_RATE）
+    一个不改；cons_pass / avg_logic 维持现状。
 
     Args:
         report: review_report（services/review_aggregator 产物）
         parts_expected: 期望 Part 数（KML_PARTS）
+        name_audit: summarize_name_audit 产物（None = 旧格式，行为逐字节不变）
 
     Returns:
         (g4_pass: bool, detail: dict) —— detail 直接进 gates['G4_coherence']。
@@ -159,6 +162,11 @@ def evaluate_g4(report: dict, parts_expected: int) -> tuple:
           and avg_logic >= MIN_AVG_LOGIC_SCORE
           and cons_pass
           and budget_ok)
+    # R5-1: 确定性名册合规条件（blocking 残留零容忍；advisory 不影响 G4）
+    if name_audit is not None:
+        gate_enabled = bool(name_audit.get('gate_enabled', True))
+        residual_blocking = int(name_audit.get('residual_blocking') or 0)
+        g4 = g4 and ((not gate_enabled) or residual_blocking == 0)
     detail = {
         'pass': g4, 'reviewed_parts': parts_reviewed,
         'total_p0': total_p0, 'total_p1': total_p1,
@@ -182,7 +190,80 @@ def evaluate_g4(report: dict, parts_expected: int) -> tuple:
             for p in (report.get('parts') or [])
         ],
     }
+    # R5-1: name_audit 非 None 才增列（旧格式调用 detail 逐字节不变）
+    if name_audit is not None:
+        detail['name_audit'] = {
+            'gate_enabled': bool(name_audit.get('gate_enabled', True)),
+            'residual_blocking': int(name_audit.get('residual_blocking') or 0),
+            'residual_advisory': int(name_audit.get('residual_advisory') or 0),
+            'scanned': int(name_audit.get('scanned') or 0),
+            'findings': int(name_audit.get('findings') or 0),
+            'fixed': int(name_audit.get('fixed') or 0),
+            'canonical_absent': int(name_audit.get('canonical_absent') or 0),
+        }
     return g4, detail
+
+
+def summarize_name_audit(data: dict) -> dict:
+    """R5-1（S1）: name_audit 汇总行（纯函数，可单测；只读观测 + G4 新条件输入）。
+
+    从 work JSON 的 name_audit_log + name_drift_dict + final_draft 汇总
+    {scanned, findings, fixed, residual_blocking, residual_advisory,
+    canonical_absent, gate_enabled}。residual 用违禁词典对**交付文本**
+    final_draft 重扫（确定性、与 Phase4Runner 终审同口径）：审计时已修复
+    （spotfixed 且 count_after==0）与跨 Part 护栏降级（downgraded_advisory）
+    的 finding 不计 blocking 残留；修不掉/未处置的 blocking 违禁 → G4 FAIL
+    （交付文本含"有显式证据证明是漂移"的名字即不达标）。
+    """
+    from services.name_audit import is_blocking
+    if not isinstance(data, dict):
+        data = {}
+    log = [e for e in (data.get('name_audit_log') or []) if isinstance(e, dict)]
+    drift = data.get('name_drift_dict') or {}
+    drift = drift if isinstance(drift, dict) else {}
+    raw_fd = data.get('final_draft')
+    final_draft = {k: v for k, v in raw_fd.items()
+                   if isinstance(k, str) and isinstance(v, str)
+                   and not v.startswith('[Part ')} if isinstance(raw_fd, dict) else {}
+    gate_enabled = os.environ.get('KML_NAME_AUDIT_GATE', '1') != '0'
+    # 每个 (part, wrong) 只认**最后一条** final_audit 处置记录 —— resume 重跑
+    # Phase 4 时上一轮的 spotfixed/downgraded 不得压制本轮新产生的 blocking 残留
+    latest: dict = {}
+    for e in log:
+        if e.get('trigger') != 'final_audit':
+            continue
+        latest[(e.get('part'), e.get('wrong'))] = e
+    resolved = {k for k, e in latest.items()
+                if e.get('action') == 'spotfixed' and (e.get('count_after') or 0) == 0}
+    downgraded = {k for k, e in latest.items() if e.get('action') == 'downgraded_advisory'}
+    residual_blocking = 0
+    residual_advisory = 0
+    for key, text in final_draft.items():
+        try:
+            part_num = int(key)
+        except (TypeError, ValueError):
+            continue
+        for wrong, entry in drift.items():
+            if not isinstance(wrong, str) or not wrong or not isinstance(entry, dict):
+                continue
+            if text.count(wrong) <= 0:
+                continue
+            if not is_blocking(entry):
+                residual_advisory += 1
+            elif (part_num, wrong) in resolved or (part_num, wrong) in downgraded:
+                residual_advisory += 1
+            else:
+                residual_blocking += 1
+    return {
+        'scanned': len(final_draft),
+        'findings': len(log),
+        'fixed': len([e for e in log if e.get('action') == 'spotfixed']),
+        'residual_blocking': residual_blocking,
+        'residual_advisory': residual_advisory,
+        'canonical_absent': len([e for e in log
+                                 if e.get('pair_source') == 'canonical_absent']),
+        'gate_enabled': gate_enabled,
+    }
 
 
 def summarize_consistency_flags(data: dict) -> str:
@@ -351,18 +432,22 @@ async def main():
 
     # G4 连贯性（Phase 4 review_report 聚合，规范结构见 services/review_aggregator.py）
     g4 = None
+    # R5-1: 确定性终审汇总（只读观测 + G4 新条件输入；Phase 4 跳过时为 0 条）
+    name_audit = summarize_name_audit(data)
     if SKIP_PHASE4:
         print('[G4] 连贯性: SKIP（KML_SKIP_PHASE4=1）', flush=True)
         gates['G4_coherence'] = {'pass': None, 'skipped': True}
     else:
         report = data.get('review_report') or {}
         # R4-3（S4）: 判定抽成纯函数 evaluate_g4（可单测）；混合案 (c) 口径 ——
-        # 终稿零残留 P0 + 修复全收敛 + 逻辑均分 + 一致性 pass + 首检 P0 率预算
-        g4, g4_detail = evaluate_g4(report, PARTS)
+        # 终稿零残留 P0 + 修复全收敛 + 逻辑均分 + 一致性 pass + 首检 P0 率预算；
+        # R5-1（S1）: 追加确定性名册合规条件（name_audit.residual_blocking == 0）
+        g4, g4_detail = evaluate_g4(report, PARTS, name_audit)
         gates['G4_coherence'] = g4_detail
         rs = g4_detail['revision_stats']
         budget_txt = ('不设限' if g4_detail['first_pass_p0_budget'] is None
                       else str(g4_detail['first_pass_p0_budget']))
+        na = g4_detail['name_audit']
         print(f"[G4] 连贯性: {'PASS' if g4 else 'FAIL'} "
               f"(审查 {g4_detail['reviewed_parts']} Parts | P0={g4_detail['total_p0']} "
               f"P1={g4_detail['total_p1']} | 逻辑均分={g4_detail['avg_logic_score']} | "
@@ -370,11 +455,21 @@ async def main():
         print(f"     终稿口径: residual_p0={g4_detail['residual_total_p0']} | "
               f"首检_p0={g4_detail['first_pass_total_p0']}（预算 {budget_txt}）| "
               f"修复统计: attempted={rs['attempted']} passed={rs['passed']} "
-              f"degraded={rs['degraded']} spotfixed={rs['spotfixed']}", flush=True)
+              f"degraded={rs['degraded']} spotfixed={rs['spotfixed']} | "
+              f"名称审计: residual_blocking={na['residual_blocking']}"
+              f"（门禁 {'开' if na['gate_enabled'] else '关'}）", flush=True)
 
     # R4-6: consistency_flags 汇总（只读观测，不加门禁 —— 与 R1-E"只告警不阻断"
     # 一致，终判交 Phase 4； flags 由 Phase 3 确定性预检写入 work JSON）
     print(summarize_consistency_flags(data), flush=True)
+
+    # R5-1: name_audit 汇总行（只读观测；blocking 残留已进 G4 判定）
+    print(f'[观测] name_audit: 扫描 {name_audit["scanned"]} Part | findings '
+          f'{name_audit["findings"]} | fixed {name_audit["fixed"]} | '
+          f'residual_blocking {name_audit["residual_blocking"]} | '
+          f'residual_advisory {name_audit["residual_advisory"]} | '
+          f'canonical_absent {name_audit["canonical_absent"]}'
+          f'（确定性名册审计，blocking 残留进 G4）', flush=True)
 
     # 成本
     try:

@@ -268,6 +268,33 @@ def test_g4_detail_json_safe():
     logger.info('[test_g4_json] PASS: detail JSON 安全（含 null 预算）')
 
 
+# ---------------- R5-1: evaluate_g4 第三参 name_audit 象限 ----------------
+
+def test_evaluate_g4_name_audit_quadrants():
+    """R5-1 验收: evaluate_g4(report, parts, name_audit) 四象限。
+
+    干净 name_audit → 不改变判定；blocking 残留 → FAIL；env 关闸后条件不生效
+    但 gate_enabled=False 原样落 detail（不静默放宽）；无第三参（旧格式）→
+    detail 不含 name_audit 键（既有 7 项调用行为逐字节不变）。
+    """
+    ok = _report(first_pass_total_p0=0, residual_total_p0=0)
+    na = {'scanned': 20, 'findings': 3, 'fixed': 2, 'residual_blocking': 0,
+          'residual_advisory': 1, 'canonical_absent': 1, 'gate_enabled': True}
+    g4, detail = evaluate_g4(ok, 20, na)
+    assert g4 is True and detail['name_audit']['residual_blocking'] == 0
+    assert detail['name_audit']['gate_enabled'] is True
+    bad = dict(na, residual_blocking=1)
+    g4, detail = evaluate_g4(ok, 20, bad)
+    assert g4 is False and detail['name_audit']['residual_blocking'] == 1
+    off = dict(na, residual_blocking=1, gate_enabled=False)
+    g4, detail = evaluate_g4(ok, 20, off)
+    assert g4 is True and detail['name_audit']['gate_enabled'] is False
+    # 旧格式（无第三参）→ detail 不含 name_audit（向后兼容）
+    g4, detail = evaluate_g4(ok, 20)
+    assert 'name_audit' not in detail
+    logger.info('[test_g4_name_audit] PASS: name_audit 四象限 + 旧格式 detail 不变')
+
+
 if __name__ == '__main__':
     logger.info('=' * 60)
     logger.info('test_round4_gates.py —— Round 4 G4 门禁口径回归（纯离线）')
@@ -278,7 +305,8 @@ if __name__ == '__main__':
                test_aggregator_revision_stats_degraded_and_spotfixed,
                test_evaluate_g4_quadrants,
                test_first_pass_budget_smoke_and_env,
-               test_g4_detail_json_safe):
+               test_g4_detail_json_safe,
+               test_evaluate_g4_name_audit_quadrants):
         fn()
         print(f'PASS {fn.__name__}')
     logger.info('\nALL PASS')

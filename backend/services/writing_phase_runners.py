@@ -13,6 +13,8 @@ service.cfg / service._save / service._check_pause / service._request_confirm
   Phase4Runner.run()      风格优化 + 三 Review Agent 串行评审
 """
 import asyncio
+import os
+import time
 import traceback
 from typing import TYPE_CHECKING
 
@@ -447,6 +449,220 @@ class Phase4Runner:
     def __init__(self, service: "WritingService"):
         self.service = service
 
+    async def _final_name_audit(self, s, part_nums: list, consistency_agent,
+                                state_mock) -> dict:
+        """R5-1: final_draft 确定性终审（双探测器 + 有界动作，零 LLM 扫描）。
+
+        探测器 A（违禁对扫描，vale Terms 模式）+ 探测器 B（facts 主语 oracle）。
+        词典四路沉淀：alias_candidate / 各检查点 derive_name_pairs（R5-2 接线）/
+        revision_log 历史 name_spotfix（本方法恢复）/ 终审 B 重审产出。
+
+        动作（02_review §2.1 终审动作，全部有界）：
+        - A 类 blocking 且配对过 4 条安全闸 → 定点修复，**只写 final_draft**
+          （禁止 _save_chunk_progress —— 那会覆盖 parts、改变 G2/G3 统计源）；
+          跨 Part 传播护栏：仅首见 Part 或本 Part count>=2 才自动修，否则降级
+          advisory（防把陌生 Part 的合法配角名抹掉）；applied_verified 条目零
+          LLM 直接修，首次发现补 1 次 consistency 重审，仍报同一错误名 → 回退
+          该 Part final_draft 并记 unfixed_blocking；
+        - A 类 advisory / B 类 → 针对性重审预算（每 Part 1 次、每跑
+          max(2, PARTS//4) 次；env KML_NAME_AUDIT_REREVIEW_BUDGET 可覆盖，
+          显式 0 = 关闭重审只告警）；**B 永不自动改文本、永不进 G4**；
+        - 全部 finding 落 s.data['name_audit_log']，词典沉淀随 s._save() 落盘。
+        """
+        from services.consistency_repair import (apply_name_spotfix,
+                                                 apply_safety_gates,
+                                                 derive_name_pairs)
+        from services.name_audit import (
+            append_audit_log, audit_name_drift, is_blocking,
+            record_name_pairs, recover_drift_dict_from_revision_log,
+            review_reports_name,
+        )
+        registry = s.data.get('name_registry') or {}
+        if not isinstance(registry, dict):
+            registry = {}
+        final_draft = s.data.get('final_draft') or {}
+        if not isinstance(final_draft, dict):
+            final_draft = {}
+        facts_raw = s.data.get('established_facts')
+        drift_dict = recover_drift_dict_from_revision_log(s.data)
+        scan = audit_name_drift(final_draft, drift_dict, facts_raw, registry)
+        if scan['scanned'] == 0:
+            return scan
+        departed_names = [n for n in (s.data.get('character_state_track') or {}) if n]
+
+        # 针对性重审预算：每 Part 1 次 + 每跑 max(2, PARTS//4) 次（env 可覆盖）
+        raw_budget = os.environ.get('KML_NAME_AUDIT_REREVIEW_BUDGET', '')
+        if raw_budget.strip():
+            try:
+                budget = max(0, int(raw_budget))
+            except (TypeError, ValueError):
+                budget = max(2, (len(part_nums) or s.cfg.part_count or 0) // 4)
+        else:
+            budget = max(2, (len(part_nums) or s.cfg.part_count or 0) // 4)
+
+        run_entries: list = []
+
+        def _log(part_num, wrong, right, count_before, count_after, action, pair_source):
+            entry = {'part': part_num, 'wrong': wrong, 'right': right,
+                     'count_before': count_before, 'count_after': count_after,
+                     'action': action, 'trigger': 'final_audit',
+                     'pair_source': pair_source,
+                     'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')}
+            append_audit_log(s.data, entry)
+            run_entries.append(entry)
+            return entry
+
+        async def _rereview(part_num: int, part_text: str) -> dict:
+            # 只刷新 final_draft 一个属性（consistency agent 要拿前文结尾）
+            state_mock.final_draft = dict(s.data.get('final_draft') or {})
+            try:
+                return await asyncio.to_thread(
+                    consistency_agent.execute, state_mock, part_num, part_text)
+            except Exception as e:
+                logger.info(f'[Phase4Runner] 终审重审 Part {part_num} 失败: {e}')
+                return s._review_failure('consistency', part_num, e)
+
+        # ---- A 类 blocking：定点修复（跨 Part 传播护栏 + 验证分工） ----
+        for f in list(scan['residual_blocking']):
+            part_num, wrong, right = f['part'], f['wrong'], f['right']
+            part_key = str(part_num)
+            text = final_draft.get(part_key) or ''
+            entry = drift_dict.get(wrong) or {}
+            # 跨 Part 传播护栏：仅首见 Part 或本 Part count>=2 才自动修
+            if part_num != entry.get('first_seen_part') and f['count'] < 2:
+                _log(part_num, wrong, right, f['count'], f['count'],
+                     'downgraded_advisory', entry.get('source', ''))
+                logger.info(f'[Phase4Runner] 终审: Part {part_num} 错误名 "{wrong}" 单次出现于'
+                            f'非首见 Part，降级 advisory（防止误抹合法配角名）')
+                continue
+            gated = apply_safety_gates(
+                [{'wrong': wrong, 'right': right, 'source': entry.get('source', ''),
+                  'evidence': entry.get('evidence', '')}], registry, departed_names)
+            if not gated:
+                _log(part_num, wrong, right, f['count'], f['count'],
+                     'gate_rejected', entry.get('source', ''))
+                logger.warning(f'[Phase4Runner] 终审: Part {part_num} 配对 "{wrong}"→"{right}" '
+                               f'未过安全闸，保留待人工核查')
+                continue
+            fixed, ok, reason = apply_name_spotfix(text, gated)
+            if not ok:
+                _log(part_num, wrong, right, f['count'], f['count'],
+                     'unfixed_blocking', entry.get('source', ''))
+                logger.warning(f'[Phase4Runner] 终审: Part {part_num} 定点替换校验失败（{reason}）')
+                continue
+            count_after = fixed.count(wrong)
+            if entry.get('applied_verified'):
+                # 已被"重审通过"的定点修复验证过的配对 → 零 LLM 直接修
+                final_draft[part_key] = fixed
+                record_name_pairs(s.data, gated, part_num, 'final_audit',
+                                  applied_verified=True, gates_passed=True)
+                _log(part_num, wrong, right, f['count'], count_after,
+                     'spotfixed', entry.get('source', ''))
+                self._append_final_audit_revision(s, part_num, wrong, right,
+                                                  entry.get('source', ''))
+                logger.info(f'[Phase4Runner] 终审: Part {part_num} 已配对 "{wrong}"→"{right}" '
+                            f'×{f["count"]} 直接定点修复（零 LLM）')
+                continue
+            # 首次发现：修完补 1 次 consistency 重审；仍报同一错误名 → 回退
+            review = await _rereview(part_num, fixed)
+            if review_reports_name(review, wrong):
+                _log(part_num, wrong, right, f['count'], text.count(wrong),
+                     'unfixed_blocking', entry.get('source', ''))
+                logger.warning(f'[Phase4Runner] 终审: Part {part_num} 定点修复后重审仍报 '
+                               f'"{wrong}"，回退该 Part final_draft 到修复前文本')
+                continue
+            final_draft[part_key] = fixed
+            record_name_pairs(s.data, gated, part_num, 'final_audit',
+                              applied_verified=True, gates_passed=True)
+            _log(part_num, wrong, right, f['count'], count_after,
+                 'spotfixed', entry.get('source', ''))
+            self._append_final_audit_revision(s, part_num, wrong, right,
+                                              entry.get('source', ''))
+            logger.info(f'[Phase4Runner] 终审: Part {part_num} "{wrong}"→"{right}" '
+                        f'×{f["count"]} 定点修复并经 1 次重审验证')
+
+        # ---- A 类 advisory + B 类：针对性重审预算（有界，B 永不改文本） ----
+        candidates = []
+        for f in scan['residual_advisory']:
+            candidates.append({'part': f['part'], 'wrong': f['wrong'],
+                               'right': f['right'], 'tier': 2, 'kind': 'advisory'})
+        for f in scan['canonical_absent']:
+            # tier 1 = 该 canonical 在其他 Part 正文出现过（名字在全书在用）
+            in_use = any(
+                isinstance(t, str) and f['canonical'] in t
+                for k, t in final_draft.items() if str(k) != str(f['part']))
+            candidates.append({'part': f['part'], 'wrong': '',
+                               'right': f['canonical'],
+                               'tier': 1 if in_use else 2, 'kind': 'canonical_absent'})
+        candidates.sort(key=lambda c: (c['tier'], c['part']))
+        rereviewed_parts: set = set()
+        used = 0
+        for c in candidates:
+            part_num, part_key = c['part'], str(c['part'])
+            text = final_draft.get(part_key) or ''
+            c_count = text.count(c['wrong']) if c['wrong'] else 0
+            if part_num in rereviewed_parts or used >= budget:
+                _log(part_num, c['wrong'], c['right'], c_count, c_count,
+                     'budget_skipped', c['kind'])
+                continue
+            rereviewed_parts.add(part_num)
+            used += 1
+            review = await _rereview(part_num, text)
+            # B/advisory 重审是"证据注入器"：产出名称 P0 且配对可推导 → 沉淀
+            # （gates_passed 不置位 —— 守住"B 永不影响 G4"的裁定）
+            pairs = derive_name_pairs(text, review, registry)
+            if pairs:
+                record_name_pairs(s.data, pairs, part_num, 'final_audit')
+            _log(part_num, c['wrong'], c['right'], c_count, c_count,
+                 'rereviewed', c['kind'])
+            logger.info(f'[Phase4Runner] 终审: Part {part_num} {c["kind"]} 告警'
+                        f'（{"错误名 " + c["wrong"] if c["wrong"] else "规范名缺席 " + c["right"]}）'
+                        f'已注入 1 次针对性重审（预算 {used}/{budget}），不自动改文本')
+
+        # ---- 残留重算（与 verify 侧 summarize_name_audit 同口径；只认本轮处置，
+        # 防止 resume 后上一轮的 spotfixed/downgraded 记录压制本轮 blocking 残留） ----
+        fixed_keys = {(e['part'], e['wrong']) for e in run_entries
+                      if e.get('action') == 'spotfixed' and (e.get('count_after') or 0) == 0}
+        downgraded_keys = {(e['part'], e['wrong']) for e in run_entries
+                           if e.get('action') == 'downgraded_advisory'}
+        scan['residual_blocking'] = [
+            f for f in scan['residual_blocking']
+            if (f['part'], f['wrong']) not in fixed_keys | downgraded_keys]
+        scan['residual_advisory'] = (
+            scan['residual_advisory']
+            + [f for f in scan['findings']
+               if f['kind'] == 'forbidden_name' and f['blocking']
+               and (f['part'], f['wrong']) in downgraded_keys])
+        logger.info(f'[Phase4Runner] 终审名称审计: 扫描 {scan["scanned"]} Part，'
+                    f'findings {len(scan["findings"])}，fixed {len(fixed_keys)}，'
+                    f'residual_blocking {len(scan["residual_blocking"])}，'
+                    f'residual_advisory {len(scan["residual_advisory"])}，'
+                    f'canonical_absent {len(scan["canonical_absent"])}')
+        for f in scan['residual_blocking']:
+            logger.warning(f'[Phase4Runner] 终审 blocking 残留: Part {f["part"]} '
+                           f'"{f["wrong"]}"→"{f["right"]}" ×{f["count"]}（进 G4）')
+        return scan
+
+    @staticmethod
+    def _append_final_audit_revision(s, part_num: int, wrong: str, right: str,
+                                     pair_source: str) -> None:
+        """R5-2: 终审定点修复落 revision_log（trigger='final_audit'，只增不改）。
+
+        纯观测字段（聚合器不读 revision_log，不影响 revision_stats 与门禁），
+        供全量跑后统计各检查点贡献。
+        """
+        try:
+            log = list(s.data.get('revision_log') or [])
+            log.append({'part': part_num, 'p0_before': 0, 'revision_attempted': True,
+                        'revision_passed': True, 'residual_p0': 0,
+                        'trigger': 'final_audit', 'type': 'name_spotfix',
+                        'wrong_name': wrong, 'right_name': right,
+                        'pair_source': pair_source,
+                        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')})
+            s.data['revision_log'] = log
+        except Exception as e:
+            logger.info(f'[Phase4Runner] 终审 revision_log 落盘失败（不影响主流程）: {e}')
+
     async def run(self) -> None:
         s = self.service
         await s.emitter.emit(EventType.PHASE, {'phase': 'phase4', 'name': '风格优化', 'work_id': s.work_id}, work_id=s.work_id)
@@ -544,6 +760,14 @@ class Phase4Runner:
                 except Exception as e:
                     style_fail += 1
                     logger.info(f'[Phase4Runner] StyleOptimizer Part {part_num} 失败（保留原文）: {e}')
+            # R5-1: 违禁词典 + final_draft 确定性终审（双探测器，零 LLM 扫描）。
+            # 必须在 final_draft 建成之后（扫得到交付文本）、聚合之前
+            # （name_audit 进得了 G4 detail）；独立 try/except —— 异常只告警，
+            # 不得冒泡到外层 except（那会把 final_draft 重置为 parts、丢掉修复）。
+            try:
+                await self._final_name_audit(s, part_nums, consistency_agent, state_mock)
+            except Exception as audit_err:
+                logger.info(f'[Phase4Runner] 终审名称审计异常（不影响主流程）: {audit_err}')
             s.data['review_report'] = s._aggregate_review_results(per_part_results)
             s.data['phase'] = 'phase4'
             total_words = sum((len(t) for t in s.data['final_draft'].values()))
