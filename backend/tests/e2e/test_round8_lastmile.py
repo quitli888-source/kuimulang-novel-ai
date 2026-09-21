@@ -169,6 +169,9 @@ class _FakeService:
     def _save(self):
         self.save_count += 1
 
+    async def _check_pause(self):
+        return None
+
     @staticmethod
     def _review_failure(kind, part_num, err):
         return {'pass': False, 'overall_score': 3,
@@ -200,6 +203,61 @@ def _clean_logic(p0=0, verdict='ok'):
 def _clean_cons(p0_issues=None, score=8):
     return {'pass': True, 'overall_score': score, 'issues': p0_issues or [],
             'character_states': {}, 'verdict': 'ok'}
+
+
+def _clean_emotion(score=8):
+    return {'pass': True, 'emotion_score': score, 'resonance_score': score,
+            'immersion_score': score, 'verdict': 'ok', 'weaknesses': [],
+            'enhancement_suggestions': []}
+
+
+class _Phase4FakeService(_FakeService):
+    """Phase4Runner.run() 所需的最小 service 面（离线，零 LLM）。"""
+
+    def _build_review_state_mock(self):
+        return SimpleNamespace(parts=dict(self.data.get('parts', {}) or {}),
+                               final_draft=dict(self.data.get('final_draft', {}) or {}),
+                               consistency_flags=self.data.get('consistency_flags', []) or [])
+
+    @staticmethod
+    def _aggregate_review_results(per_part_results):
+        return aggregate_review_results(per_part_results)
+
+
+class _ScriptedReviewAgent:
+    """按 kind 确定性返回评审/风格结果的假 agent（记录 part 调用序列）。"""
+
+    def __init__(self, kind, fn=None):
+        self.kind = kind
+        self.calls: list = []
+        self._fn = fn
+
+    def execute(self, state, part_num, part_text):
+        self.calls.append(part_num)
+        if self._fn is not None:
+            return self._fn(part_num, part_text)
+        if self.kind == 'logic':
+            return _clean_logic()
+        if self.kind == 'emotion':
+            return _clean_emotion()
+        if self.kind == 'consistency':
+            return _clean_cons()
+        return part_text  # style: 原文 passthrough
+
+
+def _scripted_agents():
+    return (_ScriptedReviewAgent('logic'), _ScriptedReviewAgent('emotion'),
+            _ScriptedReviewAgent('consistency'), _ScriptedReviewAgent('style'))
+
+
+def _patch_phase4_agents(logic_agent, emotion_agent, cons_agent, style_agent):
+    """Phase4Runner.run() 内部 from-import，patch 源模块类对象。"""
+    return (
+        patch('core.agents.logic_review_agent.LogicReviewAgent', lambda: logic_agent),
+        patch('core.agents.emotion_review_agent.EmotionReviewAgent', lambda: emotion_agent),
+        patch('core.agents.consistency_review_agent.ConsistencyReviewAgent', lambda: cons_agent),
+        patch('core.agents.style_optimizer_agent.StyleOptimizerAgent', lambda: style_agent),
+    )
 
 
 def _clean_report():
@@ -462,6 +520,316 @@ def test_s1_targeted_edit_prompt_synced():
     logger.info('[test_s1_prompt_sync] PASS: 文件与 fallback 同步含退场修正规范')
 
 
+# ---------------- S2（R8-2）: 大纲级退场硬约束 ----------------
+
+# part_outline Part 6/12/14/17 条目（converge work.json 原文逐字沿用）
+R8_OUTLINE_6 = {'part': 6, 'title': '命牌破绽', 'phase': '冲突升级', 'word_count': 4500,
+                'core_event': '林尘破阵法反伤林烈，夺回命牌见“替”字。',
+                'emotion_target': '反转带来的惊怒',
+                'key_dialogue': '“我的命，你们判了十年。” “今日我自己判！”',
+                'end_hook': '林渊亲自出手，镇压命纹',
+                'causality': '因Part5大典杀局爆发，林尘绝地反击并发现命牌异常。',
+                'pacing': '快-慢-快', 'foreshadow_plant': [], 'foreshadow_reveal': []}
+R8_OUTLINE_12 = {'part': 12, 'title': '祖训真相', 'phase': '危机爆发', 'word_count': 5500,
+                 'core_event': '林尘得祖训玉简，揭露林渊伪造命牌、饲神养井。',
+                 'emotion_target': '真相大白的彻骨恨意',
+                 'key_dialogue': '“灾星是你写的，命也是你定的？” “可惜，我不认了。”',
+                 'end_hook': '玉简最后一帧是婴儿林尘入井',
+                 'causality': '因Part11确认神钥身份，林尘追查林家祖训找到林渊罪证。',
+                 'pacing': '快-慢-快', 'foreshadow_plant': [], 'foreshadow_reveal': ['F4', 'F6']}
+R8_OUTLINE_14 = {'part': 14, 'title': '井封崩解', 'phase': '危机爆发', 'word_count': 5500,
+                 'core_event': '林渊被井中黑雾吞噬，残玉与林尘印记合一。',
+                 'emotion_target': '绝望压顶的窒息',
+                 'key_dialogue': '“晚晴，松手！” “这一次，我不躲。”',
+                 'end_hook': '井底传来“第一千次轮回”',
+                 'causality': '因Part13林渊狗急跳墙引动封神井，林尘与苏晚晴被迫迎劫。',
+                 'pacing': '持续紧张', 'foreshadow_plant': [], 'foreshadow_reveal': ['F3']}
+R8_OUTLINE_17 = {'part': 17, 'title': '夺回阵眼', 'phase': '终极高潮', 'word_count': 5500,
+                 'core_event': '林尘出意识，联合林烈楚寒反攻，夺封井阵眼，林渊溃灭。',
+                 'emotion_target': '绝地反杀的酣畅',
+                 'key_dialogue': '“这一阵，我替家族摆。” “林渊，你的长生到头了。”',
+                 'end_hook': '林渊狂笑“祂醒了”',
+                 'causality': '因Part16林尘定下封印之法，外界反攻与林渊势力总清算。',
+                 'pacing': '快-慢-快', 'foreshadow_plant': [], 'foreshadow_reveal': []}
+
+
+def _outline_service(outline):
+    return _FakeService({
+        'name_registry': _r8_registry(),
+        'character_state_track': {'林渊': 'Part8 死亡: 林渊已死，碑林在学他说话'},
+        'established_facts': R8_DEPARTED_FACTS,
+        'characters': [dict(c) for c in R8_CHARACTERS],
+        'part_outline': outline,
+        'revision_log': [],
+    })
+
+
+def test_outline_guard_violations_real_replay():
+    """S2 验收 1/2: 真实大纲回放 —— Part 6（最早退场 Part 4 修正的直接证据）/
+    14/17 命中；Part 12 回顾性揭露不命中（防误报合法回顾）。"""
+    from services.writing_phase_runners import _outline_guard_violations
+    ledger = earliest_departure_parts(R8_DEPARTED_FACTS, R8_CHAR_NAMES)
+    outline = [R8_OUTLINE_6, R8_OUTLINE_12, R8_OUTLINE_14, R8_OUTLINE_17]
+    violations = _outline_guard_violations(outline, ledger)
+    hit = {(v['part'], v['field']) for v in violations}
+    assert (6, 'end_hook') in hit, violations
+    assert (14, 'core_event') in hit, violations
+    assert (17, 'core_event') in hit, violations
+    assert (17, 'end_hook') in hit, violations
+    # Part 12 回顾性揭露（合法）不命中；key_dialogue 中他人对林渊的喊话合法
+    assert not any(v['part'] == 12 for v in violations), violations
+    assert not any(v['part'] == 17 and v['field'] == 'key_dialogue' for v in violations), violations
+    # 退场 Part 之前的条目不检（part <= dep_part）
+    assert all(v['part'] > ledger['林渊']['dep_part'] for v in violations)
+    logger.info('[test_outline_violations] PASS: 6/14/17 命中，12 合法回顾不命中')
+
+
+def test_outline_guard_rewrite_three_fields_only():
+    """S2 验收 1: 条目级改写 —— 只改三字段文本，word_count/foreshadow 数组/
+    title/phase 逐字节不变；关键事件词保留；revision_log outline_guard 留痕。"""
+    from services.writing_phase_runners import _guard_outline_departed
+    import core.llm_client as llm_client
+    outline = [dict(R8_OUTLINE_14), dict(R8_OUTLINE_17)]
+    service = _outline_service(outline)
+    before_snapshot = json.dumps(outline, ensure_ascii=False, sort_keys=True)
+    calls = []
+
+    def fake_call_llm_json(**kwargs):
+        calls.append(kwargs)
+        if kwargs.get('agent') != 'outline_guard':
+            return {}
+        user = kwargs.get('user_prompt') or ''
+        if '## Part 14' in user:
+            # 归因形态改写：保留 吞噬/合一，碑林借林渊形貌
+            return {'core_event': '碑林借林渊的形貌被井中黑雾吞噬，残玉与林尘印记合一。',
+                    'key_dialogue': R8_OUTLINE_14['key_dialogue'],
+                    'end_hook': R8_OUTLINE_14['end_hook']}
+        # Part 17：保留 反攻/夺封/溃灭
+        return {'core_event': '林尘出意识，联合林烈楚寒反攻，夺封井阵眼，碑林借林渊的形貌溃灭。',
+                'key_dialogue': R8_OUTLINE_17['key_dialogue'],
+                'end_hook': '碑林学他狂笑“祂醒了”'}
+
+    with patch.object(llm_client, 'call_llm_json', side_effect=fake_call_llm_json):
+        rewritten = asyncio.run(_guard_outline_departed(service))
+    assert rewritten == {14, 17}, rewritten
+    assert len(calls) == 2, f'每违规条目恰好 1 次 LLM 调用: {len(calls)}'
+    # Part 14 三字段改写 + 关键事件词保留
+    e14 = outline[0]
+    assert '碑林借林渊的形貌' in e14['core_event'] and '吞噬' in e14['core_event']
+    assert '合一' in e14['core_event']
+    assert '溃灭' in outline[1]['core_event']
+    assert '反攻' in outline[1]['core_event'] and '夺封' in outline[1]['core_event']
+    # 其余字段逐字节不变（与快照差集只含三字段）
+    after = json.dumps(outline, ensure_ascii=False, sort_keys=True)
+    for entry in (R8_OUTLINE_14, R8_OUTLINE_17):
+        pass
+    assert outline[0]['word_count'] == 5500 and outline[1]['word_count'] == 5500
+    assert outline[0]['foreshadow_reveal'] == ['F3'] and outline[0]['title'] == '井封崩解'
+    assert outline[0]['phase'] == '危机爆发' and outline[0]['pacing'] == '持续紧张'
+    assert outline[1]['key_dialogue'] == R8_OUTLINE_17['key_dialogue']
+    assert before_snapshot != after, '三字段文本应已改写'
+    # revision_log outline_guard 留痕（只增不改，纯观测）
+    guard_entries = [e for e in service.data['revision_log']
+                     if e.get('type') == 'outline_guard']
+    assert len(guard_entries) == 2 and guard_entries[0]['part'] == 14
+    assert guard_entries[0]['before']['core_event'] == R8_OUTLINE_14['core_event']
+    assert guard_entries[0]['after']['core_event'] == e14['core_event']
+    # brief 附注（重写必须看到"本 Part 大纲已按退场规范改写"）
+    repairer = ConsistencyRepairer(service, _ScriptedAgent([]), _ScriptedAgent([]))
+    brief = repairer._build_revision_brief(14, _clean_logic(1), _clean_cons(),
+                                           part_text='x')
+    assert '大纲已按退场规范改写' in brief, brief
+    brief17 = repairer._build_revision_brief(17, _clean_logic(1), _clean_cons(),
+                                             part_text='x')
+    assert '大纲已按退场规范改写' in brief17
+    logger.info('[test_outline_rewrite] PASS: 三字段改写 + 逐字节不变 + 留痕 + brief 附注')
+
+
+def test_outline_guard_rejects_bad_rewrite():
+    """S2 验收 4: 改写校验不过（关键事件词丢失/仍 illegal/引入名册角色）→
+    保留原大纲 + advisory 日志，不静默跳过。"""
+    from services.writing_phase_runners import _guard_outline_departed
+    import core.llm_client as llm_client
+    outline = [dict(R8_OUTLINE_17)]
+    service = _outline_service(outline)
+    before = json.dumps(outline, ensure_ascii=False, sort_keys=True)
+
+    def bad_json(**kwargs):
+        # 丢掉"溃灭"（关键事件词丢失）且仍留实体形态
+        return {'core_event': '林尘出意识，联合林烈楚寒反攻，夺封井阵眼。',
+                'key_dialogue': R8_OUTLINE_17['key_dialogue'],
+                'end_hook': R8_OUTLINE_17['end_hook']}
+
+    with patch.object(llm_client, 'call_llm_json', side_effect=bad_json):
+        rewritten = asyncio.run(_guard_outline_departed(service))
+    assert rewritten == set(), '校验不过不得落盘'
+    assert json.dumps(outline, ensure_ascii=False, sort_keys=True) == before
+    assert not [e for e in service.data['revision_log']
+                if e.get('type') == 'outline_guard'], '失败不得留 outline_guard 条目'
+    # 非 dict 返回 → 同样保留原大纲
+    with patch.object(llm_client, 'call_llm_json', side_effect=lambda **k: 'x'):
+        assert asyncio.run(_guard_outline_departed(service)) == set()
+    # 调用异常 → 保留原大纲
+    def boom(**kwargs):
+        raise RuntimeError('llm down')
+
+    with patch.object(llm_client, 'call_llm_json', side_effect=boom):
+        assert asyncio.run(_guard_outline_departed(service)) == set()
+    assert json.dumps(outline, ensure_ascii=False, sort_keys=True) == before
+    logger.info('[test_outline_reject] PASS: 校验不过保留原大纲 + advisory')
+
+
+def test_outline_guard_kill_switch():
+    """S2 验收 5: KML_OUTLINE_DEPARTED_GUARD=0 → 零调用、大纲原样。"""
+    from services.writing_phase_runners import _guard_outline_departed
+    import core.llm_client as llm_client
+    outline = [dict(R8_OUTLINE_14)]
+    service = _outline_service(outline)
+    before = json.dumps(outline, ensure_ascii=False, sort_keys=True)
+    calls = []
+
+    def fake(**kwargs):
+        calls.append(kwargs)
+        return {}
+
+    os.environ['KML_OUTLINE_DEPARTED_GUARD'] = '0'
+    try:
+        with patch.object(llm_client, 'call_llm_json', side_effect=fake):
+            rewritten = asyncio.run(_guard_outline_departed(service))
+    finally:
+        os.environ.pop('KML_OUTLINE_DEPARTED_GUARD', None)
+    assert rewritten == set() and calls == []
+    assert json.dumps(outline, ensure_ascii=False, sort_keys=True) == before
+    logger.info('[test_outline_killswitch] PASS: kill-switch 零调用')
+
+
+def test_outline_guard_phase3_precheck_before_writer():
+    """S2 验收 3: Phase 3 写 Part N 前预检在 writer 执行前触发（脚本 agent
+    调用计数 + 顺序），writer 拿到改写后大纲（同一 list 引用）。"""
+    import services.writing_service as ws
+    import services.writing_phase_runners as wpr
+    import core.llm_client as llm_client
+    from core.agents.part_writer_agent import PartWriterAgent
+    # 林渊 Part 1 死亡 → Part 2 大纲条目（林渊亲自出手）应在写 Part 2 前被改写
+    facts = {'version': 1, 'facts': [
+        {'id': 'F1_1', 'part_num': 1, 'category': 'character', 'subject': '林渊',
+         'predicate': '死亡', 'text': '林渊在井边身死', 'quote': '',
+         'superseded_by': None}]}
+    outline = [
+        {'part': 1, 'title': '井边', 'phase': '开局', 'word_count': 5000,
+         'core_event': '林渊巡井三十年，终于坠井', 'key_dialogue': '', 'end_hook': '林渊死了',
+         'foreshadow_plant': [], 'foreshadow_reveal': []},
+        {'part': 2, 'title': '碑鸣', 'phase': '升级', 'word_count': 5000,
+         'core_event': '林渊亲自出手，镇压命纹', 'key_dialogue': '', 'end_hook': '风停',
+         'foreshadow_plant': [], 'foreshadow_reveal': []},
+    ]
+    service = _FakeService({
+        'name_registry': _r8_registry(),
+        'established_facts': facts,
+        'characters': [dict(c) for c in R8_CHARACTERS],
+        'part_outline': outline, 'parts': {}, 'part_summaries': {},
+        'revision_log': [],
+    })
+    service.cfg = SimpleNamespace(part_count=2, target_word_count=10000,
+                                  confirm_mode=False)
+    events: list = []
+    seen_outlines: dict = {}
+
+    def fake_call_llm_json(**kwargs):
+        if kwargs.get('agent') == 'outline_guard':
+            events.append('guard')
+            return {'core_event': '碑林借林渊形貌出手，镇压命纹',
+                    'key_dialogue': '', 'end_hook': '风停'}
+        return {}
+
+    def fake_writer_execute(self, state, part_num, **kwargs):
+        events.append(('writer', part_num))
+        seen_outlines[part_num] = state.part_outline[part_num - 1]
+        return {'success': True, 'content': f'Part {part_num} 正文。' * 300,
+                'word_count': 3000}
+
+    ws._writing_state[service.work_id] = {'phase': 'idle', 'current_part': 0,
+                                          'total_parts': 2, 'running': False}
+    try:
+        with patch.object(llm_client, 'call_llm_json', side_effect=fake_call_llm_json), \
+                patch.object(PartWriterAgent, 'execute', fake_writer_execute), \
+                patch.object(wpr, 'get_all_memory', lambda: ''):
+            asyncio.run(wpr.Phase3Runner(service).run(start_from=1))
+    finally:
+        ws._writing_state.pop(service.work_id, None)
+    # guard 在 Part 2 writer 之前触发（Part 1 无违规 → guard 只在 Part 2 前生效）
+    assert events[0] == 'guard', events
+    assert ('writer', 1) in events and ('writer', 2) in events
+    assert events.index('guard') < events.index(('writer', 2)), events
+    # writer 拿到改写后大纲（Part 2 core_event 已归因）
+    assert '碑林借林渊形貌' in seen_outlines[2]['core_event'], seen_outlines[2]
+    assert seen_outlines[2]['word_count'] == 5000, 'word_count 不得被动'
+    logger.info('[test_outline_phase3] PASS: 写前预检先于 writer + 改写后大纲生效')
+
+
+def test_outline_guard_phase4_entry_clears_progress():
+    """S2 验收 3b: pass 启动预检改写大纲 → 受影响 Part 清除 review progress
+    （重审+修复闭环）；未受影响 Part 不重审。"""
+    from services.writing_phase_runners import Phase4Runner
+    import core.llm_client as llm_client
+    facts = {'version': 1, 'facts': [
+        {'id': 'F1_1', 'part_num': 1, 'category': 'character', 'subject': '林渊',
+         'predicate': '死亡', 'text': '林渊在井边身死', 'quote': '',
+         'superseded_by': None}]}
+    outline = [
+        {'part': 1, 'title': '井边', 'phase': '开局', 'word_count': 5000,
+         'core_event': '林渊巡井三十年，终于坠井', 'key_dialogue': '', 'end_hook': '林渊死了',
+         'foreshadow_plant': [], 'foreshadow_reveal': []},
+        {'part': 2, 'title': '碑鸣', 'phase': '升级', 'word_count': 5000,
+         'core_event': '林渊亲自出手，镇压命纹', 'key_dialogue': '', 'end_hook': '风停',
+         'foreshadow_plant': [], 'foreshadow_reveal': []},
+    ]
+    parts = {'1': '林渊巡井三十年，终于坠井。' + '井水无声。' * 100,
+             '2': '碑林呜呜作响，命纹明亮。' + '风停了。' * 100}
+    service = _Phase4FakeService({
+        'name_registry': _r8_registry(),
+        'established_facts': facts,
+        'characters': [dict(c) for c in R8_CHARACTERS],
+        'part_outline': outline, 'parts': parts, 'phase': 'phase3_part2',
+        'phase4_review_progress': [
+            {'part': 1, 'logic_result': _clean_logic(), 'emotion_result': _clean_emotion(),
+             'consistency_result': _clean_cons(), 'repair_note': None, 'needs_rerun': False},
+            {'part': 2, 'logic_result': _clean_logic(), 'emotion_result': _clean_emotion(),
+             'consistency_result': _clean_cons(), 'repair_note': None, 'needs_rerun': False}],
+        'revision_log': [],
+    })
+    la, ea, ca, sa = _scripted_agents()
+    patches = _patch_phase4_agents(la, ea, ca, sa)
+
+    def fake_call_llm_json(**kwargs):
+        if kwargs.get('agent') == 'outline_guard':
+            return {'core_event': '碑林借林渊形貌出手，镇压命纹',
+                    'key_dialogue': '', 'end_hook': '风停'}
+        return {}
+
+    with patches[0], patches[1], patches[2], patches[3], \
+            patch.object(llm_client, 'call_llm_json', side_effect=fake_call_llm_json):
+        asyncio.run(Phase4Runner(service).run())
+    # Part 2 大纲已改写 + progress 清除 → 只重审 Part 2
+    assert '碑林借林渊形貌' in outline[1]['core_event']
+    assert la.calls == [2], la.calls
+    assert [e for e in service.data['revision_log']
+            if e.get('type') == 'outline_guard'], 'outline_guard 留痕'
+    logger.info('[test_outline_phase4] PASS: pass 启动预检 + progress 清除闭环')
+
+
+def test_outline_guard_prompt_synced():
+    """S2: prompts/outline_guard.txt 与内嵌 fallback 同含硬约束（R5-4 纪律）。"""
+    from services.writing_phase_runners import OUTLINE_GUARD_SYSTEM
+    prompt_file = (_HERE.parent.parent.parent / 'prompts'
+                   / 'outline_guard.txt').read_text(encoding='utf-8')
+    for constraint in ('只改归因形态', '关键事件词', '不得引入角色名册之外的任何姓名',
+                       'core_event'):
+        assert constraint in OUTLINE_GUARD_SYSTEM, constraint
+        assert constraint in prompt_file, constraint
+    logger.info('[test_outline_prompt_sync] PASS: 文件与 fallback 同步')
+
+
 # ---------------- S3（R8-3）: advisory 预算优先级重排 ----------------
 
 def _called_parts(service, cons_agent):
@@ -562,6 +930,13 @@ if __name__ == '__main__':
                test_s1_issue_literal_anchor_source,
                test_s1_kill_switch_degrades_to_r6_behavior,
                test_s1_targeted_edit_prompt_synced,
+               test_outline_guard_violations_real_replay,
+               test_outline_guard_rewrite_three_fields_only,
+               test_outline_guard_rejects_bad_rewrite,
+               test_outline_guard_kill_switch,
+               test_outline_guard_phase3_precheck_before_writer,
+               test_outline_guard_phase4_entry_clears_progress,
+               test_outline_guard_prompt_synced,
                test_s3_budget_priority_with_residual_join,
                test_s3_kill_switch_and_no_join,
                test_s3_residual_map_helper):

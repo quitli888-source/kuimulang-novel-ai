@@ -19,10 +19,13 @@ import traceback
 from typing import TYPE_CHECKING
 
 from api.sse import EventType
-from core.config import get_task_max_tokens
+from core.config import get_json_max_tokens, get_task_max_tokens
+from core.established_facts import earliest_departure_parts
 from core.memory_manager import get_all_memory
+from core.prompt_loader import load_prompt
 from core.text_utils import truncate
 from core.logger import get_logger
+from services.name_audit import classify_departed_occurrences
 
 if TYPE_CHECKING:
     from services.writing_service import WritingService
@@ -40,6 +43,30 @@ FORESHADOW_MIN_CONTENT_LEN = 4
 # (tier, part)。join 数据源为 per_part_results（终审时点 review_report 尚未
 # 生成，_final_name_audit 在 _aggregate_review_results 之前）。
 _KIND_PRIORITY = {'departed_reappearance': 0, 'canonical_absent': 1, 'advisory': 2}
+
+# R8-P0-2（S2）: 大纲级退场硬约束 —— prompts/outline_guard.txt 文件优先 +
+# 内嵌 fallback（R5-4 纪律）。条目级改写只改 core_event/key_dialogue/end_hook
+# 三字段文本，word_count/foreshadow 数组/title/phase 逐字节不动。
+OUTLINE_GUARD_SYSTEM = load_prompt('outline_guard', """你是长篇小说大纲修订专家。下面给出一条 Part 大纲条目，其中已退场角色（死亡/离开/失踪/退场）被安排了实体出场、直接对话、参战等违规形态。请只改归因形态，把该角色的实体行动改写为"碑林/碑影模仿其形貌或声音"式归因，或改为回忆、影像、他人提及、残留之念/执念残像形式。
+
+## 硬约束（必须严格遵守）
+
+1. 只输出一个 JSON 对象：{"core_event": "...", "key_dialogue": "...", "end_hook": "..."}，三个字段都必须给出（某字段原内容不涉及退场角色时原样返回）
+2. 只改归因形态：事件本身、对抗关系、情绪功能、剧情结果一律保留；原条目中的关键事件词（如"溃灭/吞噬/反攻/夺封/镇压"）必须原样保留
+3. 不得删除该角色在剧情中的功能位；不得改变剧情走向；不得引入角色名册之外的任何姓名
+4. 不得输出 Part 编号、标题、阶段、字数、伏笔等任何其他字段
+""")
+
+# S2 条目级改写可改字段（其余字段逐字节不动）
+_OUTLINE_GUARD_FIELDS = ('core_event', 'key_dialogue', 'end_hook')
+# S2 功能保留校验：实体动词表（与 name_audit 分类器同源规则）+ 结果词
+_OUTLINE_KEYWORD_WORDS = (
+    '出手', '踩', '碾', '抓', '握', '冷笑', '厉喝', '狂笑', '开口', '笑道',
+    '溃灭', '现身', '实体', '凝成', '扑', '杀', '挡', '按', '睁', '动', '拖',
+    '抬', '跪', '宣称', '揭示', '吞噬', '嘶吼', '惨叫', '挣扎',
+    '反攻', '夺封', '镇压', '合一', '献祭', '封印', '觉醒', '殒命', '消散',
+    '归位', '闭环', '破阵', '夺回', '揭露', '伪造', '饲神', '养井', '坠井',
+)
 
 
 def _residual_map_from_results(per_part_results) -> dict:
@@ -66,6 +93,231 @@ def _residual_map_from_results(per_part_results) -> dict:
             out[part] = count_p0(e.get('logic_result') or {},
                                  e.get('consistency_result') or {})
     return out
+
+
+# R8-P0-2（S2）: 大纲级退场硬约束（纯函数部分，零 LLM）
+
+def _outline_guard_violations(outline, ledger, target_parts=None) -> list:
+    """对 part > dep_part 的大纲条目跑分类器（与 S1 同库规则，一次实现两处消费）。
+
+    Args:
+        outline: s.data['part_outline']（容忍脏数据）
+        ledger: earliest_departure_parts 产物（最早退场 Part）
+        target_parts: 限定检查的 Part 集合（None = 全部）
+
+    Returns:
+        [{part, field, character, span, reason}, ...]（illegal 命中）
+    """
+    out: list = []
+    for idx, entry in enumerate(outline or []):
+        if not isinstance(entry, dict):
+            continue
+        try:
+            part_num = int(entry.get('part') or idx + 1)
+        except (TypeError, ValueError):
+            continue
+        if target_parts is not None and part_num not in target_parts:
+            continue
+        for name, lent in (ledger or {}).items():
+            if part_num <= lent.get('dep_part', 0):
+                continue
+            for field in _OUTLINE_GUARD_FIELDS:
+                text = entry.get(field) or ''
+                if not isinstance(text, str) or not text:
+                    continue
+                try:
+                    items = classify_departed_occurrences(text, lent, part_num=part_num)
+                except Exception as e:
+                    logger.info(f'[outline_guard] 分类异常（Part {part_num} {field}，跳过）: {e}')
+                    continue
+                for item in items:
+                    if item['kind'] == 'illegal':
+                        out.append({'part': part_num, 'field': field,
+                                    'character': name, 'span': item['span'],
+                                    'reason': item['reason']})
+    return out
+
+
+def _outline_guard_keywords(before_text: str, after_text: str) -> list:
+    """功能保留校验：原条目抽取的实体动词/结果词子集必须仍在改写文本中。"""
+    missing = [w for w in _OUTLINE_KEYWORD_WORDS
+               if w in before_text and w not in after_text]
+    return missing
+
+
+def _outline_rewrite_entry_ok(before_entry: dict, after_entry: dict, ledger: dict,
+                              registry: dict, part_num: int = None) -> tuple:
+    """S2 改写后校验（全部满足才落盘；纯确定性）。
+
+    ① 分类器对改写后三字段 illegal=0（按 part_num>dep_part 口径，与扫描一致）；
+    ② 长度 ±30% 内；
+    ③ 关键事件词保留（原条目与改写文本的字面交集判定）；
+    ④ 不引入名册外姓名（名册 canonical 在改写中出现但原条目没有 → 拒）。
+    """
+    before_text = '。'.join(str(before_entry.get(f) or '') for f in _OUTLINE_GUARD_FIELDS)
+    after_text = '。'.join(str(after_entry.get(f) or '') for f in _OUTLINE_GUARD_FIELDS)
+    # ① illegal=0
+    for name, lent in (ledger or {}).items():
+        if part_num is not None and part_num <= lent.get('dep_part', 0):
+            continue
+        for field in _OUTLINE_GUARD_FIELDS:
+            text = after_entry.get(field) or ''
+            if not isinstance(text, str) or not text:
+                continue
+            for item in classify_departed_occurrences(text, lent, part_num=part_num):
+                if item['kind'] == 'illegal':
+                    return False, f'改写后仍 illegal: {name} {field}'
+    # ② 长度 ±30%
+    for field in _OUTLINE_GUARD_FIELDS:
+        b = str(before_entry.get(field) or '')
+        a = str(after_entry.get(field) or '')
+        if b and abs(len(a) - len(b)) > 0.30 * len(b):
+            return False, f'{field} 长度超 ±30%'
+    # ③ 关键事件词保留
+    missing = _outline_guard_keywords(before_text, after_text)
+    if missing:
+        return False, f'关键事件词丢失: {missing[:3]}'
+    # ④ 不引入名册外姓名（名册 canonical 新增出现即拒）
+    for name in (registry or {}):
+        if isinstance(name, str) and name and name in after_text and name not in before_text:
+            return False, f'引入名册角色 {name}'
+    return True, ''
+
+
+async def _guard_outline_departed(s, target_parts=None) -> set:
+    """R8-P0-2（S2）: 大纲级退场硬约束驱动 —— 扫描 + 条目级 LLM 改写（≤1 次/违规条目）。
+
+    钩子两处（02_review §1.2.2 强制修正一，Phase 2 出口不可行——彼时无 facts）：
+    (a) Phase 3 写 Part N 前预检（facts<N 已存在，该 Part 未生成——无文本冲突）；
+    (b) Phase4Runner.run() 入口（converge/reval pass 启动时全量预检）。
+    改写只动 core_event/key_dialogue/end_hook 三字段文本；revision_log 增
+    {'type': 'outline_guard', ...}（只增不改，纯观测不进聚合口径）；失败 →
+    advisory 日志交人工，不静默跳过。kill-switch KML_OUTLINE_DEPARTED_GUARD=0。
+
+    Returns:
+        被成功改写的 Part 集合（调用方据此清除 phase4_review_progress 条目，
+        走"重审→修复"闭环——大纲改了文本不会自动改）。
+    """
+    if os.environ.get('KML_OUTLINE_DEPARTED_GUARD', '1') == '0':
+        return set()
+    try:
+        facts_raw = s.data.get('established_facts')
+        char_names = [c.get('name', '') for c in (s.data.get('characters') or [])
+                      if isinstance(c, dict) and c.get('name')]
+        if not char_names:
+            registry_names = s.data.get('name_registry') or {}
+            char_names = [n for n in registry_names if isinstance(n, str)]
+        ledger = earliest_departure_parts(facts_raw, char_names)
+        if not ledger:
+            return set()
+        outline = s.data.get('part_outline') or []
+        if not isinstance(outline, list):
+            return set()
+        registry = s.data.get('name_registry') or {}
+        if not isinstance(registry, dict):
+            registry = {}
+        violations = _outline_guard_violations(outline, ledger, target_parts)
+        if not violations:
+            return set()
+        # part_num → 条目定位（优先按 entry['part'] 匹配，索引兜底——稀疏大纲/
+        # 非连续编号场景不越界）
+        entry_index: dict = {}
+        for idx, entry in enumerate(outline):
+            if not isinstance(entry, dict):
+                continue
+            try:
+                entry_index[int(entry.get('part') or idx + 1)] = idx
+            except (TypeError, ValueError):
+                continue
+        by_part: dict = {}
+        for v in violations:
+            by_part.setdefault(v['part'], []).append(v)
+        rewritten: set = set()
+        for part_num in sorted(by_part):
+            idx = entry_index.get(part_num, part_num - 1)
+            if not (0 <= idx < len(outline)) or not isinstance(outline[idx], dict):
+                continue
+            entry = outline[idx]
+            new_entry = await _rewrite_outline_entry(s, part_num, entry,
+                                                     by_part[part_num], ledger, registry)
+            if new_entry is None:
+                logger.warning(f'[outline_guard] Part {part_num} 大纲条目改写失败/校验不过，'
+                               f'保留原大纲（advisory，待人工核查）')
+                continue
+            before = {f: entry.get(f) for f in _OUTLINE_GUARD_FIELDS}
+            for f in _OUTLINE_GUARD_FIELDS:
+                if f in new_entry:
+                    entry[f] = new_entry[f]  # 只改三字段文本，其余逐字节不动
+            rewritten.add(part_num)
+            try:
+                log = list(s.data.get('revision_log') or [])
+                log.append({
+                    'part': part_num, 'p0_before': 0, 'revision_attempted': True,
+                    'revision_passed': False, 'residual_p0': None,
+                    'type': 'outline_guard', 'trigger': 'outline_guard',
+                    'violations': [{'field': v['field'], 'character': v['character'],
+                                    'reason': v['reason']} for v in by_part[part_num]],
+                    'before': before,
+                    'after': {f: entry.get(f) for f in _OUTLINE_GUARD_FIELDS},
+                    'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')})
+                s.data['revision_log'] = log
+            except Exception as log_err:
+                logger.info(f'[outline_guard] revision_log 落盘失败（不影响主流程）: {log_err}')
+            s._save()
+            logger.info(f'[outline_guard] Part {part_num} 大纲条目已按退场规范改写'
+                        f'（{len(by_part[part_num])} 处违规，只改归因形态）')
+        return rewritten
+    except Exception as e:
+        logger.info(f'[outline_guard] 大纲退场硬约束异常（不影响主流程）: {e}')
+        return set()
+
+
+async def _rewrite_outline_entry(s, part_num: int, entry: dict, violations: list,
+                                 ledger: dict, registry: dict):
+    """S2 条目级大纲改写（≤1 次 LLM 调用/违规条目）。返回新三字段 dict 或 None。"""
+    from core.llm_client import call_llm_json
+    lines = [f'## Part {part_num} 大纲条目（需改写）']
+    for f in _OUTLINE_GUARD_FIELDS:
+        lines.append(f'{f}：{entry.get(f) or ""}')
+    lines.append('')
+    lines.append('## 退场角色记录（最早退场 Part + 名册标注）')
+    for name in sorted({v['character'] for v in violations}):
+        lent = ledger.get(name) or {}
+        lines.append(f'- {name}：首次死亡 Part {lent.get("dep_part", "?")}'
+                     f'（{lent.get("earliest_record", "")}）；'
+                     f'名册标注 Part {lent.get("last_dep_part", "?")} 死亡——严禁出场')
+    lines.append('')
+    lines.append('## 违规明细（确定性分类器命中）')
+    for v in violations:
+        lines.append(f'- {v["field"]}：{v["character"]} 以非法形态出现'
+                     f'（{v["reason"]}，例：{(v["span"] or "")[:40]}）')
+    lines.append('')
+    lines.append('合法形态词表：碑林/碑影模仿其形貌或声音、回忆、影像、他人提及、'
+                 '残留之念/执念残像。')
+    lines.append('请只改归因形态，保留事件、对抗关系与情绪功能，按协议输出 JSON。')
+    user_prompt = '\n'.join(lines)
+    try:
+        payload = await asyncio.to_thread(
+            call_llm_json, system_prompt=OUTLINE_GUARD_SYSTEM,
+            user_prompt=user_prompt, temperature=0.2,
+            max_tokens=get_json_max_tokens(), agent='outline_guard',
+            work_id=getattr(s, 'work_id', None))
+    except Exception as e:
+        logger.info(f'[outline_guard] Part {part_num} 改写调用失败（保留原大纲）: {e}')
+        return None
+    if not isinstance(payload, dict):
+        logger.info(f'[outline_guard] Part {part_num} 改写返回非 dict（保留原大纲）')
+        return None
+    new_entry = {}
+    for f in _OUTLINE_GUARD_FIELDS:
+        val = payload.get(f)
+        new_entry[f] = val if isinstance(val, str) else (entry.get(f) or '')
+    ok, reason = _outline_rewrite_entry_ok(entry, new_entry, ledger, registry,
+                                           part_num=part_num)
+    if not ok:
+        logger.info(f'[outline_guard] Part {part_num} 改写校验不过（{reason}），保留原大纲')
+        return None
+    return new_entry
 
 
 def check_foreshadow_reveal(foreshadowing: list, part_num: int, part_text: str) -> list:
@@ -256,6 +508,15 @@ class Phase3Runner:
             _writing_state[s.work_id]['current_part'] = i
             # R1-E: 本 Part 迭代用的正式角色名（Phase 2 档案；防常见词误报）
             char_names = [c.get('name', '') for c in (s.data.get('characters') or []) if isinstance(c, dict) and c.get('name')]
+            # R8-P0-2（S2）: 大纲级退场硬约束 —— 写 Part N 前预检（facts<N 已存在，
+            # 该 Part 尚未生成，大纲修正直接惠及生成、无文本冲突）。对
+            # part_outline[N-1:]（Part N 及以后）的条目跑分类器，illegal 命中则
+            # 条目级 LLM 改写（≤1 次/违规条目，只改三字段文本）； Phase 2 出口
+            # 钩子不可行（彼时无 facts，退场账本恒空）—— 02_review §1.2.2 强制修正
+            try:
+                await _guard_outline_departed(s, target_parts=set(range(i, total + 1)))
+            except Exception as og_err:
+                logger.info(f'[Phase3Runner] 大纲退场预检异常（不影响主流程）: {og_err}')
             done_ratio = (i - start_from) / max(total - start_from + 1, 1)
             part_progress = 55 + done_ratio * 25
             s.progress_callback(int(part_progress), f'开始创作 Part {i}/{total}')
@@ -742,6 +1003,23 @@ class Phase4Runner:
         from core.agents.emotion_review_agent import EmotionReviewAgent
         from core.agents.consistency_review_agent import ConsistencyReviewAgent
         try:
+            # R8-P0-2（S2）: converge/reval pass 启动时全量预检（Phase 3 被跳过的
+            # 场景的唯一钩子）。此时文本已存在——大纲改了文本不会自动改：受影响
+            # Part 清除 phase4_review_progress 条目（R6-4 既有机制），走
+            # "重审（仍报 P0）→ 修复（重写经 _RevisionStateProxy→TempStoryState
+            # .part_outline 自动拿到改写后大纲，链路已通零接线）→ 重审"闭环。
+            # 正常全量跑时 Phase 3 写前预检已改写，此处幂等零调用。
+            rewritten_parts = await _guard_outline_departed(s)
+            if rewritten_parts:
+                _prog = s.data.get('phase4_review_progress') or []
+                _kept = [e for e in _prog
+                         if not (isinstance(e, dict) and e.get('part') in rewritten_parts)]
+                if len(_kept) != len(_prog):
+                    s.data['phase4_review_progress'] = _kept
+                    s._save()
+                    logger.info(f'[Phase4Runner] R8-P0-2: 大纲退场改写 Part '
+                                f'{sorted(rewritten_parts)}，清除其 review progress'
+                                f'（重审+修复闭环，重写自动拿到改写后大纲）')
             state_mock = s._build_review_state_mock()
             part_nums: list = []
             for k, v in (s.data.get('parts', {}) or {}).items():

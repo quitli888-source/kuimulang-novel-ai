@@ -1401,6 +1401,19 @@ class ConsistencyRepairer:
         facts_block = self._facts_block(part_num)
         if facts_block:
             brief += '\n\n' + facts_block
+        # R8-P0-2（S2）: 本 Part 大纲已按退场规范改写 → brief 附注（重写自动拿到
+        # 改写后大纲：_RevisionStateProxy → TempStoryState.part_outline 同一 list，
+        # 零额外接线）；无改写条目的 Part 不附注（逐字节不变）
+        try:
+            for _e in reversed(self.service.data.get('revision_log') or []):
+                if isinstance(_e, dict) and _e.get('type') == 'outline_guard' \
+                        and _e.get('part') == part_num:
+                    brief += ('\n\n【注意】本 Part 大纲已按退场规范改写（退场角色只以'
+                              '碑林模仿/回忆/影像/他人提及/残留之念形式存在），重写必须'
+                              '与新大纲一致，不得把该角色写回实体形态。')
+                    break
+        except Exception as og_err:
+            logger.info(f'[ConsistencyRepairer] outline_guard 附注失败（不影响 brief）: {og_err}')
         return brief
 
     def _facts_block(self, part_num: int) -> str:
