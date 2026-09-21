@@ -902,6 +902,243 @@ def test_s2_spotfix_pass_branch_unchanged():
     logger.info('[test_s2_pass_branch] PASS: 通过分支行为不变')
 
 
+# ---------------- S3（R6-5）: SEARCH/REPLACE 定点编辑重写 ----------------
+
+from services.consistency_repair import (  # noqa: E402
+    TARGETED_EDIT_SYSTEM, _apply_targeted_edits, _edit_trigger_ok,
+    _issue_anchor,
+)
+
+R6_EDIT_PART_TEXT = (
+    '林尘跌入古井，残玉被苏晚晴收起。后来林尘却从怀中取出残玉把玩，径直走向井口。'
+    '他突言母亲当年亲手换过神纹之事，猛然推开了祠堂的朱漆大门。'
+    '井底青光一闪，苏晚晴的身影出现在石碑之后。守井人喃喃自语，说这是三十年来的异象。'
+)
+
+# SEARCH 片段均 ≥15 字（编辑协议硬闸）、在全文恰好出现 1 次
+R6_EDIT_S1 = '林尘却从怀中取出残玉把玩，径直'
+R6_EDIT_S2 = '他突言母亲当年亲手换过神纹之事'
+R6_EDIT_S3 = '，苏晚晴的身影出现在石碑之后。'
+R6_EDIT_R1 = '林尘只从袖中取出残玉端详，转身'
+R6_EDIT_R2 = '他无意间提及母亲换神纹的旧事'
+R6_EDIT_R3 = '，石碑之后闪过一道故人的旧影。'
+
+
+def _blocks(pairs):
+    """构造 SEARCH/REPLACE 编辑块文本（[(search, replace), ...]）。"""
+    return '\n'.join(f'<<<<<<< SEARCH\n{s}\n=======\n{r}\n>>>>>>> REPLACE'
+                     for s, r in pairs)
+
+
+R6_EDIT_BLOCKS = _blocks([(R6_EDIT_S1, R6_EDIT_R1),
+                          (R6_EDIT_S2, R6_EDIT_R2),
+                          (R6_EDIT_S3, R6_EDIT_R3)])
+R6_EDIT_EXPECTED = (R6_EDIT_PART_TEXT
+                    .replace(R6_EDIT_S1, R6_EDIT_R1)
+                    .replace(R6_EDIT_S2, R6_EDIT_R2)
+                    .replace(R6_EDIT_S3, R6_EDIT_R3))
+
+
+def _edit_issue(dimension, quote, claim, conflict, suggestion=''):
+    return {'level': 'P0', 'dimension': dimension, 'character': '',
+            'location': 'Part 3',
+            'description': f'{claim}：“{quote}”，{conflict}',
+            'suggestion': suggestion}
+
+
+R6_EDIT_ISSUES = [
+    _edit_issue('物品状态', R6_EDIT_S1, '物品位置矛盾',
+                '残玉在 Part 2 已被苏晚晴收起', '改为从袖中取出'),
+    _edit_issue('信息越界', R6_EDIT_S2, '信息越界',
+                '前文未揭示此信息', '改为无意提及'),
+    _edit_issue('状态连续性', R6_EDIT_S3, '退场角色复现',
+                '苏晚晴已退场', '改为故人旧影'),
+]
+
+
+def test_apply_targeted_edits_pure_function_guards():
+    """S3 验收 3/4: 应用器硬闸 —— 唯一性/≥15 字/±30%/非重叠/全文 10%/逐字。"""
+    # 前置：fixture 自身满足协议长度（SEARCH ≥15 且在全文唯一）
+    for s in (R6_EDIT_S1, R6_EDIT_S2, R6_EDIT_S3):
+        assert len(s) >= 15 and R6_EDIT_PART_TEXT.count(s) == 1
+    # 合法块：应用成功、块外文本逐字节不变
+    new_text, applied, failures = _apply_targeted_edits(R6_EDIT_PART_TEXT, R6_EDIT_BLOCKS)
+    assert applied == 3 and failures == [], (applied, failures)
+    assert new_text == R6_EDIT_EXPECTED
+    # SEARCH 不在正文逐字出现（模型改写）→ 块弃用，永不模糊匹配
+    t2, a2, f2 = _apply_targeted_edits(
+        R6_EDIT_PART_TEXT, _blocks([(R6_EDIT_S1.replace('却', '竟'), R6_EDIT_R1)]))
+    assert a2 == 0 and t2 == R6_EDIT_PART_TEXT and 'search_not_unique' in f2
+    # 唯一性硬闸：SEARCH 在正文出现 2 次 → 弃用（防改错位置，禁模糊匹配）
+    dup_base = R6_EDIT_PART_TEXT + R6_EDIT_PART_TEXT
+    t_dup, a_dup, f_dup = _apply_targeted_edits(
+        dup_base, _blocks([(R6_EDIT_S1, R6_EDIT_R1)]))
+    assert a_dup == 0 and t_dup == dup_base and 'search_not_unique' in f_dup
+    # SEARCH <15 字 → 弃用
+    t3, a3, f3 = _apply_targeted_edits(
+        R6_EDIT_PART_TEXT, _blocks([('林尘跌入古井', '林尘跌落古井')]))
+    assert a3 == 0 and any('too_short' in x for x in f3)
+    # REPLACE 超 ±30% → 弃用
+    t4, a4, f4 = _apply_targeted_edits(
+        R6_EDIT_PART_TEXT, _blocks([(R6_EDIT_S2, R6_EDIT_S2 + '足足三十余字')]))
+    assert a4 == 0 and 'replace_len_out_of_tolerance' in f4
+    # 块重叠：第二块与第一块在原文中重叠 → 第二块弃用、第一块应用
+    o1, o2 = '林尘跌入古井，残玉被苏晚晴收起', '残玉被苏晚晴收起。后来林尘却从'
+    assert R6_EDIT_PART_TEXT.count(o1) == 1 and R6_EDIT_PART_TEXT.count(o2) == 1
+    t5, a5, f5 = _apply_targeted_edits(
+        R6_EDIT_PART_TEXT,
+        _blocks([(o1, '林尘跌入古井，残玉被苏晚晴收好'), (o2, '残玉被苏晚晴收起。此后林尘却')]))
+    assert a5 == 1 and 'blocks_overlap' in f5
+    assert '残玉被苏晚晴收好' in t5
+    # 全文变化 >10% → 整体回退（3 块各 +4 字 / 全文 107 字 ≈ 11.2%）
+    guard_pairs = [(s, s + '底细种种') for s in (R6_EDIT_S1, R6_EDIT_S2, R6_EDIT_S3)]
+    t6, a6, f6 = _apply_targeted_edits(R6_EDIT_PART_TEXT, _blocks(guard_pairs))
+    assert a6 == 0 and t6 == R6_EDIT_PART_TEXT and 'total_len_exceeded' in f6
+    # 无有效块 / 块数 >3 取前 3
+    t7, a7, f7 = _apply_targeted_edits(R6_EDIT_PART_TEXT, '没有任何编辑块的普通文本')
+    assert a7 == 0 and 'no_valid_block' in f7
+    four = _blocks([(R6_EDIT_S1, R6_EDIT_R1), (R6_EDIT_S2, R6_EDIT_R2),
+                    (R6_EDIT_S3, R6_EDIT_R3),
+                    ('守井人喃喃自语，说这是三十年来的异象', '守井人喃喃自语，说起三十年旧事')])
+    t8, a8, _ = _apply_targeted_edits(R6_EDIT_PART_TEXT, four)
+    assert a8 == 3, '超过 3 块只取前 3'
+    logger.info('[test_apply_edits] PASS: 应用器六道硬闸 + 截断全部符合预期')
+
+
+def test_edit_trigger_requires_unique_anchor_per_p0():
+    """S3 触发条件: P0≤3 且每个 P0 有唯一 anchor；缺 anchor / P0>3 均不触发。"""
+    text = R6_EDIT_PART_TEXT
+    cons = _clean_cons(R6_EDIT_ISSUES)
+    ok, anchors = _edit_trigger_ok(text, _clean_logic(0), cons)
+    assert ok is True and len(anchors) == 3, anchors
+    # 引文在正文出现 2 次 → 无唯一 anchor → 不触发
+    dup_text = text + '后来林尘却从怀中取出残玉把玩，径直的消息传遍了祠堂。'
+    ok2, _ = _edit_trigger_ok(dup_text, _clean_logic(0), cons)
+    assert ok2 is False
+    # 无引号 span 的 issue → 无 anchor → 不触发
+    no_quote = _clean_cons([{'level': 'P0', 'dimension': '物品状态',
+                             'description': '物品位置矛盾但未给出引文',
+                             'location': 'Part 3'}])
+    assert _edit_trigger_ok(text, _clean_logic(0), no_quote)[0] is False
+    # P0 > 3 → 不触发
+    four = _clean_cons(R6_EDIT_ISSUES + [_edit_issue(
+        '知识合理性', '守井人喃喃自语，说这是三十年来的异象', '知识合理性', 'x')])
+    assert _edit_trigger_ok(text, _clean_logic(0), four)[0] is False
+    # logic p0_count 与明细不一致（无明细）→ 不触发
+    assert _edit_trigger_ok(text, _clean_logic(2), _clean_cons())[0] is False
+    # _issue_anchor：description 优先、location 兜底、长度下限
+    assert _issue_anchor(R6_EDIT_ISSUES[0], text) == R6_EDIT_S1
+    loc_issue = {'level': 'P0', 'description': '无引文描述',
+                 'location': "Part 3中从'林尘跌入古井，残玉被苏晚晴收起'起多处"}
+    assert _issue_anchor(loc_issue, text) == '林尘跌入古井，残玉被苏晚晴收起'
+    logger.info('[test_edit_trigger] PASS: 触发条件四类场景 + anchor 抽取双来源')
+
+
+def test_s3_edit_applied_saved_and_brief():
+    """S3 验收 1: 3 个 P0 各带唯一 anchor + 模型回 3 个合法块 → 应用成功、
+    块外文本逐字节不变、落编辑稿；编辑 prompt 含编号明细与全文。"""
+    service = _FakeService({'name_registry': {}, 'parts': {'3': R6_EDIT_PART_TEXT}})
+    repairer = _repairer(service, [_clean_logic(0)], [_clean_cons()])
+    edit_calls = []
+
+    def fake_call_llm(system, user, *a, **k):
+        edit_calls.append((system, user))
+        return R6_EDIT_BLOCKS
+
+    state_mock = _mock_state()
+    with patch('services.consistency_repair.call_llm', side_effect=fake_call_llm):
+        note = asyncio.run(repairer.maybe_repair_part(
+            3, R6_EDIT_PART_TEXT, _clean_logic(0),
+            _clean_cons(R6_EDIT_ISSUES), state_mock=state_mock))
+    assert note.get('revision_passed') is True, note
+    assert note.get('revision_edited') is True
+    assert note.get('first_pass_p0') == 3
+    saved = service.saved_chunks[3]
+    assert saved == R6_EDIT_EXPECTED, '块外文本逐字节不变'
+    assert state_mock.parts['3'] == saved and state_mock.final_draft['3'] == saved
+    # 编辑 prompt：system 是编辑协议、user 含编号明细行与全文
+    assert len(edit_calls) == 1
+    sys_p, user_p = edit_calls[0]
+    assert '<<<<<<< SEARCH' in sys_p and '逐字复制' in sys_p
+    assert '1. [Part 3] 物品位置矛盾' in user_p, 'brief 明细行须编号'
+    assert R6_EDIT_PART_TEXT in user_p, 'user 须含全文'
+    # revision_log 留痕（targeted_edit，纯观测不影响聚合器）
+    entry = [e for e in service.data['revision_log'] if e.get('type') == 'targeted_edit']
+    assert len(entry) == 1 and entry[0]['applied_blocks'] == 3
+    logger.info('[test_s3_applied] PASS: 编辑应用/落盘/编号 brief/留痕全部符合')
+
+
+def test_s3_no_edit_when_anchor_not_unique_falls_to_rewrite():
+    """S3 验收 2/6: anchor 出现 2 次 → 零编辑调用、直接落重写且文本未被改。"""
+    dup_text = R6_EDIT_PART_TEXT + '后来林尘却从怀中取出残玉把玩，径直的消息传遍了祠堂。'
+    service = _FakeService({'name_registry': {}, 'parts': {'3': dup_text}})
+    repairer = _repairer(service, [_clean_logic(0), _clean_logic(0)],
+                         [_clean_cons(), _clean_cons()])
+    edit_calls = []
+    rewrite_calls = []
+
+    def fake_call_llm(system, user, *a, **k):
+        edit_calls.append(system)
+        return R6_EDIT_BLOCKS
+
+    async def fake_rewrite(self, part_num, brief):
+        rewrite_calls.append(brief)
+        return '重写稿内容。' * 400, ''
+
+    with patch('services.consistency_repair.call_llm', side_effect=fake_call_llm), \
+         patch.object(ConsistencyRepairer, '_rewrite_once', fake_rewrite):
+        note = asyncio.run(repairer.maybe_repair_part(
+            3, dup_text, _clean_logic(0), _clean_cons(R6_EDIT_ISSUES),
+            state_mock=_mock_state()))
+    assert edit_calls == [], 'anchor 不唯一不得触发编辑'
+    assert len(rewrite_calls) == 1, '必须落全量重写'
+    assert service.saved_chunks[3] == '重写稿内容。' * 400
+    assert note.get('revision_passed') is True
+    logger.info('[test_s3_no_edit] PASS: 无唯一 anchor 零编辑调用落重写')
+
+
+def test_s3_edit_degraded_rolls_back_then_rewrite():
+    """S3 验收 5: 编辑后重审劣化 → 回退 base_text（编辑层），带原 base 继续
+    落重写；revision_log 双留痕（targeted_edit 劣化 + rewrite）。"""
+    service = _FakeService({'name_registry': {}, 'parts': {'3': R6_EDIT_PART_TEXT}})
+    # 编辑后重审：logic 2 P0 + cons 1 新类别 P0 → residual 3 ≥ 2 → 劣化
+    edit_logic = _clean_logic(2, verdict='编辑后仍矛盾')
+    edit_cons = _clean_cons([{'level': 'P0', 'dimension': '知识合理性',
+                              'description': '编辑引入信息越界', 'location': 'Part 3'}])
+    repairer = _repairer(service, [edit_logic, _clean_logic(0)],
+                         [edit_cons, _clean_cons()])
+    rewrite_calls = []
+
+    async def fake_rewrite(self, part_num, brief):
+        rewrite_calls.append(brief)
+        return '重写稿内容。' * 400, ''
+
+    with patch('services.consistency_repair.call_llm',
+               side_effect=lambda *a, **k: R6_EDIT_BLOCKS), \
+         patch.object(ConsistencyRepairer, '_rewrite_once', fake_rewrite):
+        note = asyncio.run(repairer.maybe_repair_part(
+            3, R6_EDIT_PART_TEXT, _clean_logic(0),
+            _clean_cons(R6_EDIT_ISSUES), state_mock=_mock_state()))
+    # 编辑层回退后重写通过 → 最终落重写稿；但编辑劣化事件留痕
+    assert note.get('revision_passed') is True and len(rewrite_calls) == 1
+    edit_entries = [e for e in service.data['revision_log']
+                    if e.get('type') == 'targeted_edit']
+    assert len(edit_entries) == 1 and edit_entries[0]['revision_degraded'] is True
+    assert edit_entries[0]['residual_p0'] == 3
+    logger.info('[test_s3_degraded] PASS: 编辑劣化回退 + 留痕 + 继续重写')
+
+
+def test_s3_targeted_edit_prompt_file_and_fallback_synced():
+    """S3 验收 7: 编辑 prompt 文件与内嵌 fallback 同含协议硬约束。"""
+    prompt_file = (_HERE.parent.parent.parent / 'prompts'
+                   / 'targeted_edit.txt').read_text(encoding='utf-8')
+    for constraint in ('<<<<<<< SEARCH', '>>>>>>> REPLACE', '逐字复制',
+                       '最多 3 个编辑块', '±30%'):
+        assert constraint in TARGETED_EDIT_SYSTEM, constraint
+        assert constraint in prompt_file, constraint
+    logger.info('[test_s3_prompt_sync] PASS: 文件与 fallback 同步含硬约束')
+
+
 if __name__ == '__main__':
     logger.info('=' * 60)
     logger.info('test_round6_converge.py —— Round 6 收敛轮回归（mock LLM）')
@@ -928,7 +1165,13 @@ if __name__ == '__main__':
                test_logic_detail_kill_switch_and_part1,
                test_logic_detail_prompt_file_and_fallback_synced,
                test_s2_partial_applied_falls_through_to_rewrite,
-               test_s2_spotfix_pass_branch_unchanged):
+               test_s2_spotfix_pass_branch_unchanged,
+               test_apply_targeted_edits_pure_function_guards,
+               test_edit_trigger_requires_unique_anchor_per_p0,
+               test_s3_edit_applied_saved_and_brief,
+               test_s3_no_edit_when_anchor_not_unique_falls_to_rewrite,
+               test_s3_edit_degraded_rolls_back_then_rewrite,
+               test_s3_targeted_edit_prompt_file_and_fallback_synced):
         fn()
         print(f'PASS {fn.__name__}')
     logger.info('\nALL PASS')

@@ -33,9 +33,12 @@ import re
 import time
 
 from api.sse import EventType
+from core.config import get_json_max_tokens
 from core.established_facts import EstablishedFacts
+from core.llm_client import call_llm
 from core.logger import get_logger
 from core.name_registry import promoted_candidates, render_name_roster
+from core.prompt_loader import load_prompt
 from core.text_utils import truncate
 from services.name_audit import append_audit_log, record_name_pairs
 
@@ -58,6 +61,44 @@ _DIRECTIVE_MARGIN = 2        # 窗口余量：防 3 字指令词跨 6 字边界�
 # 含功能词的 span 视为短语而非名字（大长老林渊 / 您的传讯玉 这类直接排除）
 _SPAN_STOP_CHARS = '的了之是在被将与其为和或也'
 _QUOTE_CHARS = '「」『』“”‘’"\''
+
+# R6-5（S3）: 定点编辑（SEARCH/REPLACE 锚块）—— prompts/targeted_edit.txt
+# 文件优先 + 内嵌 fallback（R5-4 纪律）。编辑面从 4000 字缩到 ≤90 字，
+# 直接攻击"全量重写引入新问题"（reval：8 个触发修复的 Part 6 个劣化）。
+TARGETED_EDIT_SYSTEM = load_prompt("targeted_edit", """你是长篇小说修订专家。上一轮评审检出了本 Part 的 P0 级问题（见下方修订指令），请用 SEARCH/REPLACE 编辑块逐条修正——只改动问题所在的最短片段，其余一字不动。
+
+## 编辑协议（必须严格遵守）
+
+对每个需要修正的问题，输出一个编辑块（每个块前用一行注明针对的问题编号）：
+
+【问题 1】
+<<<<<<< SEARCH
+<与原文逐字相同的片段，不少于 15 字，在全文恰好出现 1 次>
+=======
+<替换片段，长度不得超过原文片段的 ±30%>
+>>>>>>> REPLACE
+
+## 强约束
+
+1. 只输出最多 3 个编辑块；不得输出编辑块之外的任何内容
+2. SEARCH 必须从原文逐字复制（客户端会做逐字校验，改写或幻觉的片段会被弃用）
+3. 不得改动编辑块之外的任何一字；不得改变剧情走向
+4. 不得引入角色名册之外的任何姓名
+5. 替换片段长度不得超过 SEARCH 的 ±30%
+""")
+
+# R6-5（S3）: 编辑协议常量（确定性硬闸，零相似度——守 Round 1 负面清单）
+_EDIT_MAX_BLOCKS = 3              # 最多编辑块数（与 P0 触发上限一致）
+_EDIT_MIN_SEARCH_LEN = 15         # SEARCH 最短长度
+_EDIT_LEN_TOLERANCE = 0.30        # 替换片段长度 ±30%
+_EDIT_TOTAL_LEN_TOLERANCE = 0.10  # 全文长度变化 ≤10%（保 G2/G3 密度）
+_EDIT_ANCHOR_MIN = 10             # anchor 引文最短长度（定位信号下限）
+# anchor 引文抽取：description/location 的引号 span（R5-4 三步工序强制 ≤40 字
+# 引文 / R6-1 logic 明细 description 的 原文：“anchor” 段）
+_ANCHOR_QUOTE_RE = re.compile('[「」『』“”‘’"\']([^「」『』“”‘’"\']{10,60})[「」『』“”‘’"\']')
+# 编辑块解析（严格正则切分；无法解析 → 调用方落回全量重写）
+_EDIT_BLOCK_RE = re.compile(
+    r'<<<<<<< SEARCH[^\n]*\n([\s\S]*?)\n=======[^\n]*\n([\s\S]*?)\n>>>>>>> REPLACE')
 
 
 class _RevisionStateProxy:
@@ -361,6 +402,110 @@ def _count_non_name_p0(logic_result: dict, consistency_result: dict) -> int:
     return n
 
 
+# ----------------- R6-5（S3）: 定点编辑（纯函数，可单测，零相似度） -----------------
+
+def _issue_anchor(issue: dict, part_text: str) -> str:
+    """R6-5（S3）: 从 issue 抽取可在正文唯一定位的原文引文（纯字面，零相似度）。
+
+    优先 description 的引号 span（R5-4 三步工序强制 ≤40 字引文 / R6-1 logic
+    明细 description 的 原文：“anchor” 段），取第一个在正文中恰好出现 1 次
+    且长度 ≥_EDIT_ANCHOR_MIN 的 span；找不到返回 ''（调用方放弃编辑、落回
+    全量重写——保守，无静默错误）。
+    """
+    text = part_text or ''
+    for field in ('description', 'location'):
+        for m in _ANCHOR_QUOTE_RE.finditer((issue or {}).get(field) or ''):
+            span = m.group(1)
+            if len(span) >= _EDIT_ANCHOR_MIN and text.count(span) == 1:
+                return span
+    return ''
+
+
+def _edit_trigger_ok(base_text: str, base_logic: dict, base_cons: dict) -> tuple:
+    """R6-5（S3）: 编辑触发条件（全部满足才走编辑）—— P0 总数 ≤3，且每个 P0
+    issue 都能取得唯一 anchor（consistency 引文 / R6-1 logic 明细 anchor）。
+
+    Returns:
+        (ok, anchors)——ok=False 时调用方落回全量重写。
+    """
+    p0_total = count_p0(base_logic, base_cons)
+    if p0_total <= 0 or p0_total > _EDIT_MAX_BLOCKS:
+        return False, []
+    p0_issues = ([i for i in ((base_logic or {}).get('issues') or [])
+                  if isinstance(i, dict) and i.get('level') == 'P0'
+                  and not i.get('_detail_placeholder')]
+                 + [i for i in ((base_cons or {}).get('issues') or [])
+                    if isinstance(i, dict) and i.get('level') == 'P0'])
+    if len(p0_issues) != p0_total:
+        return False, []  # 明细与计数不一致（占位/无明细）→ 保守放弃
+    anchors: list = []
+    for issue in p0_issues:
+        anchor = _issue_anchor(issue, base_text)
+        if not anchor:
+            return False, []
+        anchors.append(anchor)
+    return True, anchors
+
+
+def _apply_targeted_edits(base_text: str, raw_output: str) -> tuple:
+    """R6-5（S3）: 解析并应用 SEARCH/REPLACE 编辑块（纯函数，零相似度）。
+
+    每块校验（任一失败 → 该块不应用并记 failure）：
+      - base_text.count(search) == 1（唯一性硬闸，禁模糊匹配）
+      - len(search) >= 15
+      - abs(len(replace) - len(search)) <= 0.30 * len(search)（±30% 长度守卫）
+      - 块间在原文中不重叠
+    全文守卫：abs(len(new_text) - len(base_text)) <= 0.10 * len(base_text)
+    （保 G2/G3 密度不被破坏，超限则整体回退编辑）。
+
+    Returns:
+        (new_text, applied_count, failures)——applied_count==0 时 new_text ==
+        base_text（未改动；调用方落回全量重写）。
+    """
+    text = base_text or ''
+    blocks = _EDIT_BLOCK_RE.findall(raw_output or '')
+    if not blocks:
+        return text, 0, ['no_valid_block']
+    if len(blocks) > _EDIT_MAX_BLOCKS:
+        logger.info(f'[ConsistencyRepairer] 编辑块 {len(blocks)} 个超过上限 '
+                    f'{_EDIT_MAX_BLOCKS}，取前 {_EDIT_MAX_BLOCKS} 个')
+        blocks = blocks[:_EDIT_MAX_BLOCKS]
+    accepted: list = []   # (start, end, replace)
+    failures: list = []
+    for raw_search, raw_replace in blocks:
+        search = raw_search.strip('\r\n')
+        replace = raw_replace.strip('\r\n')
+        if len(search) < _EDIT_MIN_SEARCH_LEN:
+            failures.append(f'search_too_short({len(search)})')
+            continue
+        if text.count(search) != 1:
+            failures.append('search_not_unique')
+            continue
+        if abs(len(replace) - len(search)) > _EDIT_LEN_TOLERANCE * len(search):
+            failures.append('replace_len_out_of_tolerance')
+            continue
+        start = text.find(search)
+        end = start + len(search)
+        if any(start < e and b < end for b, e, _ in accepted):
+            failures.append('blocks_overlap')
+            continue
+        accepted.append((start, end, replace))
+    if not accepted:
+        return text, 0, failures or ['all_blocks_failed']
+    accepted.sort(key=lambda x: x[0])
+    parts: list = []
+    cursor = 0
+    for start, end, replace in accepted:
+        parts.append(text[cursor:start])
+        parts.append(replace)
+        cursor = end
+    parts.append(text[cursor:])
+    new_text = ''.join(parts)
+    if abs(len(new_text) - len(text)) > _EDIT_TOTAL_LEN_TOLERANCE * len(text):
+        return text, 0, failures + ['total_len_exceeded']
+    return new_text, len(accepted), failures
+
+
 def is_revision_degraded(p0_before: int, residual_p0: int,
                          first_cons: dict, new_cons: dict,
                          first_logic: dict, new_logic: dict) -> bool:
@@ -444,6 +589,13 @@ class ConsistencyRepairer:
         registry = s.data.get('name_registry') or {}
         if not isinstance(registry, dict):
             registry = {}
+        # R6-2/R6-5 链路 base（默认 None = 原始 part_text 与首检结果）：
+        # spotfix → targeted edit → rewrite 三段串联，每段独立重审、独立判定
+        base_text = None
+        base_logic = None
+        base_cons = None
+        base_pairs = None
+        base_p0 = p0
         if has_name_issue(consistency_result, registry):
             pairs = derive_name_pairs(part_text, consistency_result, registry)
             if pairs:
@@ -455,37 +607,55 @@ class ConsistencyRepairer:
                     logic_result, consistency_result, state_mock)
                 if note is not None:
                     # R6-2（S2）: 残留 P0 不连坐、继续治 —— spotfix 已独立落盘
-                    # （partial_applied），以修复稿为 base 转全文重写；劣化判据
-                    # 与二轮条件换成效审后基线（_base_logic/_base_cons/residual），
-                    # first_pass_p0 恒定原始首检数（聚合预算护栏不被修复过程改变）
+                    # （partial_applied），以修复稿为 base 进入定点编辑/重写；
+                    # 劣化判据与二轮条件换成效审后基线（_base_logic/_base_cons/
+                    # residual），first_pass_p0 恒定原始首检数（聚合预算护栏
+                    # 不被修复过程改变）
                     if note.get('residual_p0', 0) > 0 and note.get('_base_text'):
                         base_text = note.pop('_base_text')
                         base_logic = note.pop('_base_logic')
                         base_cons = note.pop('_base_cons')
                         base_pairs = note.pop('_base_pairs', [])
+                        base_p0 = note['residual_p0']
                         logger.info(f'[ConsistencyRepairer] Part {part_num} 定点修复后残留 '
                                     f'{note["residual_p0"]} 个 P0（非名称 '
-                                    f'{note.get("residual_non_name_p0")} 个），以修复稿为 base 落全文重写')
-                        note = await self._rewrite_repair(
-                            part_num, part_text, note['residual_p0'],
-                            logic_result, consistency_result, state_mock, registry,
-                            base_text=base_text, base_logic=base_logic,
-                            base_cons=base_cons, applied_name_pairs=base_pairs)
+                                    f'{note.get("residual_non_name_p0")} 个），以修复稿为 base '
+                                    f'继续修复（定点编辑优先，失败落重写）')
+                    else:
+                        # 已通过（residual<=0）或无 base（旧形态）：维持现状
+                        for _k in ('_base_text', '_base_logic', '_base_cons', '_base_pairs'):
+                            note.pop(_k, None)
+                        # R4-3: 真实首检数随 note 上行（修复通过时 entry 的结果
+                        # 已被重审值替换，聚合器需要它计算 first_pass_p0 预算护栏）
                         note.setdefault('first_pass_p0', p0)
                         return note
-                    # 已通过（residual<=0）或无 base（旧形态）：维持现状
-                    for _k in ('_base_text', '_base_logic', '_base_cons', '_base_pairs'):
-                        note.pop(_k, None)
-                    # R4-3: 真实首检数随 note 上行（修复通过时 entry 的结果已被
-                    # 重审值替换，聚合器需要它计算 first_pass_p0 预算护栏）
-                    note.setdefault('first_pass_p0', p0)
-                    return note
-                logger.info(f'[ConsistencyRepairer] Part {part_num} 定点修复不可用，落回全文重写')
+                else:
+                    logger.info(f'[ConsistencyRepairer] Part {part_num} 定点修复不可用，落回编辑/重写')
             else:
-                logger.info(f'[ConsistencyRepairer] Part {part_num} 名称类 P0 但配对推导为空（歧义即放弃），走全文重写')
+                logger.info(f'[ConsistencyRepairer] Part {part_num} 名称类 P0 但配对推导为空（歧义即放弃），走编辑/重写')
+
+        # R6-5（S3）: 定点编辑前置尝试（SEARCH/REPLACE 锚块；每 Part ≤1 次，
+        # 失败/劣化只回退编辑层，落回全量重写——总预算不涨）
+        edit_note = await self._targeted_edit_repair(
+            part_num, part_text, base_p0, logic_result, consistency_result,
+            state_mock, registry, base_text=base_text, base_logic=base_logic,
+            base_cons=base_cons, applied_name_pairs=base_pairs)
+        if edit_note is not None and edit_note.get('revision_passed'):
+            for _k in ('_base_text', '_base_logic', '_base_cons'):
+                edit_note.pop(_k, None)
+            edit_note.setdefault('first_pass_p0', p0)
+            return edit_note
+        if edit_note is not None:
+            # 编辑未通过（劣化已回退 / 部分改善已保留）：带最新 base 继续
+            base_text = edit_note.pop('_base_text', base_text)
+            base_logic = edit_note.pop('_base_logic', base_logic)
+            base_cons = edit_note.pop('_base_cons', base_cons)
+            base_p0 = edit_note.get('residual_p0', base_p0)
 
         note = await self._rewrite_repair(
-            part_num, part_text, p0, logic_result, consistency_result, state_mock, registry)
+            part_num, part_text, base_p0, logic_result, consistency_result,
+            state_mock, registry, base_text=base_text, base_logic=base_logic,
+            base_cons=base_cons, applied_name_pairs=base_pairs)
         note.setdefault('first_pass_p0', p0)
         return note
 
@@ -610,6 +780,113 @@ class ConsistencyRepairer:
             f'🔧 Part {part_num} 姓名定点修复已独立落盘'
             f'（{spot_meta["wrong_name"]}→{spot_meta["right_name"]}，残留 '
             f'{residual_non_name_p0} 个非名称 P0 转全文重写，修复不连坐）')
+        return note
+
+    # ----------------- R6-5（S3）: SEARCH/REPLACE 定点编辑修复 -----------------
+
+    async def _targeted_edit_repair(self, part_num: int, part_text: str, p0_before: int,
+                                    logic_result: dict, consistency_result: dict,
+                                    state_mock, registry: dict,
+                                    base_text: str = None, base_logic: dict = None,
+                                    base_cons: dict = None,
+                                    applied_name_pairs: list = None) -> dict | None:
+        """R6-5（S3）: SEARCH/REPLACE 定点编辑（全量重写的前置尝试，每 Part ≤1 次）。
+
+        链路：spotfix（S2）→ 本方法（S3）→ _rewrite_repair（S2 签名），每段
+        独立重审、独立判定；编辑失败只回退编辑层，不改变 MAX_REWRITE_ROUNDS=2
+        总预算。
+
+        触发条件（全部满足）：count_p0(base_logic, base_cons) ≤3 且每个 P0
+        issue 都有唯一 anchor（_edit_trigger_ok，纯确定性）。
+
+        Returns:
+            None —— 未触发 / 无有效编辑块（调用方带原 base 落全量重写）；
+            note（revision_passed=True）—— 编辑后重审 P0 归零（调用方返回）；
+            note（revision_passed=False）—— 劣化已回退 base_text / 部分改善
+              已保留，note 携带最新 _base_*（调用方 pop 后带最新 base 继续）。
+        """
+        s = self.service
+        base_text = base_text if base_text is not None else (part_text or '')
+        round_logic = base_logic if base_logic is not None else logic_result
+        round_cons = base_cons if base_cons is not None else consistency_result
+        ok, anchors = _edit_trigger_ok(base_text, round_logic, round_cons)
+        if not ok:
+            logger.info(f'[ConsistencyRepairer] Part {part_num} 定点编辑触发条件不满足'
+                        f'（P0 数 >{_EDIT_MAX_BLOCKS} 或缺唯一 anchor），落回全文重写')
+            return None
+        brief = self._build_revision_brief(
+            part_num, round_logic, round_cons, part_text=base_text,
+            applied_name_pairs=applied_name_pairs, numbered=True)
+        user_prompt = (
+            brief
+            + f'\n\n## Part {part_num} 全文（编辑对象）\n{base_text}'
+            + '\n\n请按编辑协议输出 SEARCH/REPLACE 编辑块'
+              '（每个块前注明针对的问题编号；最多 3 个块）。')
+        try:
+            raw = await asyncio.to_thread(
+                call_llm, TARGETED_EDIT_SYSTEM, user_prompt, 0.2,
+                get_json_max_tokens(), 'targeted_edit', False, None,
+                s.work_id, None)
+        except Exception as e:
+            logger.info(f'[ConsistencyRepairer] Part {part_num} 定点编辑调用失败'
+                        f'（落回全文重写）: {e}')
+            return None
+        new_text, applied, failures = _apply_targeted_edits(base_text, raw)
+        edit_meta = {'type': 'targeted_edit', 'applied_blocks': applied,
+                     'failed_blocks': len(failures), 'anchor_count': len(anchors)}
+        if applied == 0:
+            logger.info(f'[ConsistencyRepairer] Part {part_num} 编辑块全部校验失败'
+                        f'（{len(failures)} 处：{failures[:3]}），落回全文重写')
+            return None
+
+        # 编辑后走既有四段式：双 agent 重审 → 劣化回退 / 保留
+        new_logic = await self._re_review(self.logic_agent, 'logic', part_num, new_text, state_mock)
+        new_cons = await self._re_review(self.consistency_agent, 'consistency', part_num, new_text, state_mock)
+        residual_p0 = count_p0(new_logic, new_cons)
+
+        if is_revision_degraded(p0_before, residual_p0, round_cons, new_cons,
+                                round_logic, new_logic):
+            # 回退编辑层：保留 base_text（原文/spotfix 稿从未离开）
+            s._save_chunk_progress(part_num, base_text, truncate(base_text, n=200, suffix='...'))
+            note = {'revision_attempted': True, 'revision_passed': False,
+                    'revision_edited': True, 'residual_p0': residual_p0,
+                    'revision_degraded': True,
+                    '_base_logic': new_logic, '_base_cons': new_cons,
+                    '_base_text': base_text}
+            self._append_revision_log(part_num, p0_before, note, extra=edit_meta)
+            await self._emit_log(
+                f'↩️ Part {part_num} 定点编辑后劣化（{p0_before}→{residual_p0} 或引入'
+                f'新问题类别），已回退编辑层（{applied} 块未保留）')
+            return note
+
+        if residual_p0 <= 0:
+            # 通过：落盘编辑稿 + state_mock 快照同步
+            s._save_chunk_progress(part_num, new_text, truncate(new_text, n=200, suffix='...'))
+            part_key = str(part_num)
+            state_mock.parts[part_key] = new_text
+            state_mock.final_draft[part_key] = new_text
+            note = {'revision_attempted': True, 'revision_passed': True,
+                    'revision_edited': True,
+                    'logic_result': new_logic, 'consistency_result': new_cons}
+            self._append_revision_log(part_num, p0_before, note, extra=edit_meta)
+            await self._emit_log(
+                f'✅ Part {part_num} 定点编辑修复完成（{applied} 块，重审 P0 归零，'
+                f'{len(new_text)} 字，块外文本逐字节未动）')
+            return note
+
+        # 未归零但未劣化（严格改善）：保留编辑稿，带最新 base 继续落重写
+        s._save_chunk_progress(part_num, new_text, truncate(new_text, n=200, suffix='...'))
+        part_key = str(part_num)
+        state_mock.parts[part_key] = new_text
+        state_mock.final_draft[part_key] = new_text
+        note = {'revision_attempted': True, 'revision_passed': False,
+                'revision_edited': True, 'residual_p0': residual_p0,
+                '_base_logic': new_logic, '_base_cons': new_cons,
+                '_base_text': new_text}
+        self._append_revision_log(part_num, p0_before, note, extra=edit_meta)
+        await self._emit_log(
+            f'🔁 Part {part_num} 定点编辑严格改善（{p0_before}→{residual_p0}），'
+            f'保留编辑稿并继续全文重写')
         return note
 
     # ----------------- R4-5: 全文重写四段式 -----------------
@@ -776,7 +1053,8 @@ class ConsistencyRepairer:
                               consistency_result: dict, name_pairs: list = None,
                               introduced_problems: list = None,
                               part_text: str = '',
-                              applied_name_pairs: list = None) -> str:
+                              applied_name_pairs: list = None,
+                              numbered: bool = False) -> str:
         """用 issues + 相关 established_facts + 角色名册生成 revision brief。
 
         R4-2 增强：名册段置尾（权威名源）；名称类指令具体到
@@ -815,13 +1093,20 @@ class ConsistencyRepairer:
                 f"'{p.get('wrong')}'→'{p.get('right')}'" for p in applied_name_pairs)
             lines.append(f'- 姓名已按名册归一化（{applied_desc}），'
                          f'重写时不得再引入名册外写法')
+        issue_lines: list = []
         for i in l_p0 + c_p0:
             desc = (i.get('description') or '').strip()
             sugg = (i.get('suggestion') or '').strip()
             loc = (i.get('location') or f'Part {part_num}').strip()
             if not desc:
                 continue
-            lines.append(f"- [{loc}] {desc}" + (f' → 修正建议: {sugg}' if sugg else ''))
+            issue_lines.append(f"- [{loc}] {desc}" + (f' → 修正建议: {sugg}' if sugg else ''))
+        if numbered:
+            # R6-5（S3）: 编辑协议要求每个编辑块前注明问题编号
+            lines.extend(f'{n}. {line[2:]}'
+                         for n, line in enumerate(issue_lines, start=1))
+        else:
+            lines.extend(issue_lines)
         for p in (name_pairs or []):
             n = (part_text or '').count(p.get('wrong', ''))
             anchor = (p.get('evidence') or '').strip()
