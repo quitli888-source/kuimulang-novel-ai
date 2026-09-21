@@ -128,11 +128,22 @@ class ConsistencyReviewAgent(BaseAgent):
             )
 
         # 前文结尾
+        # R5 补充: final_draft 的键恒为字符串 "1"/"2"...（work.json JSON 对象键必为
+        # str，经 writing_service mock state 原样传入；story_state.load 之外无 int 键
+        # 路径）—— 此前 `part_num - 1 in final_draft` 用 int 键查询恒 False，
+        # "前一部分结尾"（连续性最关键上下文）从未注入评审 prompt。改字符串键查询；
+        # part_num<=1 无前文、值非字符串时跳过，try/except 兜底不破坏主流程
+        # （与 roster_block 同风格）。
         prev_tail = ""
-        final_draft = self._get_final_draft(state) or {}
-        if (part_num - 1) in final_draft:
-            prev_text = final_draft[part_num - 1]
-            prev_tail = prev_text[-800:]
+        try:
+            final_draft = self._get_final_draft(state) or {}
+            prev_key = str(part_num - 1)
+            if part_num > 1 and prev_key in final_draft:
+                prev_text = final_draft[prev_key]
+                if isinstance(prev_text, str):
+                    prev_tail = prev_text[-800:]
+        except Exception:
+            prev_tail = ""
 
         # R4-6: 系统预检警告段（consistency_flags：退场再现 + 伏笔未回收，有则展示，
         # ≤10 行）—— 只加展示段，不动 schema、不动评分逻辑、不动其他分支
