@@ -955,6 +955,9 @@ def test_s4_aider_style_retry_only_failed_blocks():
     assert R8_RETRY_PART.count(dup_sent) == 2, 'fixture 应含逐字重复句（count==2）'
     ok_span = '林渊忽然睁开双眼，咒环暴涨，井壁隆隆作响'
     assert R8_RETRY_PART.count(ok_span) == 1
+    # 唯一性校验：非唯一 occurrence 不出 anchor（防改错位置——禁模糊匹配）
+    anchor_spans = repairer._departed_anchors(R8_RETRY_PART, 6).get('林渊', [])
+    assert all(R8_RETRY_PART.count(s) == 1 for s in anchor_spans), anchor_spans
     edit_calls = []
 
     def fake_call_llm(system, user, *a, **k):
@@ -1632,6 +1635,24 @@ def test_s3_kill_switch_and_no_join():
     logger.info('[test_s3_killswitch] PASS: kill-switch 回退旧排序；None 时 Part 升序')
 
 
+def test_s3_budget_formula_not_widened():
+    """S3 验收（公式不放宽）: env 未覆盖时预算 = max(2, PARTS//4) —— 9 个 Part
+    给 2 次重审（PARTS//3 会给 3 次，探针⑤目标；R6 裁定延续）。"""
+    service = _budget_service()
+    cons_agent = _ScriptedAgent([_clean_cons() for _ in range(9)])
+    os.environ.pop('KML_NAME_AUDIT_REREVIEW_BUDGET', None)
+    try:
+        asyncio.run(Phase4Runner(service)._final_name_audit(
+            service, [3, 6, 9, 12, 13, 14, 15, 17, 20], cons_agent,
+            SimpleNamespace(final_draft={}),
+            residual_map=_residual_map_from_results([{'part': 17, 'residual_p0': 4}])))
+    finally:
+        pass
+    # 9 Part → max(2, 9//4) = 2 次（departed 内 residual 优先：17 先，其次 9）
+    assert _called_parts(service, cons_agent) == [17, 9], _called_parts(service, cons_agent)
+    logger.info('[test_s3_formula] PASS: 公式 max(2, PARTS//4) 不放宽')
+
+
 def test_s3_residual_map_helper():
     """S3 join 数据源：per_part_results → {part: residual_p0}（note 优先，否则
     首检 count_p0；降级结果不计入；脏条目跳过）。"""
@@ -1687,6 +1708,7 @@ if __name__ == '__main__':
                test_outline_guard_prompt_synced,
                test_s3_budget_priority_with_residual_join,
                test_s3_kill_switch_and_no_join,
+               test_s3_budget_formula_not_widened,
                test_s3_residual_map_helper):
         fn()
         print(f'PASS {fn.__name__}')
