@@ -7,7 +7,9 @@ V5改动：
 V5.1改动：集成错误处理系统
 """
 import json
+import random
 import re
+import threading
 import time
 import os
 from typing import Optional
@@ -29,9 +31,36 @@ def _safe_temperature(temp: float, model: str) -> float:
         return max(temp, 0.01)
     return temp
 
+def _is_rate_limit_error(e: Exception) -> bool:
+    """R6-3（S5）: 识别 429 限流错误（可重试，与"重试无望的 4xx"区分）。
+
+    既认 openai SDK 的 RateLimitError 类型，也兜底认 status_code==429 与报文
+    关键词（供应商 limit=5 的实证报文为 "429 - concurrency reached, current: 6,
+    limit: 5"，代理包装的异常可能不带 SDK 类型）。
+    """
+    try:
+        from openai import RateLimitError
+        if isinstance(e, RateLimitError):
+            return True
+    except ImportError:
+        pass
+    if getattr(e, 'status_code', None) == 429:
+        return True
+    msg = str(e).lower()
+    return ('rate_limit' in msg or 'rate limited' in msg
+            or 'concurrency reached' in msg)
+
+
 def _is_client_error(e: Exception) -> bool:
     """R4-P1-x: 识别 4xx 客户端错误（不重试）—— 401 鉴权 / 400 参数 / 404 模型不存在。
-    既认 openai SDK 异常类型，也兜底认 status_code 属性与报文关键词（兼容代理包装的异常）。"""
+    既认 openai SDK 异常类型，也兜底认 status_code 属性与报文关键词（兼容代理包装的异常）。
+
+    R6-3（S5）: 429 限流 carve-out 必须置于开头 —— 下方 400<=status<500 一刀切
+    会把 429 误判为"重试永远不会成功的客户端错误"，而限流数秒退避后几乎必成功
+    （reval 实证：429 风暴使 Part 8-13 三审整体降级为 _fallback 静默盲区）。
+    """
+    if _is_rate_limit_error(e):
+        return False
     try:
         from openai import AuthenticationError, PermissionDeniedError, BadRequestError, NotFoundError, UnprocessableEntityError
         if isinstance(e, (AuthenticationError, PermissionDeniedError, BadRequestError, NotFoundError, UnprocessableEntityError)):
@@ -43,6 +72,62 @@ def _is_client_error(e: Exception) -> bool:
         return True
     msg = str(e).lower()
     return 'invalid api key' in msg or 'authentication' in msg or 'model not found' in msg or 'does not exist' in msg and 'model' in msg
+
+# R6-3（S5）: 429 独立重试上限 —— 不计入既有 3 次 attempt 预算（持续限流时
+# 最坏 +2.5min/调用，远小于一次降级导致的整批 Part 静默未检查）
+_MAX_RATE_LIMIT_RETRIES = 5
+# R6-3（S5）: Retry-After 响应头封顶（防服务端返回恶意大值）；full jitter cap
+_RETRY_AFTER_CAP = 60.0
+_JITTER_CAP = 30.0
+
+
+def _rate_limit_sleep_seconds(e: Exception, rl_attempt: int) -> float:
+    """R6-3（S5）: 429 退避 sleep 时长 —— 优先响应头 Retry-After /
+    retry-after-ms（封顶 60s），否则 AWS full jitter：
+    random.uniform(0, min(30, 1.0 * 2 ** rl_attempt))（base 1s、cap 30s，防惊群）。
+    """
+    try:
+        resp = getattr(e, 'response', None)
+        headers = getattr(resp, 'headers', None) if resp is not None else None
+        if headers is not None:
+            raw_ms = headers.get('retry-after-ms')
+            if raw_ms is not None:
+                return min(float(raw_ms) / 1000.0, _RETRY_AFTER_CAP)
+            raw_s = headers.get('retry-after')
+            if raw_s is not None:
+                return min(float(raw_s), _RETRY_AFTER_CAP)
+    except (TypeError, ValueError):
+        pass  # 响应头不可解析 → 落 full jitter
+    except Exception:
+        pass
+    return random.uniform(0, min(_JITTER_CAP, 1.0 * (2 ** rl_attempt)))
+
+
+def _llm_concurrency_from_env() -> int:
+    """R6-3（S5）: 全局并发信号量额度（env KML_LLM_CONCURRENCY，缺省 4）。
+
+    供应商 limit=5（reval 429 报文实证），留 1 个余量给滚动摘要等小调用；
+    非法值回退 4 + warning；import 时读取一次（文档注明，改值需重启进程）。
+    """
+    raw = (os.environ.get('KML_LLM_CONCURRENCY', '') or '').strip() or '4'
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(f'KML_LLM_CONCURRENCY 非法值 {raw!r}，回退默认 4')
+        return 4
+    if n < 1:
+        logger.warning(f'KML_LLM_CONCURRENCY={n} < 1，回退默认 4')
+        return 4
+    return n
+
+
+# R6-3（S5）: 模块级全局并发信号量 —— call_llm 是同步线程模型、调用点在多个
+# 线程（asyncio.to_thread），必须跨线程共享；包在 client.chat.completions
+# .create() 外层即覆盖全部调用点（含修复回路 _re_review，它在 Phase4Runner
+# 的 review_semaphore 之外）。review_semaphore（Semaphore(3)）保留不动只当
+# 二级限流。BoundedSemaphore 防释放次数超过获取次数。
+_LLM_CONCURRENCY = _llm_concurrency_from_env()
+_LLM_SEMAPHORE = threading.BoundedSemaphore(_LLM_CONCURRENCY)
 _NO_JSON_FORMAT_MODELS = ('minimax', 'abab', 'm2', 'mini-max', 'deepseek', 'qwen', 'glm', 'ernie', 'step')
 _response_format_cache: dict[str, bool] = {}
 
@@ -199,29 +284,37 @@ def call_llm(system_prompt: str, user_prompt: str, temperature: float=0.7, max_t
     temp = _safe_temperature(temperature, model_name)
     messages = [{'role': 'system', 'content': system_prompt}, {'role': 'user', 'content': user_prompt}]
     current_max = max_tokens  # R2-3: 短返升级重试时翻倍，不影响调用方传入值
-    for attempt in range(3):
+    # R6-3（S5）: while + 双计数器 —— 429 走独立 rl_attempt（≤5 次，不计入
+    # 3 次 attempt 预算）；非 429 路径的 attempt 语义与改前逐字节一致
+    attempt = 0
+    rl_attempt = 0
+    rl_consecutive = 0
+    while True:
         try:
             call_start = time.time()
             logger.info(f'    [LLM] 第{attempt + 1}次调用开始: model={model_name}, max_tokens={current_max}, agent={agent}, stream={stream}, work_id={work_id}')
             logger.info(f'    [LLM] messages长度: {len(messages)} 条, 系统提示长度: {len(system_prompt)} 字符')
             if stream and stream_callback:
-                response = client.chat.completions.create(model=model_name, messages=messages, temperature=temp, max_tokens=current_max, stream=True)
-                content = ''
-                last_chunk = None
-                for chunk in response:
-                    # R4-P1-x: 部分 provider 的流末尾发 choices=[] 的 usage-only chunk，
-                    # 直接 chunk.choices[0] 会 IndexError → 整个请求白重试 3 次（token 已扣）。
-                    if not chunk.choices:
+                # R6-3（S5）: 流式路径整体持有信号量（在途请求即占用额度）
+                with _LLM_SEMAPHORE:
+                    response = client.chat.completions.create(model=model_name, messages=messages, temperature=temp, max_tokens=current_max, stream=True)
+                    content = ''
+                    last_chunk = None
+                    for chunk in response:
+                        # R4-P1-x: 部分 provider 的流末尾发 choices=[] 的 usage-only chunk，
+                        # 直接 chunk.choices[0] 会 IndexError → 整个请求白重试 3 次（token 已扣）。
+                        if not chunk.choices:
+                            last_chunk = chunk
+                            continue
+                        if chunk.choices[0].delta.content:
+                            chunk_content = chunk.choices[0].delta.content
+                            content += chunk_content
+                            stream_callback(chunk_content)
                         last_chunk = chunk
-                        continue
-                    if chunk.choices[0].delta.content:
-                        chunk_content = chunk.choices[0].delta.content
-                        content += chunk_content
-                        stream_callback(chunk_content)
-                    last_chunk = chunk
-                content = content.strip()
+                    content = content.strip()
             else:
-                response = client.chat.completions.create(model=model_name, messages=messages, temperature=temp, max_tokens=current_max)
+                with _LLM_SEMAPHORE:
+                    response = client.chat.completions.create(model=model_name, messages=messages, temperature=temp, max_tokens=current_max)
                 if not response.choices:
                     raise ValueError(f'LLM 返回空 choices: model={model_name}')
                 message = response.choices[0].message
@@ -245,6 +338,7 @@ def call_llm(system_prompt: str, user_prompt: str, temperature: float=0.7, max_t
                     if expected_min_len and len(content) < expected_min_len and attempt < 2:
                         current_max *= 2
                         logger.info(f'    [LLM] 短返升级重试: max_tokens {current_max // 2} -> {current_max}')
+                        attempt += 1
                         continue
                 # P0-44: 删除 last_chunk = None —— stream=False 路径下 usage 取自 response，
                 # last_chunk 仅 stream=True 路径才有意义，赋值后再读 = dead branch
@@ -298,6 +392,27 @@ def call_llm(system_prompt: str, user_prompt: str, temperature: float=0.7, max_t
             if isinstance(e, PROGRAMMING_ERRORS):
                 logger.error(f'  [LLM] 编程错误（不重试，立即失败）: {e!r}', exc_info=True)
                 raise
+            # R6-3（S5）: 429 限流退避 —— 独立计数器，不计入 3 次 attempt 预算；
+            # 判断早于 _is_client_error（400<=status<500 会误吞 429）
+            if _is_rate_limit_error(e):
+                if rl_attempt >= _MAX_RATE_LIMIT_RETRIES:
+                    logger.error(f'  [LLM] 429 限流退避 {rl_attempt} 次仍失败'
+                                 f'（agent={agent}），抛出异常')
+                    raise SystemError(f'速率限制或配额不足: {e}')
+                rl_attempt += 1
+                rl_consecutive += 1
+                sleep_s = _rate_limit_sleep_seconds(e, rl_attempt)
+                logger.warning(
+                    f'  [LLM] 429 限流第 {rl_attempt}/{_MAX_RATE_LIMIT_RETRIES} 次退避'
+                    f'（sleep {sleep_s:.1f}s, agent={agent}）: {e}')
+                if rl_consecutive >= 3:
+                    logger.error(
+                        f'  [LLM] 同一调用连续 {rl_consecutive} 次 429 限流'
+                        f'（agent={agent}），供应商并发额度可能持续紧张，建议核查'
+                        f' KML_LLM_CONCURRENCY 与在途调用')
+                time.sleep(sleep_s)
+                continue  # attempt 不递增
+            rl_consecutive = 0
             logger.info(f'  [LLM] 第{attempt + 1}次调用失败: {e}')
             # R4-P1-x: 4xx 客户端错误（鉴权失败/参数错误/模型不存在）重试永远不会成功，
             # 此前一律重试 3 次 + 线性 sleep，纯浪费配额与用户时间。
@@ -307,14 +422,15 @@ def call_llm(system_prompt: str, user_prompt: str, temperature: float=0.7, max_t
                 wait_time = 3 * (attempt + 1)
                 logger.info(f'  [LLM] 等待{wait_time}秒后重试...')
                 time.sleep(wait_time)
+                attempt += 1
+                continue
+            logger.info(f'  [LLM] 3次调用全部失败，抛出异常')
+            if 'network' in str(e).lower() or 'connection' in str(e).lower():
+                raise NetworkError(f'网络连接失败: {e}')
+            elif 'rate_limit' in str(e).lower() or 'quota' in str(e).lower():
+                raise SystemError(f'速率限制或配额不足: {e}')
             else:
-                logger.info(f'  [LLM] 3次调用全部失败，抛出异常')
-                if 'network' in str(e).lower() or 'connection' in str(e).lower():
-                    raise NetworkError(f'网络连接失败: {e}')
-                elif 'rate_limit' in str(e).lower() or 'quota' in str(e).lower():
-                    raise SystemError(f'速率限制或配额不足: {e}')
-                else:
-                    raise LLMError(f'LLM调用失败: {e}')
+                raise LLMError(f'LLM调用失败: {e}')
 
 def call_llm_json(system_prompt: str, user_prompt: str, temperature: float=0.3, max_tokens: int=4000, agent: str='default', work_id: Optional[str]=None) -> dict:
     """
@@ -341,12 +457,19 @@ def call_llm_json(system_prompt: str, user_prompt: str, temperature: float=0.3, 
     last_raw = ''
     call_start = time.time()
     current_max_tokens = max_tokens
-    for attempt in range(3):
+    # R6-3（S5）: while + 双计数器 —— 429 独立重试（≤5 次）不计入 3 次 attempt
+    # 预算；JSON 解析失败阶梯 / response_format 降级 / 4xx fail-fast 的 attempt
+    # 语义与改前逐字节一致
+    attempt = 0
+    rl_attempt = 0
+    rl_consecutive = 0
+    while True:
         try:
             kwargs = {'model': model, 'messages': [{'role': 'system', 'content': enhanced_system}, {'role': 'user', 'content': full_user_prompt}], 'temperature': temp, 'max_tokens': current_max_tokens}
             if use_response_format:
                 kwargs['response_format'] = {'type': 'json_object'}
-            resp = client.chat.completions.create(**kwargs)
+            with _LLM_SEMAPHORE:
+                resp = client.chat.completions.create(**kwargs)
             call_duration = (time.time() - call_start) * 1000
             if not resp.choices:
                 raise ValueError('LLM 返回空 choices')
@@ -381,6 +504,9 @@ def call_llm_json(system_prompt: str, user_prompt: str, temperature: float=0.3, 
                 current_max_tokens = max(6000, int(current_max_tokens * 2))
                 logger.info(f'  [JSON] 提高max_tokens到{current_max_tokens}重试...')
                 time.sleep(2)
+                attempt += 1
+                continue
+            break  # 3 次解析全部失败 → 走下方 _raise_final
         except Exception as e:
             # R3-S3: 编程错误不重试（同 call_llm 约定）—— 立即原样 raise，
             # 不包 LLMError、不进 sleep 阶梯。上方 except ValueError（JSON 解析
@@ -388,13 +514,42 @@ def call_llm_json(system_prompt: str, user_prompt: str, temperature: float=0.3, 
             if isinstance(e, PROGRAMMING_ERRORS):
                 logger.error(f'  [LLM-JSON] 编程错误（不重试，立即失败）: {e!r}', exc_info=True)
                 raise
+            # R6-3（S5）: 429 carve-out 必须早于下方 response_format 降级判断
+            # （'invalid' in err_str 会误吞 429 报文导致错误降级 response_format）
+            if _is_rate_limit_error(e):
+                if rl_attempt >= _MAX_RATE_LIMIT_RETRIES:
+                    logger.error(f'  [LLM-JSON] 429 限流退避 {rl_attempt} 次仍失败'
+                                 f'（agent={agent}），抛出异常')
+                    exc = SystemError(f'速率限制或配额不足: {e}')
+                    try:
+                        exc.raw_text = last_raw or ''
+                    except Exception:
+                        pass
+                    raise exc
+                rl_attempt += 1
+                rl_consecutive += 1
+                sleep_s = _rate_limit_sleep_seconds(e, rl_attempt)
+                logger.warning(
+                    f'  [LLM-JSON] 429 限流第 {rl_attempt}/{_MAX_RATE_LIMIT_RETRIES} 次退避'
+                    f'（sleep {sleep_s:.1f}s, agent={agent}）: {e}')
+                if rl_consecutive >= 3:
+                    logger.error(
+                        f'  [LLM-JSON] 同一调用连续 {rl_consecutive} 次 429 限流'
+                        f'（agent={agent}），供应商并发额度可能持续紧张，建议核查'
+                        f' KML_LLM_CONCURRENCY 与在途调用')
+                time.sleep(sleep_s)
+                continue  # attempt 不递增（不计入 3 次预算）
+            rl_consecutive = 0
             err_str = str(e)
             if use_response_format and ('response_format' in err_str.lower() or 'json_object' in err_str.lower() or 'invalid' in err_str.lower() or ('not supported' in err_str.lower())):
                 logger.info(f'  [JSON] 模型 {model} 不支持 response_format，自动降级为 prompt 引导模式')
                 _response_format_cache[model] = False
                 use_response_format = False
                 kwargs.pop('response_format', None)
-                continue
+                if attempt < 2:
+                    attempt += 1
+                    continue
+                break  # attempt 已耗尽（改前 for 循环 continue 后即结束）→ _raise_final
             # R4-P1-x: 4xx 客户端错误不重试（同 call_llm 约定）
             if _is_client_error(e):
                 raise LLMError(f'LLM调用失败（客户端错误，不重试）: {e}')
@@ -402,6 +557,9 @@ def call_llm_json(system_prompt: str, user_prompt: str, temperature: float=0.3, 
             logger.info(f'  [LLM-JSON] 第{attempt + 1}次调用失败: {e}')
             if attempt < 2:
                 time.sleep(3 * (attempt + 1))
+                attempt += 1
+                continue
+            break  # 3 次调用全部失败 → 走下方 _raise_final
     # R4-P1-x: 异常附 raw_text —— LogicReviewAgent 的 regex 营救路径读 e.raw_text，
     # 此前 SystemError 不带该属性，营救逻辑从未生效（永远返回降级评分）。
     def _raise_final(err):
