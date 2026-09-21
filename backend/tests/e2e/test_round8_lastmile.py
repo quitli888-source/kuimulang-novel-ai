@@ -830,6 +830,344 @@ def test_outline_guard_prompt_synced():
     logger.info('[test_outline_prompt_sync] PASS: 文件与 fallback 同步')
 
 
+# ---------------- S4（R8-4）: targeted_edit 加固 ----------------
+
+class _FakeMessage:
+    def __init__(self, content):
+        self.content = content
+
+
+class _FakeChoice:
+    def __init__(self, content, finish_reason='stop'):
+        self.message = _FakeMessage(content)
+        self.finish_reason = finish_reason
+        self.delta = None
+
+
+class _FakeResponse:
+    def __init__(self, content='ok', finish_reason='stop'):
+        self.choices = [_FakeChoice(content, finish_reason)]
+        self.usage = None
+
+
+class _FakeCompletions:
+    """脚本化 create：列表元素为 Exception 则抛、否则作为响应返回。"""
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        item = self.script.pop(0) if self.script else _FakeResponse()
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+class _FakeChat:
+    def __init__(self, completions):
+        self.completions = completions
+
+
+class _FakeClient:
+    def __init__(self, completions):
+        self.chat = _FakeChat(completions)
+
+
+def _length_empty():
+    """finish_reason=length 且 content 空（reasoning 吃光预算的无歧义签名）。"""
+    return _FakeResponse('', 'length')
+
+
+def _edit_blocks(pairs):
+    return '\n'.join(f'<<<<<<< SEARCH\n{s}\n=======\n{r}\n>>>>>>> REPLACE'
+                     for s, r in pairs)
+
+
+def test_s4_expected_min_len_escalation_ladder():
+    """S4 验收 1: expected_min_len=80 接线 —— finish_reason=length 且空 content
+    触发 max_tokens 翻倍阶梯（12000→24000→48000）；再空 → 无编辑块 → 不触发
+    aider 重试 → 落全量重写（升级路径与重试路径互斥）。"""
+    import core.llm_client as llm_client
+    from services.consistency_repair import _EDIT_EXPECTED_MIN_LEN
+    assert _EDIT_EXPECTED_MIN_LEN == 80
+    service = _edit_service(R8_EDIT_PART14, 14)
+    repairer = ConsistencyRepairer(service, _ScriptedAgent([_clean_logic(0)]),
+                                   _ScriptedAgent([_clean_cons()]))
+    issues = [
+        _p0_issue('角色状态', '林渊已死严禁出场，文中却以实体被拖走'
+                                '（原文：“林渊整个人被拖进碑影胸口”）'
+                                '冲突：前文Part8林渊已死', '林渊'),
+        _p0_issue('状态连续性', '林渊于Part8已死亡且名册标注严禁出场，但在Part 14中'
+                                '却实际睁眼、说话、递出残玉，属于已死角色实体出场', '林渊'),
+    ]
+    cons = _clean_cons(issues)
+    comps = _FakeCompletions([_length_empty(), _length_empty(), _length_empty()])
+
+    async def fake_rewrite_once(self, part_num, brief):
+        return '', 'rewrite_failed'
+
+    with patch.object(llm_client, '_get_client_for_agent',
+                      lambda agent: (_FakeClient(comps), 'test-model')), \
+            patch.object(ConsistencyRepairer, '_rewrite_once', fake_rewrite_once):
+        note = asyncio.run(repairer.maybe_repair_part(
+            14, R8_EDIT_PART14, _clean_logic(0), cons, state_mock=_mock_state()))
+    # 短返升级阶梯：12000 → 24000 → 48000（第 3 次仍空 → 返回空 → 无块）
+    assert [c['max_tokens'] for c in comps.calls] == [12000, 24000, 48000], \
+        [c['max_tokens'] for c in comps.calls]
+    # 空返回不触发 aider 重试（3 次调用全部来自升级阶梯）→ 落重写
+    assert note.get('revision_attempted') is True and note.get('revision_error')
+    logger.info('[test_s4_escalate] PASS: expected_min_len 阶梯 + 空返不重试互斥')
+
+
+# 重试 fixture：含逐字重复句（search_not_unique 场景）+ 合法尸身段（veto legal）
+# + 实体动词段（illegal）的 Part 正文
+R8_RETRY_PART = (
+    '井台之上，封神井已经饿了三十七年，井绳磨短了三尺，无人敢近前。\n\n'
+    '一声轻响之后，悬在红雾里的林渊动了，他喉间的伤口还在渗血。\n\n'
+    '一声轻响之后，悬在红雾里的林渊动了，他喉间的伤口还在渗血。\n\n'
+    '林渊的尸身抬起右手，五指成爪，缓缓按向命纹，井台隆隆作响。\n\n'
+    '林渊忽然睁开双眼，咒环暴涨，井壁隆隆作响。'
+)
+
+
+def test_s4_aider_style_retry_only_failed_blocks():
+    """S4 验收 2/3: 首轮 1 块 search_not_unique + 1 块成功 → 重试只重发失败块
+    （prompt 含失败原因+最近邻+'其余块已应用'）；每 Part 编辑调用 ≤2 次。
+
+    注：分类器对非唯一 illegal occurrence 不出 anchor（span 置空），非唯一
+    SEARCH 场景由"模型自选重复句"构造——issue 引文 anchor 照常触发编辑。
+    """
+    service = _edit_service(R8_RETRY_PART, 6)
+    repairer = ConsistencyRepairer(service, _ScriptedAgent([_clean_logic(0)]),
+                                   _ScriptedAgent([_clean_cons()]))
+    issues = [
+        _p0_issue('角色状态/身份', '林渊名册标注严禁出场（原文：“悬在红雾里的林渊动了”）'
+                                  '冲突：名册称已退场严禁出场', '', 'Part 6'),
+    ]
+    cons = _clean_cons(issues)
+    dup_sent = '一声轻响之后，悬在红雾里的林渊动了，他喉间的伤口还在渗血'
+    assert R8_RETRY_PART.count(dup_sent) == 2, 'fixture 应含逐字重复句（count==2）'
+    ok_span = '林渊忽然睁开双眼，咒环暴涨，井壁隆隆作响'
+    assert R8_RETRY_PART.count(ok_span) == 1
+    edit_calls = []
+
+    def fake_call_llm(system, user, *a, **k):
+        edit_calls.append(user)
+        if len(edit_calls) == 1:
+            # 首轮：1 块 SEARCH 不唯一（模型自选重复句）+ 1 块合法
+            return _edit_blocks([(dup_sent, '碑林借着林渊的形貌呜呜作响，井边死寂'),
+                                 (ok_span, '碑影中属于林渊的残念忽然睁眼，咒环暴涨')])
+        # 重试：只重发失败块（加上段落边界变成唯一片段）
+        fixed = '。\n\n' + dup_sent + '。\n\n'
+        assert R8_RETRY_PART.count(fixed) == 1, fixed
+        return _edit_blocks([(fixed, '。\n\n碑林借着林渊的形貌呜呜作响，井边死寂。\n\n')])
+
+    with patch('services.consistency_repair.call_llm', side_effect=fake_call_llm):
+        note = asyncio.run(repairer.maybe_repair_part(
+            6, R8_RETRY_PART, _clean_logic(0), cons, state_mock=_mock_state()))
+    assert len(edit_calls) == 2, f'每 Part 编辑调用 ≤2 次: {len(edit_calls)}'
+    retry_prompt = edit_calls[1]
+    assert '出现 2 次' in retry_prompt or 'search_not_unique' in retry_prompt, retry_prompt[:400]
+    assert '最近邻上下文' in retry_prompt
+    assert '其余 1 个块已应用，勿重发' in retry_prompt
+    assert note.get('revision_passed') is True, note
+    assert service.saved_chunks[6] != R8_RETRY_PART
+    entries = [e for e in service.data['revision_log']
+               if e.get('type') == 'targeted_edit']
+    assert entries and entries[-1].get('edit_retried') is True
+    assert entries[-1].get('edit_calls') == 2
+    logger.info('[test_s4_retry] PASS: aider 式重试只重发失败块 + ≤2 次调用')
+
+
+def test_s4_empty_return_no_retry():
+    """S4 验收 3: 空返回（no_valid_block）不触发 aider 重试——编辑调用恰好 1 次，
+    落全量重写（与 expected_min_len 升级路径互斥）。"""
+    service = _edit_service(R8_EDIT_PART14, 14)
+    repairer = ConsistencyRepairer(service, _ScriptedAgent([_clean_logic(0)]),
+                                   _ScriptedAgent([_clean_cons()]))
+    issues = [
+        _p0_issue('角色状态', '林渊已死严禁出场，文中却以实体被拖走'
+                                '（原文：“林渊整个人被拖进碑影胸口”）'
+                                '冲突：前文Part8林渊已死', '林渊'),
+        _p0_issue('状态连续性', '林渊于Part8已死亡且名册标注严禁出场，但在Part 14中'
+                                '却实际睁眼、说话、递出残玉，属于已死角色实体出场', '林渊'),
+    ]
+    cons = _clean_cons(issues)
+    edit_calls = []
+
+    def fake_call_llm(system, user, *a, **k):
+        edit_calls.append(user)
+        return ''  # 空返回
+
+    with patch('services.consistency_repair.call_llm', side_effect=fake_call_llm):
+        note = asyncio.run(repairer.maybe_repair_part(
+            14, R8_EDIT_PART14, _clean_logic(0), cons, state_mock=_mock_state()))
+    assert len(edit_calls) == 1, f'空返回不得重试: {len(edit_calls)}'
+    assert note.get('revision_attempted') is True
+    logger.info('[test_s4_empty_noretry] PASS: 空返回 1 次调用落重写')
+
+
+def test_s4_subset_edit_mode():
+    """S4 验收 4: P0=4（2 departed 带 span + 2 非 departed 带 anchor）→ 触发
+    子集编辑且只产 departed 类块；非 departed 类 P0=4 → 不触发（零编辑调用）。"""
+    service = _edit_service(R8_EDIT_PART14, 14)
+    repairer = ConsistencyRepairer(service, _ScriptedAgent([_clean_logic(0)]),
+                                   _ScriptedAgent([_clean_cons()]))
+    dep_issues = [
+        _p0_issue('角色状态', '林渊已死严禁出场，文中却以实体被拖走'
+                                '（原文：“林渊整个人被拖进碑影胸口”）'
+                                '冲突：前文Part8林渊已死', '林渊'),
+        _p0_issue('状态连续性', '林渊于Part8已死亡且名册标注严禁出场，但在Part 14中'
+                                '却实际睁眼、说话、递出残玉，属于已死角色实体出场', '林渊'),
+    ]
+    other_issues = [
+        _p0_issue('物品状态', '苏晚晴看见一枚发黑的残玉（原文：“苏晚晴看见一枚发黑的残玉，'
+                                '失声惊呼”）冲突：前文仅一块且已咬合'),
+        _p0_issue('时间线', '三十七年与前文三十年矛盾（原文：“苏晚晴死死攥住残玉，不肯松手”）'
+                            '冲突：前文封神井饿了三十年'),
+    ]
+    cons = _clean_cons(dep_issues + other_issues)
+    spans = repairer._departed_anchors(R8_EDIT_PART14, 14)['林渊']
+    ok, anchors = _edit_subset_trigger_ok(R8_EDIT_PART14, _clean_logic(0), cons,
+                                          {'林渊': spans})
+    assert ok is True and len(anchors) == 2, anchors
+    # 全链路：子集编辑触发，brief 明示其余 P0 不在本次范围
+    edit_calls = []
+
+    def fake_call_llm(system, user, *a, **k):
+        edit_calls.append(user)
+        return '\n'.join(_edit_blocks([(s, s.replace('林渊', '碑林学他', 1))])
+                         for s in spans[:2])
+
+    with patch('services.consistency_repair.call_llm', side_effect=fake_call_llm):
+        note = asyncio.run(repairer.maybe_repair_part(
+            14, R8_EDIT_PART14, _clean_logic(0), cons, state_mock=_mock_state()))
+    assert note.get('revision_passed') is True, note
+    assert len(edit_calls) == 1
+    assert '不在本次编辑范围' in edit_calls[0], 'brief 必须明示其余 P0 不在本次范围'
+    entries = [e for e in service.data['revision_log']
+               if e.get('type') == 'targeted_edit']
+    assert entries and entries[-1].get('edit_subset') is True
+    # 非 departed 类 P0=4 → 不开放旁路（零编辑调用）
+    service2 = _edit_service(R8_EDIT_PART14, 14)
+    repairer2 = ConsistencyRepairer(service2, _ScriptedAgent([_clean_logic(0)]),
+                                    _ScriptedAgent([_clean_cons()]))
+    cons2 = _clean_cons(other_issues + [
+        _p0_issue('知识合理性', '角色知道不可能知道的信息'
+                                '（原文：“苏晚晴死死攥住残玉，不肯松手”）'),
+        _p0_issue('信息越界', '角色越界使用未揭示信息'
+                                '（原文：“碑影的巨口合下，黑雾轰然收紧”）'),
+    ])
+    edit_calls2 = []
+
+    def fake2(system, user, *a, **k):
+        edit_calls2.append(user)
+        return ''
+
+    with patch('services.consistency_repair.call_llm', side_effect=fake2):
+        note2 = asyncio.run(repairer2.maybe_repair_part(
+            14, R8_EDIT_PART14, _clean_logic(0), cons2, state_mock=_mock_state()))
+    assert edit_calls2 == [], '非 departed 类 P0=4 不得触发编辑'
+    assert note2.get('revision_attempted') is True
+    logger.info('[test_s4_subset] PASS: 子集编辑只产 departed 块；非 departed 不开放')
+
+
+def test_s4_departed_oracle_rescues_improved_edit():
+    """S4 验收 5: 分类器证 illegal 严格下降 + 重审报 departed 类 P0 但其 span
+    已消除 → 判"改善"保留编辑稿（不回退）。"""
+    service = _edit_service(R8_EDIT_PART14, 14)
+    # 重审脚本：logic 干净（编辑修好）+ consistency 报已消除 span 的 departed 类 P0
+    re_logic = [_clean_logic(0)]
+    re_cons = [_clean_cons([_p0_issue(
+        '角色状态', '林渊已死严禁出场（原文：“林渊整个人被拖进碑影胸口，只留下一缕飞灰”）'
+                    '冲突：名册称已退场严禁出场', '林渊')])]
+    repairer = ConsistencyRepairer(service, _ScriptedAgent(re_logic),
+                                   _ScriptedAgent(re_cons))
+    issues = [
+        _p0_issue('角色状态', '林渊已死严禁出场，文中却以实体被拖走'
+                                '（原文：“林渊整个人被拖进碑影胸口”）'
+                                '冲突：前文Part8林渊已死', '林渊'),
+        _p0_issue('状态连续性', '林渊于Part8已死亡且名册标注严禁出场，但在Part 14中'
+                                '却实际睁眼、说话、递出残玉，属于已死角色实体出场', '林渊'),
+    ]
+    cons = _clean_cons(issues)
+    spans = repairer._departed_anchors(R8_EDIT_PART14, 14)['林渊']
+
+    def fake_call_llm(system, user, *a, **k):
+        return '\n'.join(_edit_blocks([(s, s.replace('林渊', '碑林学他', 1))])
+                         for s in spans[:2])
+
+    with patch('services.consistency_repair.call_llm', side_effect=fake_call_llm):
+        note = asyncio.run(repairer.maybe_repair_part(
+            14, R8_EDIT_PART14, _clean_logic(0), cons, state_mock=_mock_state()))
+    entries = [e for e in service.data['revision_log']
+               if e.get('type') == 'targeted_edit']
+    assert entries, '编辑段应已执行'
+    assert entries[-1].get('departed_oracle') is True, entries[-1]
+    assert entries[-1].get('oracle_illegal', '').endswith('→0'), entries[-1]
+    assert entries[-1].get('revision_degraded') is None, 'oracle 救回不得记劣化'
+    assert service.saved_chunks[14] != R8_EDIT_PART14, '编辑稿应保留（重写未覆盖）'
+    assert note.get('first_pass_p0') == 2, note
+    logger.info('[test_s4_oracle] PASS: oracle 救回已消除 span 的 departed 类误报')
+
+
+def test_s4_suspect_judge_noise_flag():
+    """S4 验收 6: Part 10 形态回放（编辑修好 logic P0，重审报编辑前已存在的
+    "晚晴"截断 → 1→1 判劣化回退）→ suspect_judge_noise 打标且行为（回退）不变。"""
+    chars = [dict(c) for c in R8_CHARACTERS]
+    chars.append({'name': '苏晚晴', 'role': '核心配角', 'identity': '持残玉的守井人'})
+    part10 = ('林尘把残玉按在井沿，苏晚晴在旁护法。他腕间的桃花蛊纹青黑暴涨，'
+              '晚晴失声提醒他收手，井水无声地涨了三寸，碑林呜呜作响。')
+    service = _FakeService({
+        'name_registry': build_name_registry(chars),
+        'character_state_track': {},
+        'established_facts': {},
+        'characters': chars,
+        'parts': {'10': part10},
+        'final_draft': {'10': part10},
+        'name_drift_dict': {},
+        'revision_log': [],
+        'name_audit_log': [],
+    })
+    # 首检：logic P0（桃花蛊纹，带引文 anchor）+ consistency 干净（10/10）
+    logic_first = {'score': 3, 'overall_score': 3, 'pass': False, 'p0_count': 1,
+                   'p1_count': 0,
+                   'issues': [{'level': 'P0', 'dimension': '角色状态',
+                               'location': 'Part 10',
+                               'description': '苏晚晴身怀桃花蛊，前文未提及此设定'
+                                              '（原文：“他腕间的桃花蛊纹青黑暴涨”）',
+                               'suggestion': '改为残玉纹'}],
+                   'verdict': '信息越界'}
+    # 重审脚本：logic 干净（编辑修好了）+ consistency 报编辑前已存在的晚晴截断
+    re_logic = [_clean_logic(0)]
+    re_cons = [_clean_cons([{'level': 'P0', 'dimension': '名称一致性',
+                             'character': '苏晚晴', 'location': 'Part 10',
+                             'description': "苏晚晴被截断为'晚晴'，不在名册登记写法内",
+                             'suggestion': "将'晚晴'改为'苏晚晴'"}])]
+    repairer = ConsistencyRepairer(service, _ScriptedAgent(re_logic),
+                                   _ScriptedAgent(re_cons))
+    cons_first = _clean_cons()
+
+    def fake_call_llm(system, user, *a, **k):
+        return _edit_blocks([('苏晚晴在旁护法。他腕间的桃花蛊纹青黑暴涨，',
+                              '苏晚晴在旁护法。他腕间的残玉纹路青黑暴涨，')])
+
+    with patch('services.consistency_repair.call_llm', side_effect=fake_call_llm):
+        note = asyncio.run(repairer.maybe_repair_part(
+            10, part10, logic_first, cons_first, state_mock=_mock_state()))
+    # 行为不变：1→1 判劣化回退（不保留仍带 P0 的编辑稿）
+    entries = [e for e in service.data['revision_log']
+               if e.get('type') == 'targeted_edit']
+    assert entries, '编辑段应已执行'
+    assert entries[-1].get('revision_degraded') is True, entries[-1]
+    assert entries[-1].get('suspect_judge_noise') is True, entries[-1]
+    assert service.saved_chunks[10] == part10, '回退保留原文'
+    assert note.get('revision_passed') is False, note
+    logger.info('[test_s4_noise] PASS: suspect_judge_noise 打标 + 回退行为不变')
+
+
 # ---------------- S3（R8-3）: advisory 预算优先级重排 ----------------
 
 def _called_parts(service, cons_agent):
@@ -923,7 +1261,13 @@ if __name__ == '__main__':
     logger.info('=' * 60)
     logger.info('test_round8_lastmile.py —— Round 8 最后一公里轮回归（mock LLM）')
     logger.info('=' * 60)
-    for fn in (test_earliest_departure_parts_takes_first_death,
+    for fn in (test_s4_expected_min_len_escalation_ladder,
+               test_s4_aider_style_retry_only_failed_blocks,
+               test_s4_empty_return_no_retry,
+               test_s4_subset_edit_mode,
+               test_s4_departed_oracle_rescues_improved_edit,
+               test_s4_suspect_judge_noise_flag,
+               test_earliest_departure_parts_takes_first_death,
                test_classify_departed_occurrences_real_replay,
                test_classify_default_legal_conservative,
                test_s1_departed_anchor_bridges_edit,

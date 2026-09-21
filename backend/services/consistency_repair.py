@@ -105,6 +105,15 @@ _EDIT_MIN_SEARCH_LEN = 15         # SEARCH 最短长度
 _EDIT_LEN_TOLERANCE = 0.30        # 替换片段长度 ±30%
 _EDIT_TOTAL_LEN_TOLERANCE = 0.10  # 全文长度变化 ≤10%（保 G2/G3 密度）
 _EDIT_ANCHOR_MIN = 10             # anchor 引文最短长度（定位信号下限）
+# R8-4（S4）: 编辑调用加固常量
+_EDIT_EXPECTED_MIN_LEN = 80       # 一个最小编辑块的字数——接线 llm_client.py:338
+                                  # 既有短返升级阶梯（finish_reason=length 且输出
+                                  # 不足时 max_tokens 翻倍重试；空返回走它而非
+                                  # aider 式重试，两机制不叠加）
+_EDIT_MAX_CALLS = 2               # 每 Part 编辑调用上限（aider 式裁定：≤2 次
+                                  # 调用、≤1 轮应用；不改 MAX_REWRITE_ROUNDS=2）
+_RETRYABLE_FAIL_REASONS = ('search_not_unique', 'search_too_short',
+                           'blocks_overlap', 'replace_len_out_of_tolerance')
 # anchor 引文抽取：description/location 的引号 span（R5-4 三步工序强制 ≤40 字
 # 引文 / R6-1 logic 明细 description 的 原文：“anchor” 段）
 _ANCHOR_QUOTE_RE = re.compile('[「」『』“”‘’"\']([^「」『』“”‘’"\']{10,60})[「」『』“”‘’"\']')
@@ -584,6 +593,73 @@ def _edit_subset_trigger_ok(base_text: str, base_logic: dict, base_cons: dict,
     return True, anchors
 
 
+def _apply_targeted_edits_detailed(base_text: str, raw_output: str) -> tuple:
+    """R8-4（S4）: _apply_targeted_edits 的详单版——失败块带 reason/search/count
+    （供 aider 式失败反馈重试构造"失败原因 + 最近邻上下文"）。
+
+    每块校验（任一失败 → 该块不应用并记 failure+detail）：
+      - base_text.count(search) == 1（唯一性硬闸，禁模糊匹配）
+      - len(search) >= 15
+      - abs(len(replace) - len(search)) <= 0.30 * len(search)（±30% 长度守卫）
+      - 块间在原文中不重叠
+    全文守卫：abs(len(new_text) - len(base_text)) <= 0.10 * len(base_text)
+    （保 G2/G3 密度不被破坏，超限则整体回退编辑）。
+
+    Returns:
+        (new_text, applied_count, failures, details)——applied_count==0 时
+        new_text == base_text（未改动；调用方落回全量重写）。
+    """
+    text = base_text or ''
+    blocks = _EDIT_BLOCK_RE.findall(raw_output or '')
+    if not blocks:
+        return text, 0, ['no_valid_block'], []
+    if len(blocks) > _EDIT_MAX_BLOCKS:
+        logger.info(f'[ConsistencyRepairer] 编辑块 {len(blocks)} 个超过上限 '
+                    f'{_EDIT_MAX_BLOCKS}，取前 {_EDIT_MAX_BLOCKS} 个')
+        blocks = blocks[:_EDIT_MAX_BLOCKS]
+    accepted: list = []   # (start, end, replace)
+    failures: list = []
+    details: list = []
+    for raw_search, raw_replace in blocks:
+        search = raw_search.strip('\r\n')
+        replace = raw_replace.strip('\r\n')
+        if len(search) < _EDIT_MIN_SEARCH_LEN:
+            failures.append(f'search_too_short({len(search)})')
+            details.append({'search': search, 'reason': 'search_too_short'})
+            continue
+        count = text.count(search)
+        if count != 1:
+            failures.append('search_not_unique')
+            details.append({'search': search, 'reason': 'search_not_unique',
+                            'count': count})
+            continue
+        if abs(len(replace) - len(search)) > _EDIT_LEN_TOLERANCE * len(search):
+            failures.append('replace_len_out_of_tolerance')
+            details.append({'search': search, 'reason': 'replace_len_out_of_tolerance'})
+            continue
+        start = text.find(search)
+        end = start + len(search)
+        if any(start < e and b < end for b, e, _ in accepted):
+            failures.append('blocks_overlap')
+            details.append({'search': search, 'reason': 'blocks_overlap'})
+            continue
+        accepted.append((start, end, replace))
+    if not accepted:
+        return text, 0, failures or ['all_blocks_failed'], details
+    accepted.sort(key=lambda x: x[0])
+    parts: list = []
+    cursor = 0
+    for start, end, replace in accepted:
+        parts.append(text[cursor:start])
+        parts.append(replace)
+        cursor = end
+    parts.append(text[cursor:])
+    new_text = ''.join(parts)
+    if abs(len(new_text) - len(text)) > _EDIT_TOTAL_LEN_TOLERANCE * len(text):
+        return text, 0, failures + ['total_len_exceeded'], details
+    return new_text, len(accepted), failures, details
+
+
 def _apply_targeted_edits(base_text: str, raw_output: str) -> tuple:
     """R6-5（S3）: 解析并应用 SEARCH/REPLACE 编辑块（纯函数，零相似度）。
 
@@ -599,48 +675,105 @@ def _apply_targeted_edits(base_text: str, raw_output: str) -> tuple:
         (new_text, applied_count, failures)——applied_count==0 时 new_text ==
         base_text（未改动；调用方落回全量重写）。
     """
-    text = base_text or ''
-    blocks = _EDIT_BLOCK_RE.findall(raw_output or '')
-    if not blocks:
-        return text, 0, ['no_valid_block']
-    if len(blocks) > _EDIT_MAX_BLOCKS:
-        logger.info(f'[ConsistencyRepairer] 编辑块 {len(blocks)} 个超过上限 '
-                    f'{_EDIT_MAX_BLOCKS}，取前 {_EDIT_MAX_BLOCKS} 个')
-        blocks = blocks[:_EDIT_MAX_BLOCKS]
-    accepted: list = []   # (start, end, replace)
-    failures: list = []
-    for raw_search, raw_replace in blocks:
-        search = raw_search.strip('\r\n')
-        replace = raw_replace.strip('\r\n')
-        if len(search) < _EDIT_MIN_SEARCH_LEN:
-            failures.append(f'search_too_short({len(search)})')
-            continue
-        if text.count(search) != 1:
-            failures.append('search_not_unique')
-            continue
-        if abs(len(replace) - len(search)) > _EDIT_LEN_TOLERANCE * len(search):
-            failures.append('replace_len_out_of_tolerance')
-            continue
-        start = text.find(search)
-        end = start + len(search)
-        if any(start < e and b < end for b, e, _ in accepted):
-            failures.append('blocks_overlap')
-            continue
-        accepted.append((start, end, replace))
-    if not accepted:
-        return text, 0, failures or ['all_blocks_failed']
-    accepted.sort(key=lambda x: x[0])
-    parts: list = []
-    cursor = 0
-    for start, end, replace in accepted:
-        parts.append(text[cursor:start])
-        parts.append(replace)
-        cursor = end
-    parts.append(text[cursor:])
-    new_text = ''.join(parts)
-    if abs(len(new_text) - len(text)) > _EDIT_TOTAL_LEN_TOLERANCE * len(text):
-        return text, 0, failures + ['total_len_exceeded']
-    return new_text, len(accepted), failures
+    new_text, applied, failures, _ = _apply_targeted_edits_detailed(base_text, raw_output)
+    return new_text, applied, failures
+
+
+def _should_retry_edit(call_count: int, applied: int, details: list) -> bool:
+    """R8-4（S4）: aider 式失败反馈重试判定（有界）。
+
+    条件：编辑调用次数未达上限（≤2 次/Part）且**块应用失败**（details 非空）
+    且（至少一块已应用，或全部失败均为 anchor 类可修原因——search_not_unique/
+    search_too_short/blocks_overlap/replace_len_out_of_tolerance）。
+    空返回（no_valid_block，details 为空）不触发重试——走 expected_min_len
+    的 max_tokens 翻倍升级（llm_client.py:338 既有阶梯），两机制不叠加
+    （防最坏 2×337s 墙钟）。
+    """
+    if call_count >= _EDIT_MAX_CALLS or not details:
+        return False
+    if applied > 0:
+        return True
+    return all(d.get('reason') in _RETRYABLE_FAIL_REASONS for d in details)
+
+
+def _departed_oracle_improved(before_text: str, after_text: str, ledger: dict,
+                              part_num: int) -> tuple:
+    """R8-4（S4）: departed 类确定性验收 oracle（编辑后、LLM 重审前跑分类器）。
+
+    illegal 计数严格下降且无新增 illegal span（after 的 span 集合 ⊆ before 的）
+    → deterministic_improved=True。判据确定性、可证（不依赖 LLM 稳定性——
+    SWE-agent linter-gate 模式；R6-3 429 盲区修复同属 soundness 补强）。
+
+    Returns:
+        (improved: bool, meta: {'illegal_before', 'illegal_after',
+                                'after_spans': set})
+    """
+    meta = {'illegal_before': 0, 'illegal_after': 0, 'after_spans': set()}
+    if not ledger:
+        return False, meta
+    for name, entry in (ledger or {}).items():
+        for item in classify_departed_occurrences(before_text, entry, part_num=part_num):
+            if item['kind'] == 'illegal':
+                meta['illegal_before'] += 1
+        for item in classify_departed_occurrences(after_text, entry, part_num=part_num):
+            if item['kind'] == 'illegal':
+                meta['illegal_after'] += 1
+                if item['span']:
+                    meta['after_spans'].add(item['span'])
+    before_spans: set = set()
+    for name, entry in (ledger or {}).items():
+        for item in classify_departed_occurrences(before_text, entry, part_num=part_num):
+            if item['kind'] == 'illegal' and item['span']:
+                before_spans.add(item['span'])
+    improved = (meta['illegal_after'] < meta['illegal_before']
+                and not (meta['after_spans'] - before_spans))
+    return improved, meta
+
+
+def _departed_oracle_rescues(round_cons: dict, new_cons: dict, new_text: str,
+                             after_spans: set) -> bool:
+    """R8-4（S4）: oracle 介入条件 —— 重审出现的"新问题类别"是否全部是
+    departed 类 P0 且其 span 已被消除（无新类别时按纯 residual 比较，oracle
+    已证 illegal 严格下降）。非 departed 类新类别 → 不介入（判定逐字节不变）。
+    """
+    first_sigs = {_issue_signature(i) for i in _p0_issues(round_cons)}
+    new_issues = [i for i in _p0_issues(new_cons)
+                  if _issue_signature(i) not in first_sigs]
+    if not new_issues:
+        return True
+    for issue in new_issues:
+        if (issue.get('dimension') or '').strip() not in _DEPARTED_DIMENSIONS:
+            return False
+        anchor = _issue_anchor(issue, new_text)
+        if anchor and anchor in new_text and anchor in (after_spans or set()):
+            return False  # span 仍在且仍 illegal → 未消除
+    return True
+
+
+def _suspect_judge_noise(round_logic: dict, round_cons: dict, new_logic: dict,
+                         new_cons: dict, base_text: str, registry: dict) -> bool:
+    """R8-4（S4）: judge 噪声嫌疑观测字段（纯观测，不改判定、不保留编辑稿）。
+
+    回退时若 first-pass P0 签名差集为空——所有首检 P0 均已在重审中消失、
+    仅剩"编辑前已存在的 span 类 P0"（其锚点在 base_text 逐字存在：引文/字面
+    片段/姓名配对错误名）——则打标。Part 10 实证形态（首审 10/10 漏判编辑前
+    已存在的"晚晴"截断、重审 8/10 抓到 → 1→1 判劣化回退）由 Tester 统计。
+    """
+    first_sigs = ({_issue_signature(i) for i in _p0_issues(round_logic)}
+                  | {_issue_signature(i) for i in _p0_issues(round_cons)})
+    new_issues = _p0_issues(new_logic) + _p0_issues(new_cons)
+    if not new_issues:
+        return False
+    if first_sigs & {_issue_signature(i) for i in new_issues}:
+        return False  # 有首检 P0 残留 → 不是纯噪声
+    for issue in new_issues:
+        if _issue_anchor(issue, base_text):
+            continue  # 锚点在编辑前文本逐字存在 → 编辑前已有
+        pairs = derive_name_pairs(base_text, {'issues': [issue]}, registry or {})
+        if any((p.get('wrong') or '') and p['wrong'] in base_text for p in pairs):
+            continue  # 姓名配对错误名在编辑前文本存在 → 编辑前已有
+        return False
+    return True
 
 
 def is_revision_degraded(p0_before: int, residual_p0: int,
@@ -1021,14 +1154,19 @@ class ConsistencyRepairer:
                                     base_text: str = None, base_logic: dict = None,
                                     base_cons: dict = None,
                                     applied_name_pairs: list = None) -> dict | None:
-        """R6-5（S3）: SEARCH/REPLACE 定点编辑（全量重写的前置尝试，每 Part ≤1 次）。
+        """R6-5（S3）+ R8-P0-1（S1）+ R8-4（S4）: SEARCH/REPLACE 定点编辑
+        （全量重写的前置尝试，每 Part ≤2 次调用、应用 ≤1 轮）。
 
         链路：spotfix（S2）→ 本方法（S3）→ _rewrite_repair（S2 签名），每段
         独立重审、独立判定；编辑失败只回退编辑层，不改变 MAX_REWRITE_ROUNDS=2
         总预算。
 
         触发条件（全部满足）：count_p0(base_logic, base_cons) ≤3 且每个 P0
-        issue 都有唯一 anchor（_edit_trigger_ok，纯确定性）。
+        issue 都有唯一 anchor（_edit_trigger_ok，纯确定性）；P0>3 时 departed
+        类子集旁路（_edit_subset_trigger_ok，R8-4）。
+        R8-4 加固：expected_min_len=80 接线短返升级阶梯；aider 式失败反馈
+        重试（≤2 次调用）；departed 类 oracle（分类器证 illegal 严格下降时
+        按改善而非劣化判定）；suspect_judge_noise 观测字段（不改判定）。
 
         Returns:
             None —— 未触发 / 无有效编辑块（调用方带原 base 落全量重写）；
@@ -1064,24 +1202,56 @@ class ConsistencyRepairer:
             part_num, round_logic, round_cons, part_text=base_text,
             applied_name_pairs=applied_name_pairs, numbered=True,
             departed_only=subset, departed_names=list(departed_anchors))
-        user_prompt = (
+        prompt_head = (
             brief
-            + self._departed_spec_block(departed_anchors)
+            + self._departed_spec_block(departed_anchors))
+        user_prompt = (
+            prompt_head
             + f'\n\n## Part {part_num} 全文（编辑对象）\n{base_text}'
             + '\n\n请按编辑协议输出 SEARCH/REPLACE 编辑块'
               '（每个块前注明针对的问题编号；最多 3 个块）。')
+        # R8-4（S4）: expected_min_len=80 接线 llm_client.py:338 既有短返升级
+        # 阶梯（finish_reason=length 且输出不足 → max_tokens 翻倍重试一次）
         try:
             raw = await asyncio.to_thread(
                 call_llm, TARGETED_EDIT_SYSTEM, user_prompt, 0.2,
                 get_json_max_tokens(), 'targeted_edit', False, None,
-                s.work_id, None)
+                s.work_id, _EDIT_EXPECTED_MIN_LEN)
         except Exception as e:
             logger.info(f'[ConsistencyRepairer] Part {part_num} 定点编辑调用失败'
                         f'（落回全文重写）: {e}')
             return None
-        new_text, applied, failures = _apply_targeted_edits(base_text, raw)
+        edit_calls = 1
+        new_text, applied, failures, details = _apply_targeted_edits_detailed(base_text, raw)
+        # R8-4（S4）: aider 式失败反馈重试（≤2 次调用/Part、应用 ≤1 轮；空返回
+        # 不重试——走 expected_min_len 升级，两机制不叠加）
+        retried = False
+        if _should_retry_edit(edit_calls, applied, details):
+            retried = True
+            current_text = new_text if applied > 0 else base_text
+            retry_prompt = self._build_edit_retry_prompt(
+                prompt_head, part_num, current_text, details, applied)
+            try:
+                raw2 = await asyncio.to_thread(
+                    call_llm, TARGETED_EDIT_SYSTEM, retry_prompt, 0.2,
+                    get_json_max_tokens(), 'targeted_edit', False, None,
+                    s.work_id, _EDIT_EXPECTED_MIN_LEN)
+            except Exception as e:
+                logger.info(f'[ConsistencyRepairer] Part {part_num} 编辑重试调用失败'
+                            f'（沿用首轮结果）: {e}')
+                raw2 = ''
+            edit_calls += 1
+            if raw2:
+                new_text2, applied2, failures2, details2 = _apply_targeted_edits_detailed(
+                    current_text, raw2)
+                if applied2 > 0:
+                    new_text, applied, failures, details = (
+                        new_text2, applied + applied2, failures2, details2)
         edit_meta = {'type': 'targeted_edit', 'applied_blocks': applied,
-                     'failed_blocks': len(failures), 'anchor_count': len(anchors)}
+                     'failed_blocks': len(failures), 'anchor_count': len(anchors),
+                     'edit_calls': edit_calls}
+        if retried:
+            edit_meta['edit_retried'] = True
         if subset:
             # R8-4（S4）: 子集编辑模式标记（只编辑 departed 类 P0，纯观测）
             edit_meta['edit_subset'] = True
@@ -1090,6 +1260,17 @@ class ConsistencyRepairer:
                         f'（{len(failures)} 处：{failures[:3]}），落回全文重写')
             return None
 
+        # R8-4（S4）: departed 类 oracle —— 编辑后、LLM 重审前跑分类器（确定性
+        # 验收优先于模型自述）；只在 departed 编辑且 illegal 严格下降时介入
+        oracle_meta = {}
+        if departed_anchors:
+            improved, oracle_meta = _departed_oracle_improved(
+                base_text, new_text, self._departed_ledger(), part_num)
+            if improved:
+                edit_meta['departed_oracle'] = True
+                edit_meta['oracle_illegal'] = (
+                    f"{oracle_meta.get('illegal_before')}→{oracle_meta.get('illegal_after')}")
+
         # 编辑后走既有四段式：双 agent 重审 → 劣化回退 / 保留
         new_logic = await self._re_review(self.logic_agent, 'logic', part_num, new_text, state_mock)
         new_cons = await self._re_review(self.consistency_agent, 'consistency', part_num, new_text, state_mock)
@@ -1097,18 +1278,32 @@ class ConsistencyRepairer:
 
         if is_revision_degraded(p0_before, residual_p0, round_cons, new_cons,
                                 round_logic, new_logic):
-            # 回退编辑层：保留 base_text（原文/spotfix 稿从未离开）
-            s._save_chunk_progress(part_num, base_text, truncate(base_text, n=200, suffix='...'))
-            note = {'revision_attempted': True, 'revision_passed': False,
-                    'revision_edited': True, 'residual_p0': residual_p0,
-                    'revision_degraded': True,
-                    '_base_logic': new_logic, '_base_cons': new_cons,
-                    '_base_text': base_text}
-            self._append_revision_log(part_num, p0_before, note, extra=edit_meta)
-            await self._emit_log(
-                f'↩️ Part {part_num} 定点编辑后劣化（{p0_before}→{residual_p0} 或引入'
-                f'新问题类别），已回退编辑层（{applied} 块未保留）')
-            return note
+            # R8-4（S4）: departed 类 oracle 介入——分类器证 illegal 严格下降且
+            # 重审新问题类别全部是"departed 类且 span 已消除" → 按改善而非劣化
+            # 判定（非 departed 类编辑不走此旁路，判定逐字节不变）
+            if edit_meta.get('departed_oracle') and _departed_oracle_rescues(
+                    round_cons, new_cons, new_text,
+                    oracle_meta.get('after_spans') or set()):
+                logger.info(f'[ConsistencyRepairer] Part {part_num} departed oracle 介入：'
+                            f'分类器证 illegal {edit_meta.get("oracle_illegal")} 严格下降，'
+                            f'重审新问题为已消除的 departed 类，按改善判定')
+            else:
+                if _suspect_judge_noise(round_logic, round_cons, new_logic, new_cons,
+                                        base_text, registry):
+                    # R8-4（S4）: judge 噪声嫌疑观测字段（不改判定、不保留编辑稿）
+                    edit_meta['suspect_judge_noise'] = True
+                # 回退编辑层：保留 base_text（原文/spotfix 稿从未离开）
+                s._save_chunk_progress(part_num, base_text, truncate(base_text, n=200, suffix='...'))
+                note = {'revision_attempted': True, 'revision_passed': False,
+                        'revision_edited': True, 'residual_p0': residual_p0,
+                        'revision_degraded': True,
+                        '_base_logic': new_logic, '_base_cons': new_cons,
+                        '_base_text': base_text}
+                self._append_revision_log(part_num, p0_before, note, extra=edit_meta)
+                await self._emit_log(
+                    f'↩️ Part {part_num} 定点编辑后劣化（{p0_before}→{residual_p0} 或引入'
+                    f'新问题类别），已回退编辑层（{applied} 块未保留）')
+                return note
 
         if residual_p0 <= 0:
             # 通过：落盘编辑稿 + state_mock 快照同步
@@ -1139,6 +1334,42 @@ class ConsistencyRepairer:
             f'🔁 Part {part_num} 定点编辑严格改善（{p0_before}→{residual_p0}），'
             f'保留编辑稿并继续全文重写')
         return note
+
+    def _build_edit_retry_prompt(self, prompt_head: str, part_num: int,
+                                 current_text: str, details: list,
+                                 applied: int) -> str:
+        """R8-4（S4）: aider 式失败反馈重试 prompt。
+
+        附失败原因 + 该 span 的最近邻上下文 + "其余块已应用，勿重发"
+        （aider editblock_coder 原话机制）；全文用**已应用首轮块后**的当前
+        文本（applied>0 时），失败块在新文本上重新定位。
+        """
+        lines = ['## 上一轮编辑块的失败反馈（请只修正下列失败块）']
+        for d in details:
+            search = (d.get('search') or '')[:40]
+            idx = current_text.find(d.get('search') or '\u0000')
+            neighbor = ''
+            if idx >= 0:
+                s0 = max(0, idx - 20)
+                neighbor = current_text[s0:idx + len(d['search']) + 20].replace('\n', ' ')
+            reason = {
+                'search_not_unique': f'在正文中出现 {d.get("count", 0)} 次'
+                                     f'（需恰好 1 次，请扩大片段到唯一）',
+                'search_too_short': '片段不足 15 字（请扩大片段）',
+                'blocks_overlap': '与其他编辑块在原文中重叠（请调整边界）',
+                'replace_len_out_of_tolerance': '替换片段长度超出 SEARCH 的 ±30%',
+            }.get(d.get('reason'), str(d.get('reason')))
+            lines.append(f'- 失败原因：{reason}；你的 SEARCH：「{search}」；'
+                         f'最近邻上下文：…{neighbor}…')
+        if applied > 0:
+            lines.append(f'其余 {applied} 个块已应用，勿重发；只重发上面失败的块。')
+        return (
+            prompt_head
+            + f'\n\n## Part {part_num} 全文（编辑对象，已应用 {applied} 个编辑块）\n'
+            + current_text
+            + '\n\n' + '\n'.join(lines)
+            + '\n\n请按编辑协议输出 SEARCH/REPLACE 编辑块'
+              '（每个块前注明针对的问题编号；最多 3 个块）。')
 
     # ----------------- R4-5: 全文重写四段式 -----------------
 
