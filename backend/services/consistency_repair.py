@@ -37,7 +37,7 @@ from core.established_facts import EstablishedFacts
 from core.logger import get_logger
 from core.name_registry import promoted_candidates, render_name_roster
 from core.text_utils import truncate
-from services.name_audit import record_name_pairs
+from services.name_audit import append_audit_log, record_name_pairs
 
 logger = get_logger('consistency_repair')
 
@@ -344,6 +344,23 @@ def _issue_signature(issue: dict) -> tuple:
             (issue.get('character') or '').strip())
 
 
+def _count_non_name_p0(logic_result: dict, consistency_result: dict) -> int:
+    """R6-2（S2）: 非名称残留 P0 数 —— consistency 侧非 dimension=='名称一致性'
+    的 P0 issue 数 + logic p0_count（logic 明细不喂名称分诊，全部计入非名称
+    残留；残留中若仍有名称类 P0，本字段只数非名称部分，如实反映"本修复管不到
+    的残留"）。"""
+    n = 0
+    try:
+        n += int((logic_result or {}).get('p0_count') or 0)
+    except (TypeError, ValueError):
+        pass
+    for i in ((consistency_result or {}).get('issues') or []):
+        if isinstance(i, dict) and i.get('level') == 'P0' \
+                and (i.get('dimension') or '').strip() != '名称一致性':
+            n += 1
+    return n
+
+
 def is_revision_degraded(p0_before: int, residual_p0: int,
                          first_cons: dict, new_cons: dict,
                          first_logic: dict, new_logic: dict) -> bool:
@@ -437,6 +454,28 @@ class ConsistencyRepairer:
                     part_num, part_text, pairs, registry, p0,
                     logic_result, consistency_result, state_mock)
                 if note is not None:
+                    # R6-2（S2）: 残留 P0 不连坐、继续治 —— spotfix 已独立落盘
+                    # （partial_applied），以修复稿为 base 转全文重写；劣化判据
+                    # 与二轮条件换成效审后基线（_base_logic/_base_cons/residual），
+                    # first_pass_p0 恒定原始首检数（聚合预算护栏不被修复过程改变）
+                    if note.get('residual_p0', 0) > 0 and note.get('_base_text'):
+                        base_text = note.pop('_base_text')
+                        base_logic = note.pop('_base_logic')
+                        base_cons = note.pop('_base_cons')
+                        base_pairs = note.pop('_base_pairs', [])
+                        logger.info(f'[ConsistencyRepairer] Part {part_num} 定点修复后残留 '
+                                    f'{note["residual_p0"]} 个 P0（非名称 '
+                                    f'{note.get("residual_non_name_p0")} 个），以修复稿为 base 落全文重写')
+                        note = await self._rewrite_repair(
+                            part_num, part_text, note['residual_p0'],
+                            logic_result, consistency_result, state_mock, registry,
+                            base_text=base_text, base_logic=base_logic,
+                            base_cons=base_cons, applied_name_pairs=base_pairs)
+                        note.setdefault('first_pass_p0', p0)
+                        return note
+                    # 已通过（residual<=0）或无 base（旧形态）：维持现状
+                    for _k in ('_base_text', '_base_logic', '_base_cons', '_base_pairs'):
+                        note.pop(_k, None)
                     # R4-3: 真实首检数随 note 上行（修复通过时 entry 的结果已被
                     # 重审值替换，聚合器需要它计算 first_pass_p0 预算护栏）
                     note.setdefault('first_pass_p0', p0)
@@ -526,42 +565,93 @@ class ConsistencyRepairer:
                 f'重审 P0 归零，零重写零内容损失）')
             return note
 
-        # 仍不过：回退保留原文（现有兜底语义不变），留痕供全量跑后审计
-        s._save_chunk_progress(part_num, part_text, truncate(part_text, n=200, suffix='...'))
+        # 仍不过：R6-2（S2）修复动作分层持久化 —— 名称修复本身安全（过 4 闸 +
+        # 计数恒等式）→ 独立保留；残留的是"其他" P0，不是本修复的错
+        # （guardrails OnFailAction: 每个 validator 独立处置，一个 FIX 成功的
+        # 修复不因同批次其他校验仍失败而被回滚）。此前整篇回退原文，reval 实证
+        # Part 5"尘儿→林尘"白修：确定性安全修复被两个它管不到的 logic P0 拖累。
+        residual_non_name_p0 = _count_non_name_p0(new_logic, new_cons)
+        summary = truncate(new_text, n=200, suffix='...')
+        s._save_chunk_progress(part_num, new_text, summary)
+        part_key = str(part_num)
+        state_mock.parts[part_key] = new_text        # 快照同步：后续 Part 评审要看修复稿
+        state_mock.final_draft[part_key] = new_text
         note = {'revision_attempted': True, 'revision_passed': False,
-                'revision_spotfixed': True, 'residual_p0': residual_p0}
-        # R5-2: 过闸但重审未通过 → 沉淀为 advisory（applied_verified 不置位）
+                'revision_spotfixed': True, 'partial_applied': True,
+                'residual_p0': residual_p0,
+                'residual_non_name_p0': residual_non_name_p0,
+                # 基线仅供 maybe_repair_part 转交 _rewrite_repair 使用，以下划线
+                # 开头，maybe_repair_part 必须在合并进 per_part_results 前 pop 掉
+                # （不得进聚合口径）
+                '_base_logic': new_logic, '_base_cons': new_cons,
+                '_base_text': new_text,
+                '_base_pairs': [dict(p) for p in gated]}
+        # R5-2: 过闸但重审未整体通过 → 沉淀为 advisory（applied_verified 不置位；
+        # recover_drift_dict_from_revision_log 按 revision_passed 恢复，保持 False）
         record_name_pairs(s.data, gated, part_num, trigger, gates_passed=True)
-        self._append_revision_log(part_num, p0_before, note, extra=spot_meta,
-                                  trigger=trigger)
+        # R6-2: 双留痕 —— revision_log（partial_applied + 非名称残留数，只增不改）
+        # + name_audit_log（action='partial_applied'；trigger 不是 'final_audit'，
+        # summarize_name_audit 的 latest-entry 口径只认 final_audit，不影响 G4）
+        self._append_revision_log(
+            part_num, p0_before, note,
+            extra=dict(spot_meta, partial_applied=True,
+                       residual_non_name_p0=residual_non_name_p0),
+            trigger=trigger)
+        append_audit_log(s.data, {
+            'part': part_num,
+            'wrong': '|'.join(p['wrong'] for p in gated),
+            'right': '|'.join(p['right'] for p in gated),
+            'count_before': '|'.join(str(part_text.count(p['wrong'])) for p in gated),
+            'count_after': '|'.join(str(new_text.count(p['wrong'])) for p in gated),
+            'action': 'partial_applied', 'trigger': trigger,
+            'pair_source': '|'.join(sorted({p['source'] for p in gated})),
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')})
         await self._emit_log(
-            f'↩️ Part {part_num} 姓名定点修复后仍有 {residual_p0} 个 P0，'
-            f'回退保留原文（{spot_meta["wrong_name"]}→{spot_meta["right_name"]}）')
+            f'🔧 Part {part_num} 姓名定点修复已独立落盘'
+            f'（{spot_meta["wrong_name"]}→{spot_meta["right_name"]}，残留 '
+            f'{residual_non_name_p0} 个非名称 P0 转全文重写，修复不连坐）')
         return note
 
     # ----------------- R4-5: 全文重写四段式 -----------------
 
     async def _rewrite_repair(self, part_num: int, part_text: str, p0_before: int,
                               logic_result: dict, consistency_result: dict,
-                              state_mock, registry: dict) -> dict:
-        """四段式：分流（调用方已完成）→ 变坏回退 → 条件性第二跳 → 失败汇总。"""
+                              state_mock, registry: dict,
+                              base_text: str = None, base_logic: dict = None,
+                              base_cons: dict = None,
+                              applied_name_pairs: list = None) -> dict:
+        """四段式：分流（调用方已完成）→ 变坏回退 → 条件性第二跳 → 失败汇总。
+
+        R6-2（S2）base 参数（与 S3 一次设计完，默认 None = 既有 15 项调用零改）：
+        - base_text=None → 用 part_text；否则以 base_text 为重写的"当前文本"
+          （spotfix 修复稿）—— brief 姓名指令段计数、产物下限 min_acceptable、
+          落盘/回退分支的"原文"一律用 base_text（原文从未离开，回退代价小）；
+        - base_logic/base_cons=None → 用传入的 logic_result/consistency_result；
+          否则为效审后基线（spotfix 重审结果）—— 劣化判据与二轮条件比它；
+        - p0_before 即劣化判据与二轮条件的基线（S2 链路传 spotfix 后残留数）；
+        - applied_name_pairs：spotfix 已应用的配对（brief 增"姓名已按名册
+          归一化"指令行，防重写把名字改回去）。
+        """
         s = self.service
+        base_text = base_text if base_text is not None else (part_text or '')
+        round_logic = base_logic if base_logic is not None else logic_result
+        round_cons = base_cons if base_cons is not None else consistency_result
         introduced: list = []
-        round_logic, round_cons = logic_result, consistency_result
         current_p0_before = p0_before
         departed_names = [n for n in (s.data.get('character_state_track') or {}) if n]
-        # 名称类指令（配对存在但闸未过 / 无名称类 issue 时为空）
-        name_pairs = derive_name_pairs(part_text, consistency_result, registry)
+        # 名称类指令（配对存在但闸未过 / 无名称类 issue 时为空）—— 对 base_text
+        # 推导（已修复的名字 count=0 自然不产配对，由 applied_name_pairs 行兜底）
+        name_pairs = derive_name_pairs(base_text, consistency_result, registry)
 
         for round_no in range(1, MAX_REWRITE_ROUNDS + 1):
             brief = self._build_revision_brief(
                 part_num, round_logic, round_cons,
                 name_pairs=name_pairs, introduced_problems=introduced,
-                part_text=part_text)
+                part_text=base_text, applied_name_pairs=applied_name_pairs)
             new_text, rewrite_error = await self._rewrite_once(part_num, brief)
 
-            # 重写产物不可用（空/过短/异常）—— 保留原文，仅留痕
-            min_acceptable = max(500, len(part_text) // 3)
+            # 重写产物不可用（空/过短/异常）—— 保留原文（base_text），仅留痕
+            min_acceptable = max(500, len(base_text) // 3)
             if not new_text or len(new_text) < min_acceptable:
                 note = {'revision_attempted': True, 'revision_passed': False,
                         'revision_error': rewrite_error or 'rewrite_empty_or_too_short'}
@@ -602,7 +692,8 @@ class ConsistencyRepairer:
             # R4-5 变坏回退显式化：residual 没变好或出现首检没有的新 P0 类别
             if is_revision_degraded(current_p0_before, residual_p0,
                                     round_cons, new_cons, round_logic, new_logic):
-                s._save_chunk_progress(part_num, part_text, truncate(part_text, n=200, suffix='...'))
+                # R6-2: 回退的"原文"一律是 base_text（spotfix 稿，从未离开）
+                s._save_chunk_progress(part_num, base_text, truncate(base_text, n=200, suffix='...'))
                 note = {'revision_attempted': True, 'revision_passed': False,
                         'residual_p0': residual_p0, 'revision_degraded': True}
                 self._append_revision_log(part_num, p0_before, note, trigger=trigger)
@@ -641,15 +732,15 @@ class ConsistencyRepairer:
                     f'（附第一轮新引入问题清单 {len(introduced)} 条）')
                 continue
 
-            # 未改善或已达 2 轮硬顶：保留原文（恢复落盘），仅留痕
-            s._save_chunk_progress(part_num, part_text, truncate(part_text, n=200, suffix='...'))
+            # 未改善或已达 2 轮硬顶：保留原文（恢复落盘 base_text），仅留痕
+            s._save_chunk_progress(part_num, base_text, truncate(base_text, n=200, suffix='...'))
             note = {'revision_attempted': True, 'revision_passed': False, 'residual_p0': residual_p0}
             self._append_revision_log(part_num, p0_before, note, trigger=trigger)
             await self._emit_log(f'↩️ Part {part_num} 重写后仍有 {residual_p0} 个 P0，保留原文')
             return note
 
-        # 理论不可达（循环内每个分支都 return）；防御性保留原文
-        s._save_chunk_progress(part_num, part_text, truncate(part_text, n=200, suffix='...'))
+        # 理论不可达（循环内每个分支都 return）；防御性保留原文（base_text）
+        s._save_chunk_progress(part_num, base_text, truncate(base_text, n=200, suffix='...'))
         note = {'revision_attempted': True, 'revision_passed': False,
                 'residual_p0': current_p0_before}
         self._append_revision_log(part_num, p0_before, note)
@@ -684,25 +775,46 @@ class ConsistencyRepairer:
     def _build_revision_brief(self, part_num: int, logic_result: dict,
                               consistency_result: dict, name_pairs: list = None,
                               introduced_problems: list = None,
-                              part_text: str = '') -> str:
+                              part_text: str = '',
+                              applied_name_pairs: list = None) -> str:
         """用 issues + 相关 established_facts + 角色名册生成 revision brief。
 
         R4-2 增强：名册段置尾（权威名源）；名称类指令具体到
         "错误写法'X'（本 Part 出现 N 次，例：<quote 锚点>）→ 正确写法'Y'；
         只改名字，其余一字不动"；logic V5 短协议无明细时明确要求对照名册与
-        前文事实清单逐项自查人名/物品名/角色状态。
+        前文事实清单逐项自查人名/物品名/角色状态/时间线。
         R4-5 增强：第二轮 brief 附第一轮新引入的问题清单。
+        R6-2（S2）增强：applied_name_pairs —— spotfix 已按名册归一化的配对，
+        brief 增一行"姓名已按名册归一化（X→Y），重写时不得再引入名册外写法"
+        （既有名册段兜底之上再加一层，防重写把已修的名字改回去）。
+        R6-1（S1）：logic 明细（含 anchor 引文）非空时自动进 l_p0 明细行。
         """
         l_p0 = [i for i in ((logic_result or {}).get('issues') or [])
-                if isinstance(i, dict) and i.get('level') == 'P0']
+                if isinstance(i, dict) and i.get('level') == 'P0'
+                and not i.get('_detail_placeholder')]  # R6-1: 占位项非可执行明细，不进 brief
         c_p0 = [i for i in ((consistency_result or {}).get('issues') or [])
                 if isinstance(i, dict) and i.get('level') == 'P0']
         lines = []
         lr = logic_result or {}
-        if lr.get('p0_count') and not l_p0:
-            lines.append(f"- 逻辑审查判定 P0 共 {lr.get('p0_count')} 处；结论: {(lr.get('verdict') or '')[:120]}")
-            lines.append('- 逻辑审查未给出问题明细：请对照下方角色名册与前文已确立事实清单，'
-                         '逐项自查人名/物品名/角色状态/时间线，逐一修正')
+        try:
+            _l_p0_total = int(lr.get('p0_count') or 0)
+        except (TypeError, ValueError):
+            _l_p0_total = 0
+        # R6-1: 明细不全（真实明细数 < p0_count）时保留 generic 自查行 —— 明细
+        # 只覆盖部分 P0，其余问题仍需模型对照名册与前文事实清单逐项自查
+        if _l_p0_total and len(l_p0) < _l_p0_total:
+            lines.append(f"- 逻辑审查判定 P0 共 {_l_p0_total} 处；结论: {(lr.get('verdict') or '')[:120]}")
+            if not l_p0:
+                lines.append('- 逻辑审查未给出问题明细：请对照下方角色名册与前文已确立事实清单，'
+                             '逐项自查人名/物品名/角色状态/时间线，逐一修正')
+            else:
+                lines.append('- 逻辑审查明细不全：除上述明细外，请对照下方角色名册与前文已确立'
+                             '事实清单，逐项自查其余人名/物品名/角色状态/时间线问题，逐一修正')
+        if applied_name_pairs:
+            applied_desc = '、'.join(
+                f"'{p.get('wrong')}'→'{p.get('right')}'" for p in applied_name_pairs)
+            lines.append(f'- 姓名已按名册归一化（{applied_desc}），'
+                         f'重写时不得再引入名册外写法')
         for i in l_p0 + c_p0:
             desc = (i.get('description') or '').strip()
             sugg = (i.get('suggestion') or '').strip()

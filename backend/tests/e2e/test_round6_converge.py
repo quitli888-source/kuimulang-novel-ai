@@ -792,6 +792,116 @@ def test_logic_detail_prompt_file_and_fallback_synced():
     logger.info('[test_detail_prompt_sync] PASS: 文件与 fallback 同步含硬约束')
 
 
+# ---------------- S2（R6-2）: 修复动作分层持久化 ----------------
+
+def test_s2_partial_applied_falls_through_to_rewrite():
+    """S2 验收 1-3: spotfix 过闸 + 重审残留 2 个非名称 P0 → 修复稿独立落盘
+    （partial_applied + residual_non_name_p0=2 + state_mock 快照同步），残留
+    以修复稿为 base 转重写（brief 含"姓名已按名册归一化"、劣化判据用效审后
+    基线 → 立即回退 base_text），first_pass_p0 恒定原始首检数，合并进
+    per_part_results 的 note 不含 logic_result/_base_* 键。"""
+    reg = build_name_registry(R6_CHARACTERS)
+    excerpt = SMOKE_A_PART2_EXCERPT
+    fixed_excerpt = excerpt.replace('林渊', '林万重')
+    service = _FakeService({'name_registry': reg, 'character_state_track': {},
+                            'parts': {'2': excerpt}})
+    # 首检 logic 2 P0 + cons 1 名称 P0 = 3；spotfix 重审 logic 仍 2、cons 干净
+    # → residual=2（全是 logic 非名称）；重写后重审仍 2（无改善）→ 劣化回退
+    logic_script = [_clean_logic(2, verdict='仍有矛盾'), _clean_logic(2, verdict='重写仍矛盾')]
+    cons_script = [_clean_cons(), _clean_cons()]
+    repairer = _repairer(service, logic_script, cons_script)
+    rewrite_calls: list = []
+    captured: dict = {}
+
+    async def fake_rewrite(self, part_num, brief):
+        rewrite_calls.append(brief)
+        return '重写稿内容。' * 400, ''
+
+    orig_rewrite_repair = ConsistencyRepairer._rewrite_repair
+
+    async def spy_rewrite_repair(self, part_num, part_text, p0_before,
+                                 logic_result, consistency_result, state_mock,
+                                 registry, **kw):
+        captured.update(kw)
+        captured['p0_before'] = p0_before
+        captured['part_text'] = part_text
+        return await orig_rewrite_repair(
+            self, part_num, part_text, p0_before, logic_result,
+            consistency_result, state_mock, registry, **kw)
+
+    state_mock = _mock_state()
+    with patch.object(ConsistencyRepairer, '_rewrite_once', fake_rewrite), \
+         patch.object(ConsistencyRepairer, '_rewrite_repair', spy_rewrite_repair):
+        note = asyncio.run(repairer.maybe_repair_part(
+            2, excerpt, _clean_logic(2, verdict='林渊尸体时间线矛盾'),
+            {'issues': [SMOKE_A_NAME_ISSUE], 'verdict': 'ok', 'overall_score': 6},
+            state_mock=state_mock))
+
+    # 1) 修复稿独立落盘（不是原文），state_mock 快照同步（后续 Part 评审看得到）
+    assert service.saved_chunks[2] == fixed_excerpt, '过闸修复必须独立保留'
+    assert service.saved_chunks[2].count('林渊') == 0
+    assert state_mock.parts['2'] == fixed_excerpt
+    assert state_mock.final_draft['2'] == fixed_excerpt
+    # 2) 双留痕：revision_log partial_applied + residual_non_name_p0=2
+    partial = [e for e in service.data['revision_log'] if e.get('partial_applied')]
+    assert len(partial) == 1, service.data['revision_log']
+    assert partial[0]['residual_non_name_p0'] == 2, partial[0]
+    assert partial[0]['revision_passed'] is False and partial[0]['p0_before'] == 3
+    audit = [e for e in service.data[AUDIT_LOG_KEY]
+             if e.get('action') == 'partial_applied']
+    assert len(audit) == 1 and audit[0]['trigger'] != 'final_audit'
+    # 3) 残留转重写：base_text=修复稿、p0_before=效审后残留、基线为效审后值
+    assert len(rewrite_calls) == 1, '劣化判据用效审后基线 → 立即回退不进第二轮'
+    assert captured['base_text'] == fixed_excerpt
+    assert captured['p0_before'] == 2
+    assert captured['base_logic']['p0_count'] == 2
+    assert '姓名已按名册归一化' in rewrite_calls[0]
+    assert "'林渊'→'林万重'" in rewrite_calls[0]
+    # 4) 回退落在 base_text（修复稿）；note 无 logic_result/_base_* 键
+    assert note.get('revision_passed') is False
+    assert note.get('revision_degraded') is True
+    for k in ('logic_result', 'consistency_result', '_base_text',
+              '_base_logic', '_base_cons', '_base_pairs'):
+        assert k not in note, k
+    # 5) first_pass_p0 恒定原始首检数（聚合预算护栏不被修复过程改变）
+    assert note.get('first_pass_p0') == 3
+    entry = {'part': 2, 'logic_result': _clean_logic(2), 'emotion_result': {},
+             'consistency_result': {'issues': [SMOKE_A_NAME_ISSUE]}}
+    entry.update(note)
+    report = aggregate_review_results([entry])
+    assert report['parts'][0]['first_pass_p0'] == 3
+    assert report['parts'][0]['residual_p0'] == 2
+    logger.info('[test_s2_partial] PASS: 修复独立落盘 + 残留不连坐转重写 + 基线正确')
+
+
+def test_s2_spotfix_pass_branch_unchanged():
+    """S2 验收 5: spotfix 通过分支（residual=0）行为不变 —— 落盘修复稿、
+    applied_verified 沉淀、无重写调用（R5 既有语义零改）。"""
+    reg = build_name_registry(R6_CHARACTERS)
+    service = _FakeService({'name_registry': reg, 'character_state_track': {},
+                            'parts': {'2': SMOKE_A_PART2_EXCERPT}})
+    repairer = _repairer(service, [_clean_logic(0)], [_clean_cons()])
+    rewrite_calls = []
+
+    async def fake_rewrite(self, part_num, brief):
+        rewrite_calls.append(brief)
+        return 'x', ''
+
+    state_mock = _mock_state()
+    with patch.object(ConsistencyRepairer, '_rewrite_once', fake_rewrite):
+        note = asyncio.run(repairer.maybe_repair_part(
+            2, SMOKE_A_PART2_EXCERPT, _clean_logic(2),
+            {'issues': [SMOKE_A_NAME_ISSUE], 'verdict': 'ok'},
+            state_mock=state_mock))
+    assert note.get('revision_passed') is True and note.get('revision_spotfixed') is True
+    assert note.get('first_pass_p0') == 3
+    assert 'partial_applied' not in note and '_base_text' not in note
+    assert rewrite_calls == [], '通过分支不得转重写'
+    assert service.saved_chunks[2].count('林渊') == 0
+    assert service.data[DRIFT_DICT_KEY]['林渊']['applied_verified'] is True
+    logger.info('[test_s2_pass_branch] PASS: 通过分支行为不变')
+
+
 if __name__ == '__main__':
     logger.info('=' * 60)
     logger.info('test_round6_converge.py —— Round 6 收敛轮回归（mock LLM）')
@@ -816,7 +926,9 @@ if __name__ == '__main__':
                test_logic_detail_hallucinated_anchor_cleared,
                test_build_revision_brief_includes_logic_detail,
                test_logic_detail_kill_switch_and_part1,
-               test_logic_detail_prompt_file_and_fallback_synced):
+               test_logic_detail_prompt_file_and_fallback_synced,
+               test_s2_partial_applied_falls_through_to_rewrite,
+               test_s2_spotfix_pass_branch_unchanged):
         fn()
         print(f'PASS {fn.__name__}')
     logger.info('\nALL PASS')

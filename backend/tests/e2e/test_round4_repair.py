@@ -340,23 +340,52 @@ def test_spotfix_smoke_a_replay_zero_llm():
 
 
 def test_spotfix_failed_rerereview_rolls_back():
-    """R4-2: 定点修复后重审仍有 P0 → 回退保留原文 + 留痕。"""
+    """R4-2: 定点修复后重审仍有 P0 → R6-2（S2）起改为分层持久化：
+    过闸的名称修复独立落盘（partial_applied，不连坐），残留 P0 以修复稿为
+    base 转全文重写（本用例 patch _rewrite_once 失败 → 保留修复稿）。"""
     reg = build_name_registry(SMOKE_A_CHARACTERS)
     service = _FakeService({'name_registry': reg, 'character_state_track': {},
                             'parts': {'2': SMOKE_A_PART2_EXCERPT}})
-    # 重审 logic 仍 2 个 P0 → residual=2 > 0 → 回退
+    # 重审 logic 仍 2 个 P0 + cons 1 个名称类 P0 → residual=3（非名称残留 2）
     repairer = _repairer(service, [_clean_logic(2, verdict='仍有矛盾')],
                          [_clean_cons([{'level': 'P0', 'dimension': '名称一致性',
                                         'description': '仍有名字问题'}])])
-    note = asyncio.run(repairer.maybe_repair_part(
-        2, SMOKE_A_PART2_EXCERPT, _clean_logic(3), {'issues': [SMOKE_A_NAME_ISSUE]},
-        state_mock=type('M', (), {'parts': {}, 'final_draft': {}})()))
+    rewrite_calls = []
+
+    async def fake_rewrite(self, part_num, brief):
+        rewrite_calls.append(brief)
+        return '', 'rewrite_failed'  # 重写不可用 → 保留 base_text（修复稿）
+
+    state_mock = type('M', (), {'parts': {}, 'final_draft': {}})()
+    with patch.object(ConsistencyRepairer, '_rewrite_once', fake_rewrite):
+        note = asyncio.run(repairer.maybe_repair_part(
+            2, SMOKE_A_PART2_EXCERPT, _clean_logic(3), {'issues': [SMOKE_A_NAME_ISSUE]},
+            state_mock=state_mock))
     assert note.get('revision_passed') is False
-    assert note.get('revision_spotfixed') is True and note.get('residual_p0') == 3
-    assert service.saved_chunks[2] == SMOKE_A_PART2_EXCERPT, '不过必须回退保留原文'
-    assert service.data['revision_log'][0]['type'] == 'name_spotfix'
-    assert service.data['revision_log'][0]['revision_passed'] is False
-    logger.info('[test_spotfix_rollback] PASS: 重审不过回退原文并留痕')
+    assert note.get('revision_error') == 'rewrite_failed'
+    assert note.get('first_pass_p0') == 4, 'first_pass_p0 恒定原始首检数'
+    # 分层持久化：修复稿落盘（不是原文），state_mock 快照同步
+    fixed = service.saved_chunks[2]
+    assert fixed != SMOKE_A_PART2_EXCERPT, 'R6-2 起过闸修复不再连坐回退'
+    assert fixed.count('林渊') == 0 and fixed.count('林万重') == \
+        SMOKE_A_PART2_EXCERPT.count('林万重') + SMOKE_A_PART2_EXCERPT.count('林渊')
+    assert state_mock.parts['2'] == fixed and state_mock.final_draft['2'] == fixed
+    # 双留痕：revision_log partial_applied + name_audit_log partial_applied
+    log = service.data['revision_log']
+    partial = [e for e in log if e.get('partial_applied')]
+    assert len(partial) == 1, log
+    assert partial[0]['type'] == 'name_spotfix'
+    assert partial[0]['residual_non_name_p0'] == 2, partial[0]
+    assert partial[0]['revision_passed'] is False
+    from services.name_audit import AUDIT_LOG_KEY
+    audit = service.data[AUDIT_LOG_KEY]
+    pa = [e for e in audit if e.get('action') == 'partial_applied']
+    assert len(pa) == 1 and pa[0]['wrong'] == '林渊' and pa[0]['right'] == '林万重'
+    assert pa[0]['trigger'] != 'final_audit', 'partial_applied 不进终审 latest-entry 口径'
+    # 残留 P0 转重写：_rewrite_once 被调用且 brief 含"姓名已按名册归一化"行
+    assert len(rewrite_calls) == 1, '残留 P0 必须落全文重写（不连坐）'
+    assert '姓名已按名册归一化' in rewrite_calls[0]
+    logger.info('[test_spotfix_rollback] PASS: R6-2 分层持久化（修复保留+残留转重写）')
 
 
 def test_gate_failure_falls_back_to_rewrite():
