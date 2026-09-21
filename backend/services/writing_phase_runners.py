@@ -683,11 +683,33 @@ class Phase4Runner:
                     except (TypeError, ValueError):
                         continue
             part_nums = sorted(set(part_nums))
-            await s.emitter.emit(EventType.LOG, {'message': f'评审阶段：共 {len(part_nums)} 个 Part 待审查', 'work_id': s.work_id}, work_id=s.work_id)
+            # R6-4（S4）: resume 跳过已审 Part —— phase4_review_progress 只增不改，
+            # 降级条目（_fallback/429 降级，needs_rerun=True）不计入完成；同 Part
+            # 多条只取最后一条（重审过的 Part 后写覆盖）；repair_note 的键
+            # （含 first_pass_p0/revision_*）原样合并，聚合口径与全新跑一致
+            latest_progress: dict = {}
+            for _e in (s.data.get('phase4_review_progress') or []):
+                if isinstance(_e, dict) and not _e.get('needs_rerun') \
+                        and _e.get('part') in part_nums:
+                    latest_progress[_e['part']] = _e
+            per_part_results: list = []
+            for _p in sorted(latest_progress):
+                _e = latest_progress[_p]
+                per_part_results.append({
+                    'part': _p,
+                    'logic_result': _e.get('logic_result') or {},
+                    'emotion_result': _e.get('emotion_result') or {},
+                    'consistency_result': _e.get('consistency_result') or {},
+                    **(_e.get('repair_note') or {})})
+            done_parts = set(latest_progress)
+            remaining = [p for p in part_nums if p not in done_parts]
+            if done_parts:
+                logger.info(f'[Phase4Runner] R6-4 resume: {len(done_parts)} 个 Part '
+                            f'已审（progress 跳过），剩余 {len(remaining)} 个待审查')
+            await s.emitter.emit(EventType.LOG, {'message': f'评审阶段：共 {len(remaining)} 个 Part 待审查', 'work_id': s.work_id}, work_id=s.work_id)
             logic_agent = LogicReviewAgent()
             emotion_agent = EmotionReviewAgent()
             consistency_agent = ConsistencyReviewAgent()
-            per_part_results: list = []
             # R1-I: 三评审并行 —— 此前串行 20 Part = 60 次顺序 LLM 调用（估 40-60min）。
             # 三个 agent 为独立实例、call_llm_json 每次自建 client，无共享可变状态；
             # Semaphore(3) 防 provider 限流。AGENT_CALL start 全部先发、end 按完成顺序发。
@@ -704,7 +726,7 @@ class Phase4Runner:
                         logger.info(f'[Phase4Runner] {kind} Part {part_num} 失败: {e}')
                         return s._review_failure(kind, part_num, e)
 
-            for idx, part_num in enumerate(part_nums, start=1):
+            for idx, part_num in enumerate(remaining, start=1):
                 part_key = str(part_num)
                 part_text = s.data['parts'][part_key]
                 await s.emitter.emit(EventType.AGENT_CALL, {'agent': 'logic_review_agent', 'part': part_num, 'status': 'start', 'message': f'审查 Part {part_num} 逻辑...', 'work_id': s.work_id}, work_id=s.work_id)
@@ -744,9 +766,24 @@ class Phase4Runner:
                                 f'（最近: Part {part_num}），建议人工介入核查 revision_log')
                 else:
                     consec_fail = 0
-                if part_nums:
-                    part_progress = 85 + idx / len(part_nums) * 10
-                    s.progress_callback(int(part_progress), f'Part {part_num} 评审完成 ({idx}/{len(part_nums)})')
+                # R6-4（S4）: 评审增量落盘 —— per_part_results 此前是纯内存 list，
+                # 崩溃即全损（reval 实证 3 小时三审+修复结果丢失）。needs_rerun 标记
+                # 降级结果（_fallback/429 降级）不计入完成，resume 时重审该 Part
+                # （与 R6-3 退避配合：兜底不是主路径）。
+                _progress = s.data.setdefault('phase4_review_progress', [])
+                _progress.append({
+                    'part': part_num,
+                    'logic_result': logic_result,
+                    'emotion_result': emotion_result,
+                    'consistency_result': consistency_result,
+                    'repair_note': repair_note,
+                    'needs_rerun': bool((logic_result or {}).get('_fallback')
+                        or str((consistency_result or {}).get('verdict', '')).startswith('检查失败')),
+                })
+                s._save()
+                if remaining:
+                    part_progress = 85 + idx / len(remaining) * 10
+                    s.progress_callback(int(part_progress), f'Part {part_num} 评审完成 ({idx}/{len(remaining)})')
             await s.emitter.emit(EventType.AGENT_CALL, {'agent': 'style_optimizer_agent', 'status': 'start', 'message': '执行风格优化...', 'work_id': s.work_id}, work_id=s.work_id)
             style_agent = StyleOptimizerAgent()
             # R4-P1-x: StyleOptimizerAgent.execute 签名是 (state, part_num, part_text, ...)——
@@ -754,29 +791,72 @@ class Phase4Runner:
             # 从未真正执行但前端显示完成。改为逐 Part 调用，失败的 Part 保留原文。
             # state_mock 含 part_outline/work_id（execute 内部会取 outline[part_num-1]）。
             s.data['final_draft'] = dict(s.data.get('parts', {}))
+            # R6-4（S4/R6-7）: KML_SKIP_STYLE=1 跳过风格优化循环 —— 复评工具
+            # （reval + KML_SKIP_STYLE 聚焦三审+修复+名称终审，~2.5h）。G1/G2/G3
+            # 统计源是 parts、G4 是 review_report + name_audit(final_draft)，
+            # 跳风格不改变任何门禁口径；名称终审与聚合保留。
+            skip_style = os.environ.get('KML_SKIP_STYLE', '') == '1'
+            if skip_style:
+                logger.info('[Phase4Runner] KML_SKIP_STYLE=1：跳过风格优化（保留名称终审与聚合）')
+                await s.emitter.emit(EventType.LOG, {'message': 'KML_SKIP_STYLE=1：跳过风格优化（保留名称终审与聚合）', 'work_id': s.work_id}, work_id=s.work_id)
             style_ok = 0
             style_fail = 0
-            for part_num in part_nums:
-                part_key = str(part_num)
-                original_text = s.data['parts'][part_key]
-                # R2-3 保险 1: 字数下限守卫 —— 此前只判 isinstance(str) and strip()，
-                # 431 字短返即可覆盖 5212 字原文（Round 1 实证 final_draft['1']=431）。
-                # 统一公式 max(2000, 原文*0.6) 无需 is_over 分支：Part 有硬上限
-                # hard_max=PART_WORD_MAX+200（超长即截断），合法润色稿只需压到
-                # target_max；要误伤需 原文*0.6 > target_max（即原文 > 1.67 倍上限），
-                # 而原文 ≤ 上限+200，条件不可达。
-                min_acceptable = max(2000, int(len(original_text) * 0.6))
-                try:
-                    optimized = await asyncio.to_thread(style_agent.execute, state_mock, part_num, original_text)
-                    if isinstance(optimized, str) and len(optimized.strip()) >= min_acceptable:
-                        s.data['final_draft'][part_key] = optimized
+            if not skip_style:
+                # R6-4（S4）: 风格 checkpoint 叠加 —— optimized 的 Part 用 checkpoint
+                # 文本覆盖 parts 副本；跳过条件 = 已 checkpoint 且 parts 当前长度
+                # == source_len（resume 后 parts 可能被修复改变，长度不匹配则重新
+                # 优化 —— 防陈旧风格稿）。
+                style_ckpt: dict = {}
+                for _e in (s.data.get('phase4_style_progress') or []):
+                    if isinstance(_e, dict) and _e.get('status') == 'optimized' \
+                            and isinstance(_e.get('text'), str):
+                        style_ckpt[_e.get('part')] = _e
+                for part_num in part_nums:
+                    part_key = str(part_num)
+                    _ck = style_ckpt.get(part_num)
+                    if _ck is not None and len(s.data['parts'].get(part_key) or '') == _ck.get('source_len'):
+                        s.data['final_draft'][part_key] = _ck['text']
+                for part_num in part_nums:
+                    part_key = str(part_num)
+                    original_text = s.data['parts'][part_key]
+                    _ck = style_ckpt.get(part_num)
+                    if _ck is not None and len(original_text) == _ck.get('source_len'):
                         style_ok += 1
-                    else:
+                        logger.info(f'[Phase4Runner] R6-4 resume: Part {part_num} 风格优化'
+                                    f'已 checkpoint（source_len={_ck.get("source_len")}），跳过')
+                        continue
+                    # R2-3 保险 1: 字数下限守卫 —— 此前只判 isinstance(str) and strip()，
+                    # 431 字短返即可覆盖 5212 字原文（Round 1 实证 final_draft['1']=431）。
+                    # 统一公式 max(2000, 原文*0.6) 无需 is_over 分支：Part 有硬上限
+                    # hard_max=PART_WORD_MAX+200（超长即截断），合法润色稿只需压到
+                    # target_max；要误伤需 原文*0.6 > target_max（即原文 > 1.67 倍上限），
+                    # 而原文 ≤ 上限+200，条件不可达。
+                    min_acceptable = max(2000, int(len(original_text) * 0.6))
+                    try:
+                        optimized = await asyncio.to_thread(style_agent.execute, state_mock, part_num, original_text)
+                        if isinstance(optimized, str) and len(optimized.strip()) >= min_acceptable:
+                            s.data['final_draft'][part_key] = optimized
+                            style_ok += 1
+                            # R6-4（S4）: 风格优化逐 Part 落盘 —— 此前是 Phase 4 最长的
+                            # 不落盘窗口（每 Part 1-3 次尝试、单次 4-10 分钟）
+                            s.data.setdefault('phase4_style_progress', []).append(
+                                {'part': part_num, 'status': 'optimized', 'text': optimized,
+                                 'source_len': len(original_text)})
+                            s._save()
+                        else:
+                            style_fail += 1
+                            logger.warning(f'[Phase4Runner] Part {part_num} 优化稿 {len(optimized or "")} 字 < 下限 {min_acceptable}（原文 {len(original_text)} 字），保留原文')
+                            s.data.setdefault('phase4_style_progress', []).append(
+                                {'part': part_num, 'status': 'kept',
+                                 'source_len': len(original_text)})
+                            s._save()
+                    except Exception as e:
                         style_fail += 1
-                        logger.warning(f'[Phase4Runner] Part {part_num} 优化稿 {len(optimized or "")} 字 < 下限 {min_acceptable}（原文 {len(original_text)} 字），保留原文')
-                except Exception as e:
-                    style_fail += 1
-                    logger.info(f'[Phase4Runner] StyleOptimizer Part {part_num} 失败（保留原文）: {e}')
+                        logger.info(f'[Phase4Runner] StyleOptimizer Part {part_num} 失败（保留原文）: {e}')
+                        s.data.setdefault('phase4_style_progress', []).append(
+                            {'part': part_num, 'status': 'kept',
+                             'source_len': len(original_text)})
+                        s._save()
             # R5-1: 违禁词典 + final_draft 确定性终审（双探测器，零 LLM 扫描）。
             # 必须在 final_draft 建成之后（扫得到交付文本）、聚合之前
             # （name_audit 进得了 G4 detail）；独立 try/except —— 异常只告警，
@@ -788,9 +868,12 @@ class Phase4Runner:
             s.data['review_report'] = s._aggregate_review_results(per_part_results)
             s.data['phase'] = 'phase4'
             total_words = sum((len(t) for t in s.data['final_draft'].values()))
-            await s.emitter.emit(EventType.AGENT_CALL, {'agent': 'style_optimizer_agent', 'status': 'end', 'message': f'风格优化完成 (成功 {style_ok}/{len(part_nums)}, 失败 {style_fail}, 总字数: {total_words})', 'work_id': s.work_id}, work_id=s.work_id)
+            _style_msg = ('风格优化已跳过（KML_SKIP_STYLE=1，保留名称终审与聚合）'
+                          if skip_style else
+                          f'风格优化完成 (成功 {style_ok}/{len(part_nums)}, 失败 {style_fail}, 总字数: {total_words})')
+            await s.emitter.emit(EventType.AGENT_CALL, {'agent': 'style_optimizer_agent', 'status': 'end', 'message': _style_msg, 'work_id': s.work_id}, work_id=s.work_id)
             s._save()
-            await s.emitter.emit(EventType.LOG, {'message': '风格优化完成', 'work_id': s.work_id}, work_id=s.work_id)
+            await s.emitter.emit(EventType.LOG, {'message': _style_msg, 'work_id': s.work_id}, work_id=s.work_id)
         except Exception as e:
             logger.info(f'[Phase4Runner] 出错: {e}')
             traceback.print_exc()

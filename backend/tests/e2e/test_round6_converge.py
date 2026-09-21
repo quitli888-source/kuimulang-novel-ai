@@ -17,6 +17,7 @@ Round 6 收敛轮回归测试（test_round6_converge.py）
 既支持 pytest 也支持 `python backend/tests/e2e/test_round6_converge.py` 直接跑。
 """
 import asyncio
+import json
 import os
 import sys
 import threading
@@ -144,6 +145,12 @@ def _clean_logic(p0=0, verdict='ok'):
 def _clean_cons(p0_issues=None, score=8):
     return {'pass': True, 'overall_score': score, 'issues': p0_issues or [],
             'character_states': {}, 'verdict': 'ok'}
+
+
+def _clean_emotion(score=8):
+    return {'pass': True, 'emotion_score': score, 'resonance_score': score,
+            'immersion_score': score, 'verdict': 'ok', 'weaknesses': [],
+            'enhancement_suggestions': []}
 
 
 def _repairer(service, logic_script, cons_script):
@@ -374,6 +381,202 @@ def test_json_429_exhaustion_attaches_raw_text():
     assert getattr(ei.value, 'raw_text', '') == '', '429 路径无解析产物，raw_text 为空串'
 
 
+# ---------------- S4（R6-4）: Phase4 逐 Part checkpoint + KML_SKIP_STYLE ----------------
+
+class _Phase4FakeService(_FakeService):
+    """Phase4Runner.run() 所需的最小 service 面（离线，零 LLM）。"""
+
+    def _build_review_state_mock(self):
+        return SimpleNamespace(parts=dict(self.data.get('parts', {}) or {}),
+                               final_draft=dict(self.data.get('final_draft', {}) or {}))
+
+    @staticmethod
+    def _aggregate_review_results(per_part_results):
+        return aggregate_review_results(per_part_results)
+
+
+class _ScriptedReviewAgent:
+    """按 kind 确定性返回评审/风格结果的假 agent（记录 part 调用序列）。"""
+
+    def __init__(self, kind, fn=None):
+        self.kind = kind
+        self.calls: list = []
+        self._fn = fn
+
+    def execute(self, state, part_num, part_text):
+        self.calls.append(part_num)
+        if self._fn is not None:
+            return self._fn(part_num, part_text)
+        if self.kind == 'logic':
+            return _clean_logic()
+        if self.kind == 'emotion':
+            return _clean_emotion()
+        if self.kind == 'consistency':
+            return _clean_cons()
+        return part_text  # style: 原文 passthrough
+
+
+def _scripted_agents():
+    return (_ScriptedReviewAgent('logic'), _ScriptedReviewAgent('emotion'),
+            _ScriptedReviewAgent('consistency'), _ScriptedReviewAgent('style'))
+
+
+def _patch_phase4_agents(logic_agent, emotion_agent, cons_agent, style_agent):
+    """Phase4Runner.run() 内部 from-import，patch 源模块类对象。"""
+    return (
+        patch('core.agents.logic_review_agent.LogicReviewAgent', lambda: logic_agent),
+        patch('core.agents.emotion_review_agent.EmotionReviewAgent', lambda: emotion_agent),
+        patch('core.agents.consistency_review_agent.ConsistencyReviewAgent', lambda: cons_agent),
+        patch('core.agents.style_optimizer_agent.StyleOptimizerAgent', lambda: style_agent),
+    )
+
+
+def _progress_entry(part_num, logic=None, emotion=None, cons=None,
+                    repair_note=None, needs_rerun=False):
+    return {'part': part_num,
+            'logic_result': logic if logic is not None else _clean_logic(),
+            'emotion_result': emotion if emotion is not None else _clean_emotion(),
+            'consistency_result': cons if cons is not None else _clean_cons(),
+            'repair_note': repair_note, 'needs_rerun': needs_rerun}
+
+
+def _phase4_parts(n=20):
+    return {str(i): f'Part {i} 正文内容，林尘踏入禁地。' * 60 for i in range(1, n + 1)}
+
+
+def test_phase4_resume_skips_reviewed_parts():
+    """S4 验收 1: 崩溃模拟 —— progress 含 Part 1-10 → Part 1-10 零 LLM 调用、
+    Part 11-20 正常三审；聚合报告与"无 progress 全量跑"逐字节一致。"""
+    parts = _phase4_parts(20)
+    service = _Phase4FakeService({
+        'parts': parts, 'phase': 'phase3_part20',
+        'phase4_review_progress': [_progress_entry(i) for i in range(1, 11)]})
+    la, ea, ca, sa = _scripted_agents()
+    with _patch_phase4_agents(la, ea, ca, sa)[0], _patch_phase4_agents(la, ea, ca, sa)[1], \
+         _patch_phase4_agents(la, ea, ca, sa)[2], _patch_phase4_agents(la, ea, ca, sa)[3]:
+        asyncio.run(Phase4Runner(service).run())
+    assert la.calls == list(range(11, 21)), la.calls
+    assert ea.calls == list(range(11, 21)), ea.calls
+    assert ca.calls == list(range(11, 21)), ca.calls
+    # 与无 progress 全量跑逐字节一致（同脚本响应）
+    service2 = _Phase4FakeService({'parts': parts, 'phase': 'phase3_part20'})
+    la2, ea2, ca2, sa2 = _scripted_agents()
+    with _patch_phase4_agents(la2, ea2, ca2, sa2)[0], _patch_phase4_agents(la2, ea2, ca2, sa2)[1], \
+         _patch_phase4_agents(la2, ea2, ca2, sa2)[2], _patch_phase4_agents(la2, ea2, ca2, sa2)[3]:
+        asyncio.run(Phase4Runner(service2).run())
+    assert la2.calls == list(range(1, 21)), la2.calls
+    assert service.data['review_report'] == service2.data['review_report']
+    # progress 条目 JSON 可序列化（S4 验收 6）
+    json.dumps(service.data, ensure_ascii=False)
+    assert len(service.data['phase4_review_progress']) == 20
+    logger.info('[test_phase4_resume] PASS: 已审 Part 零调用，聚合口径一致，可序列化')
+
+
+def test_phase4_needs_rerun_part_is_re_reviewed():
+    """S4 验收 2: needs_rerun=True（_fallback 降级）的 Part 被重审。"""
+    parts = _phase4_parts(3)
+    service = _Phase4FakeService({
+        'parts': parts, 'phase': 'phase3_part3',
+        'phase4_review_progress': [
+            _progress_entry(1), _progress_entry(2),
+            _progress_entry(3, logic=dict(_clean_logic(), _fallback=True,
+                                          p0_count=1, verdict='审查失败（已降级评分）'),
+                            needs_rerun=True)]})
+    la, ea, ca, sa = _scripted_agents()
+    p1, p2, p3, p4 = _patch_phase4_agents(la, ea, ca, sa)
+    with p1, p2, p3, p4:
+        asyncio.run(Phase4Runner(service).run())
+    assert la.calls == [3] and ca.calls == [3] and ea.calls == [3], (la.calls, ea.calls, ca.calls)
+    # 重审后 progress 该 Part 末条 needs_rerun=False
+    last3 = [e for e in service.data['phase4_review_progress'] if e['part'] == 3][-1]
+    assert last3['needs_rerun'] is False
+    logger.info('[test_phase4_needs_rerun] PASS: 降级 Part 被重审且末条标记完成')
+
+
+def test_phase4_progress_last_entry_wins():
+    """S4 验收 3: 同 Part 多条 progress → 恢复时只取最后一条。"""
+    parts = _phase4_parts(2)
+    service = _Phase4FakeService({
+        'parts': parts, 'phase': 'phase3_part2',
+        'phase4_review_progress': [
+            _progress_entry(1),
+            _progress_entry(2, logic=_clean_logic()),
+            _progress_entry(2, logic=dict(_clean_logic(), score=9, overall_score=9)),
+        ]})
+    la, ea, ca, sa = _scripted_agents()
+    p1, p2, p3, p4 = _patch_phase4_agents(la, ea, ca, sa)
+    with p1, p2, p3, p4:
+        asyncio.run(Phase4Runner(service).run())
+    assert la.calls == [], '两条 progress 已覆盖 Part 1-2，零重审'
+    report = service.data['review_report']
+    p2_entry = [p for p in report['parts'] if p['part'] == 2][0]
+    assert p2_entry['logic_score'] == 9, p2_entry
+    logger.info('[test_phase4_last_entry] PASS: 同 Part 多条取最后一条')
+
+
+def test_phase4_style_checkpoint_skip_and_staleness():
+    """S4 验收 4: 风格 checkpoint —— 已优化 Part 零 style 调用且用 checkpoint 文本；
+    parts 被修复改变（长度≠source_len）→ 重新优化（防陈旧稿）。"""
+    parts = _phase4_parts(2)
+    style_text = '优化稿开头。' + '润色后的正文内容。' * 200
+    service = _Phase4FakeService({
+        'parts': parts, 'phase': 'phase3_part2',
+        'phase4_style_progress': [
+            {'part': 1, 'status': 'optimized', 'text': style_text,
+             'source_len': len(parts['1'])}]})
+    la, ea, ca, sa = _scripted_agents()
+    p1, p2, p3, p4 = _patch_phase4_agents(la, ea, ca, sa)
+    with p1, p2, p3, p4:
+        asyncio.run(Phase4Runner(service).run())
+    assert sa.calls == [2], 'Part 1 已 checkpoint 必须零 style 调用'
+    assert service.data['final_draft']['1'] == style_text
+    # 陈旧场景：parts['1'] 被修复改变（长度≠source_len）→ Part 1 重新 style
+    parts_stale = dict(parts, **{'1': parts['1'] + '修复补充段落。' * 10})
+    service2 = _Phase4FakeService({
+        'parts': parts_stale, 'phase': 'phase3_part2',
+        'phase4_style_progress': [
+            {'part': 1, 'status': 'optimized', 'text': style_text,
+             'source_len': len(parts['1'])}]})
+    la2, ea2, ca2, sa2 = _scripted_agents()
+    q1, q2, q3, q4 = _patch_phase4_agents(la2, ea2, ca2, sa2)
+    with q1, q2, q3, q4:
+        asyncio.run(Phase4Runner(service2).run())
+    assert sa2.calls == [1, 2], 'source_len 不匹配必须重新优化'
+    logger.info('[test_phase4_style_ckpt] PASS: checkpoint 跳过 + source_len 防陈旧')
+
+
+def test_phase4_skip_style_env():
+    """S4/R6-7 验收 5: KML_SKIP_STYLE=1 → 零 style 调用、名称终审与聚合照常。"""
+    prev = os.environ.get('KML_SKIP_STYLE')
+    os.environ['KML_SKIP_STYLE'] = '1'
+    try:
+        parts = _phase4_parts(3)
+        service = _Phase4FakeService({'parts': parts, 'phase': 'phase3_part3'})
+        la, ea, ca, sa = _scripted_agents()
+        p1, p2, p3, p4 = _patch_phase4_agents(la, ea, ca, sa)
+        with p1, p2, p3, p4:
+            asyncio.run(Phase4Runner(service).run())
+    finally:
+        if prev is None:
+            os.environ.pop('KML_SKIP_STYLE', None)
+        else:
+            os.environ['KML_SKIP_STYLE'] = prev
+    assert sa.calls == [], 'KML_SKIP_STYLE=1 不得调用 StyleOptimizer'
+    assert service.data['review_report'], '聚合照常产出'
+    assert service.data['final_draft'] == parts, '跳风格时 final_draft == parts'
+    assert len(service.data['phase4_review_progress']) == 3
+    logger.info('[test_phase4_skip_style] PASS: 零 style 调用，终审与聚合不变')
+
+
+def test_reval_script_clears_progress_keys():
+    """S4/R6-7 验收 2: reval 脚本构造的新 work 无 phase4 progress 键污染。"""
+    reval_src = (_HERE.parent.parent.parent.parent / 'loop' / 'reval_phase4.py').read_text(encoding='utf-8')
+    assert "data['phase4_review_progress'] = []" in reval_src
+    assert "data['phase4_style_progress'] = []" in reval_src
+    assert 'KML_SKIP_STYLE' in reval_src, 'reval 须透传打印 KML_SKIP_STYLE 状态'
+    logger.info('[test_reval_clears] PASS: reval 同步清 progress 键并透传 SKIP 状态')
+
+
 if __name__ == '__main__':
     logger.info('=' * 60)
     logger.info('test_round6_converge.py —— Round 6 收敛轮回归（mock LLM）')
@@ -385,7 +588,13 @@ if __name__ == '__main__':
                test_non_429_paths_zero_behavior_change,
                test_semaphore_caps_concurrency_peak,
                test_json_429_carveout_before_response_format_degradation,
-               test_json_429_exhaustion_attaches_raw_text):
+               test_json_429_exhaustion_attaches_raw_text,
+               test_phase4_resume_skips_reviewed_parts,
+               test_phase4_needs_rerun_part_is_re_reviewed,
+               test_phase4_progress_last_entry_wins,
+               test_phase4_style_checkpoint_skip_and_staleness,
+               test_phase4_skip_style_env,
+               test_reval_script_clears_progress_keys):
         fn()
         print(f'PASS {fn.__name__}')
     logger.info('\nALL PASS')
