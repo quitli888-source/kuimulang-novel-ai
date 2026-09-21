@@ -14,11 +14,18 @@ R5-1: 违禁名词典 + 全稿确定性终审的数据层（vale/prh 模式，�
 blocking 分层（02_review §2.1 裁定）：只有 blocking 残留进 G4；advisory
 （单次无证据候选、闸未过、无指令佐证的 issue 配对）只告警不进 G4。
 
+R6-6（S6）: 退场角色复现探测器（scan_departed_reappearance）—— 复用
+derive_departed_characters 账本（R1-E 同源）对 final_draft 的 advisory 复扫，
+findings 永不进 residual_blocking、永不自动改文本、永不进 G4（对齐 R5-1
+探测器 B 的既定裁定范式）。
+
 fail-open 纪律：任何解析异常（脏数据/非 dict/反序列化失败）返回空结果并
 logger.info，绝不阻断管线；全程纯字符串运算。
 """
+import re
 import time
 
+from core.established_facts import derive_departed_characters
 from core.logger import get_logger
 
 logger = get_logger('name_audit')
@@ -268,6 +275,101 @@ def audit_name_drift(final_draft: dict, drift_dict: dict, facts_raw, registry: d
             result['findings'].append(rec)
             result['canonical_absent'].append(rec)
     return result
+
+
+# ----------------- R6-6（S6）: 退场角色复现探测器（advisory-only） -----------------
+
+# derive_departed_characters 账本值格式："PartN 死亡: 事实描述"（既有格式）
+_DEPARTED_PART_RE = re.compile(r'^Part(\d+)\s')
+
+
+def _parse_departed_part(record) -> int | None:
+    """从退场账本值 "PartN 死亡: ..." 前缀解析退场 Part（解析失败返回 None）。"""
+    if not isinstance(record, str):
+        return None
+    m = _DEPARTED_PART_RE.match(record.strip())
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def scan_departed_reappearance(final_draft: dict, facts_raw, character_names) -> list:
+    """R6-6（S6）: 退场角色复现确定性探测器（advisory-only，零 LLM，毫秒级）。
+
+    对 derive_departed_characters(facts_raw, character_names) 账本中每个角色，
+    扫 final_draft 中 part > 退场 Part 的正文 canonical 名出现处；count >= 2
+    才报（阈值缓释回忆/他人提及的合法形式）；samples = ±20 字上下文 ×2。
+
+    与 R1-E 预检的边界：R1-E 扫的是 Phase 3 修复前 parts；本探测器扫的是
+    终审时点的 final_draft（修复+风格优化后的交付文本），findings 与 name
+    audit 同批落 name_audit_log 供 Round 7 统计"确定检出 vs LLM 判定"一致率。
+
+    Args:
+        final_draft: work JSON 的 final_draft（{part: text}，容忍脏数据）
+        facts_raw: established_facts（dict / EstablishedFacts / list[Fact] / None）
+        character_names: Phase 2 正式角色名可迭代对象（防常见词误报）
+
+    Returns:
+        [{part, character, count, samples, kind: 'departed_reappearance'}, ...]
+        （findings 永不进 residual_blocking、永不自动改文本、永不进 G4）
+    """
+    if not isinstance(final_draft, dict):
+        logger.info('[name_audit] final_draft 非 dict，退场复现扫描跳过（fail-open）')
+        return []
+    # derive_departed_characters 需要 EstablishedFacts 实例或其 .facts 列表
+    # （属性访问）—— work JSON 的 dict 形态先经 from_dict 归一（容忍脏数据）
+    facts_obj = facts_raw
+    if isinstance(facts_raw, dict):
+        try:
+            from core.established_facts import EstablishedFacts
+            facts_obj = EstablishedFacts()
+            facts_obj.from_dict(facts_raw)
+        except Exception as e:
+            logger.info(f'[name_audit] established_facts 反序列化失败（fail-open）: {e}')
+            return []
+    try:
+        departed = derive_departed_characters(facts_obj, character_names)
+    except Exception as e:
+        logger.info(f'[name_audit] derive_departed_characters 失败（fail-open）: {e}')
+        return []
+    if not isinstance(departed, dict) or not departed:
+        return []
+    findings: list = []
+    for character, record in departed.items():
+        if not isinstance(character, str) or not character:
+            continue
+        dep_part = _parse_departed_part(record)
+        if dep_part is None:
+            continue
+        for key in sorted(final_draft.keys(), key=_part_sort_key):
+            try:
+                part_num = int(key)
+            except (TypeError, ValueError):
+                continue
+            if part_num <= dep_part:
+                continue  # 退场 Part 本身（含死亡场景）不算复现
+            text = final_draft.get(key)
+            if not isinstance(text, str) or not text.strip() or text.startswith('[Part '):
+                continue
+            count = text.count(character)
+            if count < 2:
+                continue  # 阈值缓释：1 次出现视为回忆/他人提及的合法形式
+            samples: list = []
+            idx = text.find(character)
+            while idx != -1 and len(samples) < 2:
+                lo = max(0, idx - 20)
+                hi = min(len(text), idx + len(character) + 20)
+                samples.append(text[lo:hi].replace('\n', ' '))
+                idx = text.find(character, idx + 1)
+            findings.append({'part': part_num, 'character': character,
+                             'count': count, 'samples': samples,
+                             'kind': 'departed_reappearance'})
+            logger.info(f'[name_audit] 退场复现命中: Part {part_num} "{character}" '
+                        f'×{count}（退场记录: {record}）——advisory 只告警不阻断')
+    return findings
 
 
 def recover_drift_dict_from_revision_log(data: dict) -> dict:

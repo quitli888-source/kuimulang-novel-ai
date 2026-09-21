@@ -17,8 +17,10 @@ Round 6 收敛轮回归测试（test_round6_converge.py）
 既支持 pytest 也支持 `python backend/tests/e2e/test_round6_converge.py` 直接跑。
 """
 import asyncio
+import importlib.util
 import json
 import os
+import pathlib
 import sys
 import threading
 import time
@@ -35,6 +37,25 @@ _HERE = Path(__file__).resolve().parent
 _BACKEND = _HERE.parent.parent
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
+
+
+def _load_verify_module():
+    """从门禁脚本 import evaluate_g4 / summarize_name_audit（屏蔽 RUN_DIR.mkdir）。"""
+    verify_path = _HERE / 'verify_step5_longform.py'
+    spec = importlib.util.spec_from_file_location('verify_under_test_r6', verify_path)
+    mod = importlib.util.module_from_spec(spec)
+    orig_mkdir = pathlib.Path.mkdir
+    pathlib.Path.mkdir = lambda self, *a, **k: None
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        pathlib.Path.mkdir = orig_mkdir
+    return mod
+
+
+_verify_mod = _load_verify_module()
+evaluate_g4 = _verify_mod.evaluate_g4
+summarize_name_audit = _verify_mod.summarize_name_audit
 
 import core.llm_client as llm_client  # noqa: E402
 from core.error_handler import LLMError, SystemError  # noqa: E402
@@ -1139,6 +1160,180 @@ def test_s3_targeted_edit_prompt_file_and_fallback_synced():
     logger.info('[test_s3_prompt_sync] PASS: 文件与 fallback 同步含硬约束')
 
 
+# ---------------- S6（R6-6）: 退场角色复现探测器（advisory-only） ----------------
+
+from services.name_audit import (  # noqa: E402
+    _parse_departed_part, scan_departed_reappearance,
+)
+
+# departed facts（林渊 Part 8 死亡；林轻眉 Part 3 离开）—— R1-E 账本既有格式
+R6_DEPARTED_FACTS = {'version': 1, 'facts': [
+    {'id': 'F8_1', 'part_num': 8, 'category': 'character', 'subject': '林渊',
+     'predicate': '死亡', 'text': '林渊在祠堂大战中身死'},
+    {'id': 'F3_2', 'part_num': 3, 'category': 'character', 'subject': '林轻眉',
+     'predicate': '离开', 'text': '林轻眉离开林家远走他乡'},
+]}
+
+R6_DEPARTED_CHARS = ['林尘', '林渊', '林轻眉', '林万重']
+
+# Part 17：林渊×3（退场后复现）+ 林重×1（漂移名，供 advisory 沉淀断言）；
+# 各 Part 正文均提及在场 canonical（隔离 B 探测器噪音）
+R6_DEPARTED_DRAFT = {
+    '1': '林尘跌入古井，林轻眉在井边看了他一眼。',
+    '3': '林轻眉离开林家，林渊在家中设宴。',
+    '9': '林渊的名字被提起一次，林轻眉望着远方。',
+    '17': ('林渊的碑影立在坟前，林渊的声音再度响起，林渊的实体持刀参战，'
+           '林轻眉在远处守望，林万重大步赶来，林重紧随其后。'),
+}
+
+
+def _departed_draft():
+    return dict(R6_DEPARTED_DRAFT)
+
+
+def _audit_service_r6(draft=None):
+    """S6 终审 fixture： departed facts + final_draft。"""
+    fd = draft if draft is not None else _departed_draft()
+    return _FakeService({
+        'name_registry': build_name_registry(
+            [{'name': n, 'role': '配角'} for n in R6_DEPARTED_CHARS]),
+        'character_state_track': {'林渊': 'Part8 死亡: 林渊在祠堂大战中身死'},
+        'established_facts': R6_DEPARTED_FACTS,
+        'characters': [{'name': n, 'role': '配角'} for n in R6_DEPARTED_CHARS],
+        'parts': dict(fd),
+        'final_draft': dict(fd),
+        'name_drift_dict': {},
+    })
+
+
+def _clean_report():
+    """干净跑法的 review_report（R4-3 新键齐全，20 Part）。"""
+    return {
+        'logic': {'avg_score': 8, 'pass': True, 'total_issues': 0, 'p0_count': 0,
+                  'p1_count': 0, 'top_issue': '', 'parts_count': 20},
+        'consistency': {'avg_score': 8, 'pass': True, 'total_issues': 0, 'p0_count': 0,
+                        'p1_count': 0, 'top_issue': '', 'parts_count': 20},
+        'parts': [], 'first_pass_total_p0': 0, 'residual_total_p0': 0,
+        'revision_stats': {'attempted': 0, 'passed': 0, 'degraded': 0, 'spotfixed': 0},
+    }
+
+
+def test_scan_departed_reappearance_threshold():
+    """S6 验收 1: 林渊 Part8 死亡 + Part 17 含 ×3 → finding（count=3）；
+    Part 9 仅 1 次 → 不报（count<2 阈值缓释合法回忆/提及形式）。"""
+    findings = scan_departed_reappearance(_departed_draft(), R6_DEPARTED_FACTS,
+                                          R6_DEPARTED_CHARS)
+    lin_yuan = [f for f in findings if f['character'] == '林渊']
+    assert len(lin_yuan) == 1, findings
+    f = lin_yuan[0]
+    assert f['part'] == 17 and f['count'] == 3
+    assert f['kind'] == 'departed_reappearance'
+    assert len(f['samples']) == 2 and all('林渊' in s for s in f['samples'])
+    assert not any(x['part'] == 9 for x in findings), 'count<2 不得报'
+    # 林轻眉 Part3 离开：Part 9/17 有在场提及但 canonical 名出现 <2 次 → 无 finding
+    assert not any(x['character'] == '林轻眉' for x in findings)
+    # 账本值格式解析（PartN 前缀）
+    assert _parse_departed_part('Part8 死亡: 林渊身死') == 8
+    assert _parse_departed_part('无Part前缀') is None
+    assert _parse_departed_part(None) is None
+    logger.info('[test_departed_scan] PASS: 阈值/账本解析/samples 全部符合')
+
+
+def test_departed_finding_never_enters_g4():
+    """S6 验收 2: departed finding 不进 residual_blocking、不改文本、不进 G4。"""
+    findings = scan_departed_reappearance(_departed_draft(), R6_DEPARTED_FACTS,
+                                          R6_DEPARTED_CHARS)
+    assert findings, 'fixture 应有命中'
+    # 模拟 name_audit_log 留痕（departed_flagged + rereviewed）后 G4 不受影响
+    data = {'final_draft': _departed_draft(), 'name_drift_dict': {},
+            'name_audit_log': [
+                {'part': 17, 'wrong': '', 'right': '林渊', 'count_before': 3,
+                 'count_after': 3, 'action': 'departed_flagged',
+                 'trigger': 'final_audit', 'pair_source': 'departed_reappearance'},
+                {'part': 17, 'wrong': '', 'right': '林渊', 'count_before': 3,
+                 'count_after': 3, 'action': 'rereviewed',
+                 'trigger': 'final_audit', 'pair_source': 'departed_reappearance'},
+            ]}
+    na = summarize_name_audit(data)
+    assert na['residual_blocking'] == 0, na
+    assert na['canonical_absent'] == 0 and na['residual_advisory'] == 0
+    g4, detail = evaluate_g4(_clean_report(), 20, na)
+    assert g4 is True and detail['name_audit']['residual_blocking'] == 0
+    # wrong='' 不进 name_drift_dict：A 类残留重扫无原料
+    scan = audit_name_drift(_departed_draft(), {}, R6_DEPARTED_FACTS,
+                            build_name_registry(
+                                [{'name': n, 'role': '配角'} for n in R6_DEPARTED_CHARS]))
+    assert scan['residual_blocking'] == []
+    logger.info('[test_departed_g4] PASS: advisory finding 对 G4 零影响')
+
+
+def test_final_audit_departed_rereview_budget():
+    """S6 验收 3a: 预算内恰好 1 次针对性重审；advisory 不改文本、双留痕；
+    重审产出配对按 advisory 沉淀（gates_passed/applied_verified 不置位）——
+    守住" departed 永不进 G4"裁定（探针⑪ 目标）。"""
+    service = _audit_service_r6()
+    before = dict(service.data['final_draft'])
+    name_issue = {'level': 'P0', 'dimension': '名称一致性',
+                  'character': '林万重/林重', 'location': 'Part 17',
+                  'description': '林万重与林重的名字发生混用，需统一',
+                  'suggestion': '统一使用规范名'}
+    cons_agent = _ScriptedAgent([_clean_cons([name_issue])])
+    asyncio.run(Phase4Runner(service)._final_name_audit(
+        service, [17], cons_agent, SimpleNamespace(final_draft={})))
+    assert len(cons_agent.calls) == 1, f'预算内恰好 1 次针对性重审: {cons_agent.calls}'
+    assert cons_agent.calls[0] == R6_DEPARTED_DRAFT['17']
+    assert service.data['final_draft'] == before, 'advisory 永不自动改文本'
+    actions = [e['action'] for e in service.data[AUDIT_LOG_KEY]]
+    assert 'departed_flagged' in actions and 'rereviewed' in actions
+    flagged = [e for e in service.data[AUDIT_LOG_KEY]
+               if e['pair_source'] == 'departed_reappearance']
+    assert all(e['trigger'] == 'final_audit' for e in flagged)
+    assert flagged[0]['wrong'] == '' and flagged[0]['right'] == '林渊'
+    # 重审产出配对 → advisory 沉淀（对齐 R5-1 B 探测器裁定，不进 G4）
+    drift = service.data[DRIFT_DICT_KEY]
+    assert '林重' in drift, drift
+    assert is_blocking(drift['林重']) is False, ' departed 重审配对不得升格 blocking'
+    na = summarize_name_audit(service.data)
+    assert na['residual_blocking'] == 0, na
+    g4, detail = evaluate_g4(_clean_report(), 20, na)
+    assert g4 is True and detail['name_audit']['residual_blocking'] == 0
+    logger.info('[test_departed_budget] PASS: 1 次重审 + 不改文本 + advisory 不进 G4')
+
+
+def test_final_audit_departed_coexists_with_canonical_absent():
+    """S6 验收 3b: 与 canonical_absent 共存时排序确定（tier, part 升序）。"""
+    # Part 3 缺林轻眉（B finding，tier 1）+ Part 17 退场复现（tier 1）→ Part 3 先
+    draft = dict(R6_DEPARTED_DRAFT, **{'3': '林渊在家中设宴，无人提及轻眉。'})
+    service = _audit_service_r6(draft)
+    cons_agent = _ScriptedAgent([_clean_cons(), _clean_cons()])
+    asyncio.run(Phase4Runner(service)._final_name_audit(
+        service, [3, 17], cons_agent, SimpleNamespace(final_draft={})))
+    assert cons_agent.calls == [draft['3'], draft['17']], cons_agent.calls
+    kinds = [e['pair_source'] for e in service.data[AUDIT_LOG_KEY]
+             if e['action'] == 'rereviewed']
+    assert kinds == ['canonical_absent', 'departed_reappearance'], kinds
+    logger.info('[test_departed_coexist] PASS: 与 B 共存排序确定（tier, part 升序）')
+
+
+def test_scan_departed_dirty_data_fail_open():
+    """S6 验收 4: 脏数据（facts None / character_names 空 / 占位）不抛异常。"""
+    fd = _departed_draft()
+    assert scan_departed_reappearance(fd, None, R6_DEPARTED_CHARS) == []
+    assert scan_departed_reappearance(fd, R6_DEPARTED_FACTS, []) == []
+    assert scan_departed_reappearance(fd, R6_DEPARTED_FACTS, None) == []
+    assert scan_departed_reappearance(fd, 'not a dict', R6_DEPARTED_CHARS) == []
+    assert scan_departed_reappearance(None, R6_DEPARTED_FACTS,
+                                      R6_DEPARTED_CHARS) == []
+    assert scan_departed_reappearance(fd, {'version': 1, 'facts': 'bad'},
+                                      R6_DEPARTED_CHARS) == []
+    # final_draft 含失败占位 / 非 str → 跳过
+    dirty_fd = dict(fd, **{'20': '[Part 20 创作失败]', '21': None})
+    findings = scan_departed_reappearance(dirty_fd, R6_DEPARTED_FACTS,
+                                          R6_DEPARTED_CHARS)
+    assert all(f['part'] != 20 and f['part'] != 21 for f in findings)
+    logger.info('[test_departed_dirty] PASS: 脏数据 fail-open 不阻断')
+
+
 if __name__ == '__main__':
     logger.info('=' * 60)
     logger.info('test_round6_converge.py —— Round 6 收敛轮回归（mock LLM）')
@@ -1171,7 +1366,12 @@ if __name__ == '__main__':
                test_s3_edit_applied_saved_and_brief,
                test_s3_no_edit_when_anchor_not_unique_falls_to_rewrite,
                test_s3_edit_degraded_rolls_back_then_rewrite,
-               test_s3_targeted_edit_prompt_file_and_fallback_synced):
+               test_s3_targeted_edit_prompt_file_and_fallback_synced,
+               test_scan_departed_reappearance_threshold,
+               test_departed_finding_never_enters_g4,
+               test_final_audit_departed_rereview_budget,
+               test_final_audit_departed_coexists_with_canonical_absent,
+               test_scan_departed_dirty_data_fail_open):
         fn()
         print(f'PASS {fn.__name__}')
     logger.info('\nALL PASS')

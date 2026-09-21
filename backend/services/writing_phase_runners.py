@@ -594,6 +594,28 @@ class Phase4Runner:
             candidates.append({'part': f['part'], 'wrong': '',
                                'right': f['canonical'],
                                'tier': 1 if in_use else 2, 'kind': 'canonical_absent'})
+        # R6-6（S6）: 退场角色复现探测器（advisory-only）—— 复用
+        # derive_departed_characters（R1-E 同源），扫终审时点的 final_draft；
+        # tier 1（与 canonical_absent"名字在全书在用"同档）、Part 升序，与 B
+        # 共用既有双重预算（每 Part 1 次、每跑 max(2, PARTS//4) 次，公式不
+        # 放宽）；findings 永不进 residual_blocking、永不自动改文本、永不进 G4
+        try:
+            from services.name_audit import scan_departed_reappearance
+            char_names = [c.get('name', '') for c in (s.data.get('characters') or [])
+                          if isinstance(c, dict) and c.get('name')]
+            if not char_names:
+                char_names = [n for n in registry if isinstance(n, str)]
+            for f in scan_departed_reappearance(final_draft, facts_raw, char_names):
+                candidates.append({'part': f['part'], 'wrong': '',
+                                   'right': f['character'], 'tier': 1,
+                                   'kind': 'departed_reappearance'})
+                _log(f['part'], '', f['character'], f['count'], f['count'],
+                     'departed_flagged', 'departed_reappearance')
+                logger.info(f'[Phase4Runner] 终审: Part {f["part"]} 退场角色 '
+                            f'"{f["character"]}" 复现 ×{f["count"]}（advisory，'
+                            f'例：{f["samples"][0][:40] if f["samples"] else ""}）')
+        except Exception as dep_err:
+            logger.info(f'[Phase4Runner] 退场复现扫描异常（不影响主流程）: {dep_err}')
         candidates.sort(key=lambda c: (c['tier'], c['part']))
         rereviewed_parts: set = set()
         used = 0
