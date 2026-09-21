@@ -434,6 +434,80 @@ def derive_departed_characters(facts, character_names) -> dict:
     return out
 
 
+def earliest_departure_parts(facts, character_names) -> dict:
+    """R8-P0-1（S1）: 每个退场角色取"最早死亡记录"（纯函数，零 LLM）。
+
+    与 derive_departed_characters 的分工（**后者一字不改**——R1-E 预检与名册段
+    依赖其 last-write-wins 语义，改动会波及写作 prompt）：derive_* 对每个角色
+    是字典覆盖写，只保留最后一条退场记录。converge 实证林渊真实死亡链是
+    F4_1（Part 4 首死，被无脸族主切断咽喉）→ F5_1/F6_10/F6_2（Part 5-6 尸体
+    悬井/坠井）→ F7_1/F8_1（Part 7-8 确认死亡），账本只留 "Part8 死亡"——
+    导致 Part 6 的残留 P0（"悬在红雾里的林渊动了"）与 Part 6 大纲违规
+    （"林渊亲自出手，镇压命纹"）在 dep_part=8 下漏判。
+
+    本函数对每个角色取**最小 part_num** 的退场记录，两份语义并存、各自锁定。
+
+    实现期修正（对 §1.1.9 规格的必要偏离）：死亡链前段（F4_1 等）在 converge
+    实证里 category 是 'event'（LLM 按事件记录死亡），故 category 过滤取
+    ('character', 'event') 并集——只认 'character' 会漏掉首死记录使 dep_part
+    退回 8，违背"取最早死亡 Part"的强制修正。谓词 + subject∈名册双条件防误报。
+
+    Args:
+        facts: EstablishedFacts 实例 / 其 .facts 列表 / dict 形态（容忍 None）
+        character_names: 正式角色名可迭代对象（防常见词误报）
+
+    Returns:
+        {角色名: {'character': str, 'dep_part': int,
+                  'earliest_record': "PartN 谓词: 事实",
+                  'last_record': "PartM 谓词: 事实"}}；
+        无退场事实 / 脏数据 fail-open 返回 {}。
+    """
+    raw = getattr(facts, "facts", None)
+    if raw is None and isinstance(facts, dict):
+        raw = facts.get('facts')  # work JSON 的 dict 形态（与 R6-6 探测器同款归一）
+    if not isinstance(raw, (list, tuple)):
+        raw = []
+    names = {str(n).strip() for n in (character_names or []) if n and str(n).strip()}
+    earliest: dict = {}   # subject -> (part_num, record)
+    latest: dict = {}     # subject -> (part_num, record)
+
+    def _field(obj, name, default=''):
+        # dict 形态（work JSON）与 Fact 对象双兼容——纯 getattr 对 dict 恒返回
+        # 默认值（dict 无属性访问），账本会静默为空
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return getattr(obj, name, default)
+
+    for f in raw:
+        # 实现期修正（对 02_review §1.1.9 规格的必要偏离，验收标准 1 驱动）：
+        # converge 实证林渊死亡链前段 F4_1/F6_10/F7_1 的 category 是 'event'
+        # （LLM 抽取按"事件"记录死亡），只认 'character' 会漏掉首死记录、
+        # dep_part 退回 8——与强制修正一（取最早死亡 Part）的意图冲突。
+        # 谓词（死亡/离开/失踪/退场）+ subject∈名册角色名已足以防误报，
+        # 故 category 取 ('character', 'event') 并集。
+        if _field(f, "category") not in ("character", "event"):
+            continue
+        predicate = (_field(f, "predicate") or "").strip()
+        if predicate not in DEPARTED_PREDICATES:
+            continue
+        subject = (_field(f, "subject") or "").strip()
+        if not subject or subject not in names:
+            continue
+        try:
+            part_num = int(_field(f, "part_num", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        record = f"Part{part_num} {predicate}: {(_field(f, 'text') or '').strip()}".strip()
+        if subject not in earliest or part_num < earliest[subject][0]:
+            earliest[subject] = (part_num, record)
+        if subject not in latest or part_num >= latest[subject][0]:
+            latest[subject] = (part_num, record)
+    return {name: {'character': name, 'dep_part': ep[0],
+                   'earliest_record': ep[1], 'last_record': latest[name][1],
+                   'last_dep_part': latest[name][0]}
+            for name, ep in earliest.items()}
+
+
 def derive_facts_from_summary(state, part_num: int) -> list:
     """R9 应急：基于 part_summaries + characters + outline 规则派生事实，
     保证 Part N+1 至少有 facts 可用（避免 LLM 抽取 JSON 解析失败导致 Logic 评分退步）。

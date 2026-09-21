@@ -29,18 +29,22 @@ G4（logic+consistency P0 总数 = 0）只能靠"预防全对"，容错为零。
 - 不静默丢内容；重写走与 Phase 3 相同的 _save_chunk_progress 落盘路径
 """
 import asyncio
+import os
 import re
 import time
 
 from api.sse import EventType
 from core.config import get_json_max_tokens
-from core.established_facts import EstablishedFacts
+from core.established_facts import EstablishedFacts, earliest_departure_parts
 from core.llm_client import call_llm
 from core.logger import get_logger
 from core.name_registry import promoted_candidates, render_name_roster
 from core.prompt_loader import load_prompt
 from core.text_utils import truncate
-from services.name_audit import append_audit_log, record_name_pairs
+from services.name_audit import (
+    anchor_span, append_audit_log, classify_departed_occurrences,
+    record_name_pairs,
+)
 
 logger = get_logger('consistency_repair')
 
@@ -85,6 +89,14 @@ TARGETED_EDIT_SYSTEM = load_prompt("targeted_edit", """你是长篇小说修订�
 3. 不得改动编辑块之外的任何一字；不得改变剧情走向
 4. 不得引入角色名册之外的任何姓名
 5. 替换片段长度不得超过 SEARCH 的 ±30%
+
+## 退场角色修正规范（本 Part 有已退场角色以非法形态出现时适用）
+
+已退场角色只允许以合法形态存在：碑林/碑影模仿其形貌或声音、回忆、影像、他人提及、残留之念/执念残像。
+修正方向：把实体行动/直接引语归因/参战改写为"碑林以他的形貌/声音……"式归因
+（例："林渊冷笑一声，抬手压下" → "碑林模仿着他的声线冷笑，借他的形貌抬手压下"）；
+不得删除该角色在剧情中的功能位（对抗关系、情绪功能、事件结果保留），不得改变剧情走向，
+不得引入角色名册之外的任何姓名。
 """)
 
 # R6-5（S3）: 编辑协议常量（确定性硬闸，零相似度——守 Round 1 负面清单）
@@ -96,6 +108,13 @@ _EDIT_ANCHOR_MIN = 10             # anchor 引文最短长度（定位信号下�
 # anchor 引文抽取：description/location 的引号 span（R5-4 三步工序强制 ≤40 字
 # 引文 / R6-1 logic 明细 description 的 原文：“anchor” 段）
 _ANCHOR_QUOTE_RE = re.compile('[「」『』“”‘’"\']([^「」『』“”‘’"\']{10,60})[「」『』“”‘’"\']')
+# R8-P0-1（S1）: issue 字面片段第三来源 —— 中文数量短语（≥4 字）或 description
+# 中 ≥6 字连续非标点片段；要求在正文逐字出现且恰好 1 次（零相似度），命中
+# 名册名/退场名则跳过（服务 Part 6 时间线 P0 等无引文场景）
+_ISSUE_QUANTITY_RE = re.compile('[一二三四五六七八九十百千万零两0-9]+[年月日个]')
+_ISSUE_RUN_RE = re.compile('[^\\s，。；：、？！“”‘’"\'（）()【】—…·]{6,}')
+# R8-P0-1（S1）: departed 类 P0 判定维度（02_review §1.1.5）
+_DEPARTED_DIMENSIONS = ('角色状态/身份', '角色状态', '状态连续性')
 # 编辑块解析（严格正则切分；无法解析 → 调用方落回全量重写）
 _EDIT_BLOCK_RE = re.compile(
     r'<<<<<<< SEARCH[^\n]*\n([\s\S]*?)\n=======[^\n]*\n([\s\S]*?)\n>>>>>>> REPLACE')
@@ -404,13 +423,45 @@ def _count_non_name_p0(logic_result: dict, consistency_result: dict) -> int:
 
 # ----------------- R6-5（S3）: 定点编辑（纯函数，可单测，零相似度） -----------------
 
-def _issue_anchor(issue: dict, part_text: str) -> str:
-    """R6-5（S3）: 从 issue 抽取可在正文唯一定位的原文引文（纯字面，零相似度）。
+def _issue_literal_candidates(issue: dict) -> list:
+    """R8-P0-1（S1）: issue 字面片段候选（纯函数，零相似度）。
 
-    优先 description 的引号 span（R5-4 三步工序强制 ≤40 字引文 / R6-1 logic
-    明细 description 的 原文：“anchor” 段），取第一个在正文中恰好出现 1 次
-    且长度 ≥_EDIT_ANCHOR_MIN 的 span；找不到返回 ''（调用方放弃编辑、落回
-    全量重写——保守，无静默错误）。
+    中文数量短语（`三十七年` 类 ≥4 字，description/location 均可）或
+    description 中 ≥6 字连续非标点片段；按出现顺序去重。候选须由调用方在
+    正文中逐字校验唯一性——抽得出不等于用得了（保守，无静默错误）。
+    """
+    out: list = []
+    seen: set = set()
+    issue = issue if isinstance(issue, dict) else {}
+    for field in ('description', 'location'):
+        field_text = (issue.get(field) or '').strip()
+        if not field_text:
+            continue
+        for m in _ISSUE_QUANTITY_RE.finditer(field_text):
+            cand = m.group(0)
+            if len(cand) >= 4 and cand not in seen:
+                seen.add(cand)
+                out.append(cand)
+        if field == 'description':
+            for m in _ISSUE_RUN_RE.finditer(field_text):
+                cand = m.group(0)
+                if cand not in seen:
+                    seen.add(cand)
+                    out.append(cand)
+    return out
+
+
+def _issue_anchor(issue: dict, part_text: str, skip_names=None) -> str:
+    """R6-5（S3）+ R8-P0-1（S1）: 从 issue 抽取可在正文唯一定位的原文引文（纯字面，零相似度）。
+
+    三个来源（按优先级）：
+    1. description/location 的引号 span（R5-4 三步工序强制 ≤40 字引文 / R6-1
+       logic 明细 description 的 原文：“anchor” 段）——取第一个在正文中恰好
+       出现 1 次且长度 ≥_EDIT_ANCHOR_MIN 的 span；
+    2. R8-1 issue 字面片段：数量短语/≥6 字连续片段在正文逐字出现且恰好 1 次，
+       经 anchor_span 确定性扩窗+句子边界修剪为 ≥15 字唯一 span；候选命中
+       名册名/退场名（skip_names）则跳过；
+    找不到返回 ''（调用方放弃编辑、落回全量重写——保守，无静默错误）。
     """
     text = part_text or ''
     for field in ('description', 'location'):
@@ -418,12 +469,54 @@ def _issue_anchor(issue: dict, part_text: str) -> str:
             span = m.group(1)
             if len(span) >= _EDIT_ANCHOR_MIN and text.count(span) == 1:
                 return span
+    skip = [n for n in (skip_names or []) if n]
+    for cand in _issue_literal_candidates(issue):
+        idx = text.find(cand)
+        if idx < 0 or text.count(cand) != 1:
+            continue
+        span = anchor_span(text, idx, idx + len(cand))
+        if span and not any(n in span for n in skip):
+            return span
     return ''
 
 
-def _edit_trigger_ok(base_text: str, base_logic: dict, base_cons: dict) -> tuple:
-    """R6-5（S3）: 编辑触发条件（全部满足才走编辑）—— P0 总数 ≤3，且每个 P0
-    issue 都能取得唯一 anchor（consistency 引文 / R6-1 logic 明细 anchor）。
+def _is_departed_issue(issue: dict, departed_names) -> bool:
+    """R8-P0-1（S1）: departed 类 P0 判定 —— dimension ∈ 退场状态维度 且
+    issue 的 character/description/location 命中退场账本角色名。"""
+    if not isinstance(issue, dict):
+        return False
+    if (issue.get('dimension') or '').strip() not in _DEPARTED_DIMENSIONS:
+        return False
+    text = (f"{issue.get('character') or ''} {issue.get('description') or ''} "
+            f"{issue.get('location') or ''}")
+    return any(n and n in text for n in (departed_names or []))
+
+
+def _departed_issue_anchor(issue: dict, base_text: str, departed_anchors: dict) -> str:
+    """R8-P0-1（S1）: departed 类 issue 的 illegal span 补位。
+
+    issue.character 或 description/location 命中账本角色名 → 取该角色第一个
+    在正文仍唯一的 illegal span 作 anchor（span 逐字来自正文，消费时再过
+    count==1 硬闸）。无命中返回 ''。
+    """
+    if not isinstance(issue, dict) or not departed_anchors:
+        return ''
+    text = (f"{issue.get('character') or ''} {issue.get('description') or ''} "
+            f"{issue.get('location') or ''}")
+    for name, spans in departed_anchors.items():
+        if not name or name not in text:
+            continue
+        for span in spans or []:
+            if span and base_text.count(span) == 1:
+                return span
+    return ''
+
+
+def _edit_trigger_ok(base_text: str, base_logic: dict, base_cons: dict,
+                     departed_anchors: dict = None, skip_names=None) -> tuple:
+    """R6-5（S3）+ R8-P0-1（S1）: 编辑触发条件（全部满足才走编辑）—— P0 总数 ≤3，且每个 P0
+    issue 都能取得唯一 anchor（consistency 引文 / R6-1 logic 明细 anchor /
+    R8-1 issue 字面片段 / departed 类 illegal span）。
 
     Returns:
         (ok, anchors)——ok=False 时调用方落回全量重写。
@@ -440,10 +533,54 @@ def _edit_trigger_ok(base_text: str, base_logic: dict, base_cons: dict) -> tuple
         return False, []  # 明细与计数不一致（占位/无明细）→ 保守放弃
     anchors: list = []
     for issue in p0_issues:
-        anchor = _issue_anchor(issue, base_text)
+        anchor = _issue_anchor(issue, base_text, skip_names=skip_names)
+        if not anchor:
+            anchor = _departed_issue_anchor(issue, base_text, departed_anchors or {})
         if not anchor:
             return False, []
         anchors.append(anchor)
+    return True, anchors
+
+
+def _edit_subset_trigger_ok(base_text: str, base_logic: dict, base_cons: dict,
+                            departed_anchors: dict, skip_names=None) -> tuple:
+    """R8-4（S4）: departed 类子集编辑旁路 —— P0 >3 时的严格有界开放。
+
+    条件（全部满足）：(a) departed 类 P0 数 ≤_EDIT_MAX_BLOCKS 且每个都有
+    illegal span 作 anchor；(b) 其余非 departed 类 P0 每个都有引文/literal
+    anchor（保证后续可再编辑）。此时允许**子集编辑**：编辑块只针对 departed
+    类 P0，brief 明示"其余 N 个 P0 不在本次编辑范围"。非 departed 类的
+    P0>3 场景不开放此旁路（departed_anchors 为空即不开放）。
+
+    Returns:
+        (ok, anchors)——anchors 只含 departed 类 issue 的 anchor。
+    """
+    if not departed_anchors:
+        return False, []
+    p0_total = count_p0(base_logic, base_cons)
+    if p0_total <= _EDIT_MAX_BLOCKS:
+        return False, []  # 主路径已覆盖
+    p0_issues = ([i for i in ((base_logic or {}).get('issues') or [])
+                  if isinstance(i, dict) and i.get('level') == 'P0'
+                  and not i.get('_detail_placeholder')]
+                 + [i for i in ((base_cons or {}).get('issues') or [])
+                    if isinstance(i, dict) and i.get('level') == 'P0'])
+    if len(p0_issues) != p0_total:
+        return False, []
+    departed_names = list(departed_anchors)
+    dep_issues = [i for i in p0_issues if _is_departed_issue(i, departed_names)]
+    other_issues = [i for i in p0_issues if not _is_departed_issue(i, departed_names)]
+    if not dep_issues or len(dep_issues) > _EDIT_MAX_BLOCKS:
+        return False, []
+    anchors: list = []
+    for issue in dep_issues:
+        anchor = _departed_issue_anchor(issue, base_text, departed_anchors)
+        if not anchor:
+            return False, []
+        anchors.append(anchor)
+    for issue in other_issues:
+        if not _issue_anchor(issue, base_text, skip_names=skip_names):
+            return False, []  # 其余 P0 也必须可定位（保证后续可再编辑）
     return True, anchors
 
 
@@ -782,6 +919,100 @@ class ConsistencyRepairer:
             f'{residual_non_name_p0} 个非名称 P0 转全文重写，修复不连坐）')
         return note
 
+    # ----------------- R8-P0-1（S1）: 退场角色分类器接线（零 LLM，毫秒级） -----------------
+
+    def _departed_ledger(self) -> dict:
+        """退场账本（earliest_departure_parts：最早退场 Part，非 last-write-wins）。
+
+        数据源 s.data 的 established_facts + characters 名（防常见词误报）；
+        kill-switch KML_DEPARTED_CLASSIFY=0 → {}（分类链路整体关停，行为
+        退化为 R6-5）。异常 fail-open 返回 {}（不影响主流程）。
+        """
+        if os.environ.get('KML_DEPARTED_CLASSIFY', '1') == '0':
+            return {}
+        s = self.service
+        try:
+            facts_raw = s.data.get('established_facts')
+            char_names = [c.get('name', '') for c in (s.data.get('characters') or [])
+                          if isinstance(c, dict) and c.get('name')]
+            if not char_names:
+                registry = s.data.get('name_registry') or {}
+                char_names = [n for n in registry if isinstance(n, str)]
+            return earliest_departure_parts(facts_raw, char_names) or {}
+        except Exception as e:
+            logger.info(f'[ConsistencyRepairer] 退场账本派生失败（不影响主流程）: {e}')
+            return {}
+
+    def _departed_anchors(self, part_text: str, part_num: int) -> dict:
+        """R8-P0-1（S1）: 本 Part 退场角色 illegal occurrence 的 span 表。
+
+        分类在编辑发生前对 base_text 运行（终审时点注入无意义——R6-6 裁定同款）；
+        每个 illegal occurrence 落 name_audit_log（action='departed_classified'，
+        trigger='repair' 非 final_audit，不进 summarize latest-entry 口径、
+        不影响 G4），供 Tester 统计"分类器 vs LLM 判定"一致率。
+
+        Returns:
+            {角色: [illegal span, ...]}（span 逐字来自正文、全文唯一、≥15 字）
+        """
+        ledger = self._departed_ledger()
+        if not ledger or not isinstance(part_text, str) or not part_text:
+            return {}
+        s = self.service
+        out: dict = {}
+        for name, entry in ledger.items():
+            try:
+                items = classify_departed_occurrences(part_text, entry, part_num=part_num)
+            except Exception as e:
+                logger.info(f'[ConsistencyRepairer] 退场分类异常（{name}，跳过该角色）: {e}')
+                continue
+            illegal = [i for i in items if i['kind'] == 'illegal']
+            for i in illegal:
+                append_audit_log(s.data, {
+                    'part': part_num, 'wrong': '', 'right': name,
+                    'count_before': 1, 'count_after': 1,
+                    'action': 'departed_classified', 'trigger': 'repair',
+                    'pair_source': 'departed_classify', 'kind': 'illegal',
+                    'reason': i['reason'], 'span': (i['span'] or '')[:40],
+                    'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')})
+            if items:
+                append_audit_log(s.data, {
+                    'part': part_num, 'wrong': '', 'right': name,
+                    'count_before': len(items), 'count_after': len(illegal),
+                    'action': 'departed_classified', 'trigger': 'repair',
+                    'pair_source': 'departed_classify_summary', 'kind': 'summary',
+                    'reason': f'legal={len(items) - len(illegal)},illegal={len(illegal)}',
+                    'dep_part': entry.get('dep_part'),
+                    'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')})
+            # 只收非空 span（无合规 span 的 illegal occurrence 不产 anchor）
+            spans = [i['span'] for i in illegal if i['span']]
+            if spans:
+                out[name] = spans
+        return out
+
+    def _departed_spec_block(self, departed_anchors: dict) -> str:
+        """R8-P0-1（S1）: 退场角色修正规范段（02_review §1.1.7 模板逐字采用）。
+
+        编辑路径 user prompt 在 brief 之后插入；同时呈现"首次死亡 Part N"与
+        "名册标注 Part M 死亡"两个事实（§1.1.2 强制修正）。
+        """
+        if not departed_anchors:
+            return ''
+        ledger = self._departed_ledger()
+        lines = ['\n## 退场角色修正规范（本 Part 适用）']
+        for name in departed_anchors:
+            entry = ledger.get(name) or {}
+            lines.append(
+                f'角色"{name}"已退场：首次死亡 Part {entry.get("dep_part", "?")}'
+                f'（记录：{entry.get("earliest_record", "")}）；'
+                f'名册标注 Part {entry.get("last_dep_part", "?")} 死亡——严禁出场。')
+        lines.append('本 Part 中该角色只允许以合法形态存在：碑林/碑影模仿其形貌或声音、回忆、影像、'
+                     '他人提及、残留之念/执念残像。')
+        lines.append('修正方向：把实体行动/直接引语归因/参战改写为"碑林以他的形貌/声音……"式归因'
+                     '（例："林渊冷笑一声，抬手压下" → "碑林模仿着他的声线冷笑，借他的形貌抬手压下"）；')
+        lines.append('不得删除该角色在剧情中的功能位（对抗关系、情绪功能、事件结果保留），不得改变剧情走向，')
+        lines.append('不得引入角色名册之外的任何姓名。')
+        return '\n'.join(lines) + '\n'
+
     # ----------------- R6-5（S3）: SEARCH/REPLACE 定点编辑修复 -----------------
 
     async def _targeted_edit_repair(self, part_num: int, part_text: str, p0_before: int,
@@ -809,16 +1040,33 @@ class ConsistencyRepairer:
         base_text = base_text if base_text is not None else (part_text or '')
         round_logic = base_logic if base_logic is not None else logic_result
         round_cons = base_cons if base_cons is not None else consistency_result
-        ok, anchors = _edit_trigger_ok(base_text, round_logic, round_cons)
+        # R8-P0-1（S1）: 退场角色 illegal span 表（编辑前对 base_text 分类，
+        # 零 LLM；kill-switch 关停时 {} → 触发判定退化为 R6-5 逐字行为）
+        departed_anchors = self._departed_anchors(base_text, part_num)
+        registry_names = [n for n in (registry or {}) if isinstance(n, str)]
+        departed_names = [n for n in (s.data.get('character_state_track') or {}) if n]
+        skip_names = registry_names + departed_names
+        ok, anchors = _edit_trigger_ok(base_text, round_logic, round_cons,
+                                       departed_anchors, skip_names=skip_names)
+        subset = False
+        if not ok:
+            # R8-4（S4）: departed 类子集编辑旁路（P0>3 但 departed 类 ≤3 且
+            # 全带 illegal span、其余 P0 全带 anchor）——服务 Part 17 的
+            # P0=4 死锁；非 departed 类 P0>3 不开放
+            ok, anchors = _edit_subset_trigger_ok(base_text, round_logic, round_cons,
+                                                  departed_anchors, skip_names=skip_names)
+            subset = ok
         if not ok:
             logger.info(f'[ConsistencyRepairer] Part {part_num} 定点编辑触发条件不满足'
                         f'（P0 数 >{_EDIT_MAX_BLOCKS} 或缺唯一 anchor），落回全文重写')
             return None
         brief = self._build_revision_brief(
             part_num, round_logic, round_cons, part_text=base_text,
-            applied_name_pairs=applied_name_pairs, numbered=True)
+            applied_name_pairs=applied_name_pairs, numbered=True,
+            departed_only=subset, departed_names=list(departed_anchors))
         user_prompt = (
             brief
+            + self._departed_spec_block(departed_anchors)
             + f'\n\n## Part {part_num} 全文（编辑对象）\n{base_text}'
             + '\n\n请按编辑协议输出 SEARCH/REPLACE 编辑块'
               '（每个块前注明针对的问题编号；最多 3 个块）。')
@@ -834,6 +1082,9 @@ class ConsistencyRepairer:
         new_text, applied, failures = _apply_targeted_edits(base_text, raw)
         edit_meta = {'type': 'targeted_edit', 'applied_blocks': applied,
                      'failed_blocks': len(failures), 'anchor_count': len(anchors)}
+        if subset:
+            # R8-4（S4）: 子集编辑模式标记（只编辑 departed 类 P0，纯观测）
+            edit_meta['edit_subset'] = True
         if applied == 0:
             logger.info(f'[ConsistencyRepairer] Part {part_num} 编辑块全部校验失败'
                         f'（{len(failures)} 处：{failures[:3]}），落回全文重写')
@@ -1054,7 +1305,9 @@ class ConsistencyRepairer:
                               introduced_problems: list = None,
                               part_text: str = '',
                               applied_name_pairs: list = None,
-                              numbered: bool = False) -> str:
+                              numbered: bool = False,
+                              departed_only: bool = False,
+                              departed_names: list = None) -> str:
         """用 issues + 相关 established_facts + 角色名册生成 revision brief。
 
         R4-2 增强：名册段置尾（权威名源）；名称类指令具体到
@@ -1066,6 +1319,8 @@ class ConsistencyRepairer:
         brief 增一行"姓名已按名册归一化（X→Y），重写时不得再引入名册外写法"
         （既有名册段兜底之上再加一层，防重写把已修的名字改回去）。
         R6-1（S1）：logic 明细（含 anchor 引文）非空时自动进 l_p0 明细行。
+        R8-4（S4）departed_only：子集编辑模式——明细行只保留 departed 类
+        P0，并明示"其余 N 个 P0 不在本次编辑范围，编辑后将继续修复"。
         """
         l_p0 = [i for i in ((logic_result or {}).get('issues') or [])
                 if isinstance(i, dict) and i.get('level') == 'P0'
@@ -1078,6 +1333,14 @@ class ConsistencyRepairer:
             _l_p0_total = int(lr.get('p0_count') or 0)
         except (TypeError, ValueError):
             _l_p0_total = 0
+        if departed_only:
+            # R8-4（S4）: 子集编辑——只针对 departed 类 P0，其余明示不在本次范围
+            _all_p0 = l_p0 + c_p0
+            _dep = [i for i in _all_p0 if _is_departed_issue(i, departed_names or [])]
+            _skip = len(_all_p0) - len(_dep)
+            if _skip > 0:
+                lines.append(f'- 本 Part 共检出 {len(_all_p0)} 个 P0，其中 {_skip} 个'
+                             f'不在本次编辑范围（非退场角色类），编辑后将继续修复')
         # R6-1: 明细不全（真实明细数 < p0_count）时保留 generic 自查行 —— 明细
         # 只覆盖部分 P0，其余问题仍需模型对照名册与前文事实清单逐项自查
         if _l_p0_total and len(l_p0) < _l_p0_total:
@@ -1095,6 +1358,8 @@ class ConsistencyRepairer:
                          f'重写时不得再引入名册外写法')
         issue_lines: list = []
         for i in l_p0 + c_p0:
+            if departed_only and not _is_departed_issue(i, departed_names or []):
+                continue  # R8-4（S4）: 子集编辑只列 departed 类明细
             desc = (i.get('description') or '').strip()
             sugg = (i.get('suggestion') or '').strip()
             loc = (i.get('location') or f'Part {part_num}').strip()

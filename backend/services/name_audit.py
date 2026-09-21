@@ -372,6 +372,210 @@ def scan_departed_reappearance(final_draft: dict, facts_raw, character_names) ->
     return findings
 
 
+# ----------------- R8-P0-1（S1）: 退场角色合法形态分类器（advisory，零 LLM） -----------------
+
+# legal veto（02_review §1.1.3 逐字采用）：位置型——规范名前后 ≤3 字内命中任一
+# 合法形态词即判 legal（优先于非法判定）。收录尸体状态链（Part 5-8 canon 合法
+# 叙事）与碑影/残念/执念残像（F13_4 认可的残留形态）——最早退场 Part 修正后
+# 新出现的判定面。位置型（非全文子串）是验收标准的强制要求：`林渊整个人被拖进
+# 碑影胸口`（碑影是去向不是形态）与`悬在红雾里的林渊动了`（红雾是环境）必须判
+# illegal，flat 全文 veto 会把二者误判为 legal。
+_LEGAL_FORM_WORDS = ('碑林', '碑影', '碑', '回忆', '想起', '影像', '玉简', '倒影', '梦',
+                     '像', '声音', '腔调', '学他', '提起', '提到', '据说', '记载', '画像',
+                     '面目', '七分像', '留给他的一缕念', '执念', '残像', '残念',
+                     '尸体', '尸身', '遗体', '坠井', '红雾', '锁链')
+_VETO_WINDOW = 3              # veto 位置窗口：名前后各 3 字
+_MODIFIER_CHARS = '的之般似像'  # 名后 ≤4 字修饰粒子（的/之/般/似/像）
+_MODIFIER_SUBSTR = ('声中',)  # 名后 ≤4 字修饰粒子（2 字形态）
+_LIKE_PREFIX = ('宛如', '仿佛')  # 名前 ≤4 字类比前缀（2 字）
+_LIKE_CHARS = '像似如'         # 名前 ≤4 字类比前缀（1 字）
+_AGENT_WINDOW = 4             # 施事者位置判定窗口：名前后各 4 字
+# 实体动词表（02_review §1.1.3 逐字采用 + 实现期扩充：吞噬/嘶吼/惨叫/挣扎 为
+# converge 实证的实体行动词——Part 14 core_event"林渊被井中黑雾吞噬"验收必需）
+_ENTITY_VERBS = ('出手', '踩', '碾', '抓', '握', '冷笑', '厉喝', '狂笑', '开口', '笑道',
+                 '溃灭', '现身', '实体', '凝成', '扑', '杀', '挡', '按', '睁', '动', '拖',
+                 '抬', '跪', '宣称', '揭示', '吞噬', '嘶吼', '惨叫', '挣扎')
+_VERB_WINDOW = 25             # 实体动词/引语归因判定窗口：±25 字
+_CLOSING_QUOTES = '”’」』"\''
+_AMBIGUOUS_QUOTES = '"\''     # 直引号开闭同形：需"引号前是句末标点"排除名在引号内
+_SENTENCE_ENDS = '。！？'
+_CLASSIFY_MIN_SPAN = 15       # 与 consistency_repair._EDIT_MIN_SEARCH_LEN 同值（避免循环 import）
+
+
+def anchor_span(text: str, start: int, end: int):
+    """R8-P0-1（S1）: 把一次出现扩成可作 SEARCH anchor 的唯一 span（纯函数）。
+
+    策略（02_review §1.1.4）：±20 字窗口 → 若全文 count!=1 则确定性扩窗
+    （±20→±30→±40→±50→±60 封顶）→ 修剪到句子边界（。！？）内（保证 REPLACE
+    不制造断句）→ ≥15 字且仍全文唯一；任一不满足返回 None（保守丢弃）。
+    零相似度/零模糊匹配。
+    """
+    if not isinstance(text, str) or start < 0 or end > len(text) or start >= end:
+        return None
+    for delta in (20, 30, 40, 50, 60):
+        lo = max(0, start - delta)
+        hi = min(len(text), end + delta)
+        if text.count(text[lo:hi]) != 1:
+            continue
+        # 左界：窗口内 start 之前最后一个句界之后（无句界则保持 lo）
+        t_lo = lo
+        p = lo
+        while p < start:
+            if text[p] in _SENTENCE_ENDS:
+                t_lo = p + 1
+            p += 1
+        # 右界：end 之后窗口内第一个句界处（不含标点；无句界则保持 hi）
+        t_hi = hi
+        q = end
+        while q < hi:
+            if text[q] in _SENTENCE_ENDS:
+                t_hi = q
+                break
+            q += 1
+        span = text[t_lo:t_hi]
+        if len(span) >= _CLASSIFY_MIN_SPAN and text.count(span) == 1:
+            return span
+    return None
+
+
+def _legal_form_veto(text: str, start: int, end: int) -> bool:
+    """合法形态 veto（位置型）：名前后 ≤3 字内命中任一合法形态词 → True。"""
+    before = text[max(0, start - _VETO_WINDOW):start]
+    after = text[end:end + _VETO_WINDOW]
+    return any(w in before or w in after for w in _LEGAL_FORM_WORDS)
+
+
+def _agent_position(text: str, start: int, end: int) -> bool:
+    """施事者位置（确定性否定式近似）：名后 ≤4 字无修饰粒子（的/之/般/似/像/
+    声中），名前 ≤4 字无类比前缀（像/似/如/宛如/仿佛）。"""
+    after = text[end:end + _AGENT_WINDOW]
+    if any(ch in _MODIFIER_CHARS for ch in after):
+        return False
+    if any(w in after for w in _MODIFIER_SUBSTR):
+        return False
+    before = text[max(0, start - _AGENT_WINDOW):start]
+    if any(w in before for w in _LIKE_PREFIX):
+        return False
+    return not any(ch in _LIKE_CHARS for ch in before)
+
+
+def _entity_verb_near(text: str, start: int, end: int) -> str:
+    """±25 字窗口内的实体动词（命中返回动词本身，否则 ''）。
+
+    实现期精度修正（验收驱动）：窗口在句子边界（。！？）处截断——否则邻句
+    动词会漏进窗口把"本该写着林渊怎么饲井"（他人提及）误判 illegal
+    （Part 14 验收用例）。漏判只退回 generic 重写，是安全方向。
+    """
+    lo = start
+    floor = max(0, start - _VERB_WINDOW)
+    while lo > floor and text[lo - 1] not in _SENTENCE_ENDS:
+        lo -= 1
+    hi = end
+    ceil = min(len(text), end + _VERB_WINDOW)
+    while hi < ceil and text[hi] not in _SENTENCE_ENDS:
+        hi += 1
+    window = text[lo:hi]
+    return next((v for v in _ENTITY_VERBS if v in window), '')
+
+
+def _quote_attribution(text: str, start: int, end: int) -> bool:
+    """直接引语归因（`"…。"林渊…` 模式）：名紧邻收引号（中间允许 ≤2 个句子
+    标点/空白）、名不在引号内、引号前 ≤4 字无 像/学/模仿/仿佛/宛如/似 前缀
+    （"像林渊的声音…说"是类比不是归因）。
+
+    直引号（converge 实证正文全用 " ）开闭同形，追加"引号前必须是句末标点"
+    判定排除 `说"林渊来了"` 的名在引号内形态（收引号后接引语不需句末标点，
+    但开引号前不会是句末标点——确定性近似，漏判只退回 generic 重写）。
+    """
+    i = start - 1
+    seen = 0
+    while i >= 0 and seen < 2 and (text[i] in _SENTENCE_ENDS or text[i].isspace()):
+        i -= 1
+        seen += 1
+    if i < 0 or text[i] not in _CLOSING_QUOTES:
+        return False
+    if any(q in text[end:end + 2] for q in _CLOSING_QUOTES):
+        return False  # 名在引号内（他人呼喊/提及），不是归因
+    if text[i] in _AMBIGUOUS_QUOTES and (i == 0 or text[i - 1] not in _SENTENCE_ENDS):
+        return False
+    prefix = text[max(0, i - 4):i]
+    return not any(w in prefix for w in ('像', '学', '模仿', '仿佛', '宛如', '似'))
+
+
+def _classify_occurrence(text: str, start: int, end: int) -> tuple:
+    """单 occurrence 判定：veto → 引语归因 → 施事者+实体动词 → 默认 legal。"""
+    if _legal_form_veto(text, start, end):
+        return 'legal', 'legal_form_veto'
+    if _quote_attribution(text, start, end):
+        return 'illegal', 'quote_attribution'
+    if _agent_position(text, start, end):
+        verb = _entity_verb_near(text, start, end)
+        if verb:
+            return 'illegal', 'entity_verb'
+    return 'legal', 'default_legal'
+
+
+def classify_departed_occurrences(part_text, ledger_entry, part_num=None) -> list:
+    """R8-P0-1（S1）: 退场角色"合法形态"分类器（纯函数，零 LLM，毫秒级）。
+
+    对单 Part 正文中该退场角色的每次 canonical 名出现判定 legal/illegal
+    （02_review §1.1.3 可实现化规格）：
+    - legal veto（位置型，优先）：名前后 ≤3 字命中合法形态词（碑林/碑影/回忆/
+      影像/尸体/尸身/锁链/执念/残念…）；
+    - illegal 双路径：直接引语归因（`"…。"名…`）；或施事者位置（名后 ≤4 字无
+      修饰粒子且名前 ≤4 字无类比前缀）+ ±25 字窗口命中实体动词表；
+    - 默认 legal（无法判定时不错杀——漏判只退回 generic 重写，不产生新风险）。
+
+    Args:
+        part_text: 该 Part 正文（非 str/占位 → []）
+        ledger_entry: earliest_departure_parts 产出的单角色条目（需含
+                      'character' 与 'dep_part'；容忍脏数据 → []）
+        part_num: 该 Part 编号（可选；<= dep_part 时返回 [] —— 退场 Part 本身
+                  的死亡场景不算复现）
+
+    Returns:
+        [{span, start, kind: 'legal'|'illegal', reason}, ...]——illegal 项的
+        span 为逐字正文片段（全文唯一、≥15 字、句子边界内，可作 SEARCH anchor）；
+        无合规 span 时（句内不足 15 字/扩窗不唯一）span 置空但 illegal 判定保留
+        （anchor 回落到 issue 引文来源）。legal 项 span 为 ±20 字上下文（观测用）。
+    """
+    if not isinstance(part_text, str) or not part_text or part_text.startswith('[Part '):
+        return []
+    entry = ledger_entry if isinstance(ledger_entry, dict) else {}
+    name = entry.get('character') or ''
+    dep_part = entry.get('dep_part')
+    if not name or not isinstance(dep_part, int):
+        return []
+    if part_num is not None:
+        try:
+            if int(part_num) <= dep_part:
+                return []
+        except (TypeError, ValueError):
+            pass
+    out: list = []
+    idx = part_text.find(name)
+    while idx != -1:
+        end = idx + len(name)
+        kind, reason = _classify_occurrence(part_text, idx, end)
+        if kind == 'illegal':
+            span = anchor_span(part_text, idx, end)
+            if span is None:
+                # 无法生成合规唯一 span（扩窗至 ±60 仍不唯一，或句子边界内不足
+                # 15 字）→ 保留 illegal 判定但 span 置空：分类结论（供留痕/dossier）
+                # 不丢，anchor 回落到 issue 引文/字面片段来源（消费侧只收非空 span）
+                logger.info(f'[name_audit] 退场分类: "{name}"@{idx} 判 illegal 但无合规 '
+                            f'span（不唯一或句内不足 15 字），判定保留、anchor 置空')
+                span = ''
+            out.append({'span': span, 'start': idx, 'kind': kind, 'reason': reason})
+        else:
+            # legal 项只带 ±20 字上下文（观测用，不做唯一性/长度要求）
+            ctx = part_text[max(0, idx - 20):min(len(part_text), end + 20)]
+            out.append({'span': ctx.replace('\n', ' '), 'start': idx,
+                        'kind': kind, 'reason': reason})
+        idx = part_text.find(name, end)
+    return out
+
+
 def recover_drift_dict_from_revision_log(data: dict) -> dict:
     """从 revision_log 的 name_spotfix 条目恢复违禁词典（resume/历史 run）。
 
