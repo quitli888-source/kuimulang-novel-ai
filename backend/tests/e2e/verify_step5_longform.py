@@ -444,6 +444,10 @@ async def main():
         # R5-1（S1）: 追加确定性名册合规条件（name_audit.residual_blocking == 0）
         g4, g4_detail = evaluate_g4(report, PARTS, name_audit)
         gates['G4_coherence'] = g4_detail
+        # R8-P1-6（S6）: converge dossier 路径透传（只增字段，既有逻辑一字不动）
+        _dossier = work_file.parent / 'converge_dossier.json'
+        if _dossier.exists():
+            gates['G4_coherence']['dossier_path'] = str(_dossier)
         rs = g4_detail['revision_stats']
         budget_txt = ('不设限' if g4_detail['first_pass_p0_budget'] is None
                       else str(g4_detail['first_pass_p0_budget']))

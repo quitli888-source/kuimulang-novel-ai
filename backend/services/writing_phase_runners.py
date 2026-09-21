@@ -13,6 +13,7 @@ service.cfg / service._save / service._check_pause / service._request_confirm
   Phase4Runner.run()      风格优化 + 三 Review Agent 串行评审
 """
 import asyncio
+import json
 import os
 import time
 import traceback
@@ -737,6 +738,168 @@ class Phase3Runner:
         return payload if isinstance(payload, dict) else {}
 
 
+# R8-P1-6（S6）: converge dossier（纯观测、零门禁影响）
+
+def _dossier_budget(parts_expected: int):
+    """首检 P0 预算值镜像（verify_step5_longform.first_pass_p0_budget 同口径）。
+
+    仅供 dossier 的 budget_ok 展示用——**门禁判定仍在 verify 侧**，此处镜像
+    不参与任何判定；env KML_MAX_FIRST_PASS_P0 覆盖，显式 0/负 = 关闭。
+    """
+    raw = os.environ.get('KML_MAX_FIRST_PASS_P0', '')
+    if raw.strip():
+        try:
+            override = int(raw)
+        except (TypeError, ValueError):
+            override = None
+        if override is not None:
+            return None if override <= 0 else override
+    if parts_expected < 10:
+        return None
+    return parts_expected // 2
+
+
+def _dossier_suggested_next(repair_history: list) -> str:
+    """suggested_next 由 repair_history 确定性推导（advisory-only——**建议非动作**，
+    不驱动任何行为变更；repair_ladder 状态机按 02_review §1.6.2 收缩不做）。"""
+    types = [h.get('type') for h in (repair_history or [])]
+    if 'outline_guard' in types:
+        return 'outline_guard'  # 大纲已按退场规范改写 → 需重跑重审+修复闭环
+    if 'rewrite' in types and any(h.get('revision_degraded') for h in repair_history):
+        return 'outline_guard'  # 重写劣化回退（疑 reintroduce）→ 大纲层优先
+    if 'targeted_edit' in types:
+        return 'targeted_edit'  # 有 anchor 可继续定点编辑
+    return 'manual'
+
+
+def _build_converge_dossier(s, per_part_results: list, part_nums: list) -> dict:
+    """R8-P1-6（S6）: converge_dossier.json 内容（四合取逐条状态 + 未过 Part 断点）。
+
+    纯观测、零门禁影响：不进门禁、不改任何判定。g4_conjuncts 四项与
+    verify_step5_longform.evaluate_g4 同口径（budget 值镜像、MIN_CONSISTENCY_
+    PASS_RATE=0.8 死常量身份注明）；unpassed_parts 含 residual P0/一致性未过/
+    修复未收敛的 Part，每条带 residual_p0 明细、detector_findings（departed
+    分类器 count/illegal_spans≤3/legal_count）、repair_history、suggested_next。
+    """
+    report = s.data.get('review_report') or {}
+    parts_expected = len(part_nums) or getattr(s.cfg, 'part_count', 0) or 0
+    # 四合取（与 evaluate_g4 同口径）
+    residual_total = int(report.get('residual_total_p0') or 0)
+    revision_stats = report.get('revision_stats') or {}
+    attempted = int(revision_stats.get('attempted', 0) or 0)
+    passed = int(revision_stats.get('passed', 0) or 0)
+    first_pass = int(report.get('first_pass_total_p0') or 0)
+    budget = _dossier_budget(parts_expected)
+    cons_failing: list = []
+    for e in (per_part_results or []):
+        cr = e.get('consistency_result') or {}
+        try:
+            c_score = float(cr.get('overall_score') or 0)
+        except (TypeError, ValueError):
+            c_score = 0.0
+        if not bool(cr.get('pass', c_score >= 6)):
+            try:
+                cons_failing.append(int(e.get('part')))
+            except (TypeError, ValueError):
+                continue
+    conjuncts = {
+        'residual': {'pass': residual_total <= 0, 'value': residual_total,
+                     'threshold': 0},
+        'revision_converged': {'pass': attempted == passed,
+                               'attempted': attempted, 'passed': passed},
+        'cons_pass': {'pass': not cons_failing, 'failing_parts': cons_failing},
+        'budget_ok': {'pass': budget is None or first_pass <= budget,
+                      'first_pass': first_pass, 'budget': budget,
+                      'note': 'MIN_CONSISTENCY_PASS_RATE=0.8 为死常量，有效门禁为 all()'},
+    }
+    # departed 分类器 findings（复用 S1 分类器，零 LLM）
+    departed_findings: dict = {}
+    try:
+        facts_raw = s.data.get('established_facts')
+        char_names = [c.get('name', '') for c in (s.data.get('characters') or [])
+                      if isinstance(c, dict) and c.get('name')]
+        if not char_names:
+            reg = s.data.get('name_registry') or {}
+            char_names = [n for n in reg if isinstance(n, str)]
+        ledger = earliest_departure_parts(facts_raw, char_names)
+        final_draft = s.data.get('final_draft') or {}
+        for key, text in final_draft.items():
+            if not isinstance(text, str) or not text.strip() or text.startswith('[Part '):
+                continue
+            try:
+                part_num = int(key)
+            except (TypeError, ValueError):
+                continue
+            for name, lent in (ledger or {}).items():
+                items = classify_departed_occurrences(text, lent, part_num=part_num)
+                if not items:
+                    continue
+                illegal = [i for i in items if i['kind'] == 'illegal']
+                departed_findings[part_num] = {
+                    'character': name,
+                    'count': len(items),
+                    'legal_count': len(items) - len(illegal),
+                    'illegal_spans': [i['span'][:40] for i in illegal if i['span']][:3],
+                    'illegal_count': len(illegal),
+                }
+    except Exception as dep_err:
+        logger.info(f'[Phase4Runner] dossier departed findings 计算失败（跳过该段）: {dep_err}')
+    # repair_history（revision_log 按 Part 分组，只增不改口径）
+    history: dict = {}
+    for e in (s.data.get('revision_log') or []):
+        if not isinstance(e, dict):
+            continue
+        try:
+            history.setdefault(int(e.get('part')), []).append({
+                'type': e.get('type', 'rewrite'),
+                'result': ('passed' if e.get('revision_passed')
+                           else ('rolled_back' if e.get('revision_degraded') else 'failed')),
+                'reason': (e.get('revision_error') or ''),
+            })
+        except (TypeError, ValueError):
+            continue
+    # unpassed_parts
+    unpassed: list = []
+    for entry in (report.get('parts') or []):
+        part_num = entry.get('part')
+        try:
+            part_num = int(part_num)
+        except (TypeError, ValueError):
+            continue
+        residual = entry.get('residual_p0', len(entry.get('p0_issues') or []))
+        cons_bad = part_num in cons_failing
+        rev_bad = (entry.get('revision_attempted')
+                   and not entry.get('revision_passed'))
+        if not (residual or cons_bad or rev_bad):
+            continue
+        p0_list = []
+        for i in (entry.get('p0_issues') or [])[:5]:
+            if isinstance(i, dict):
+                p0_list.append({
+                    'dimension': (i.get('dimension') or '')[:20],
+                    'character': (i.get('character') or '')[:20],
+                    'anchor': (i.get('location') or '')[:40],
+                    'description': str(i.get('description') or '')[:80]})
+            else:
+                p0_list.append({'description': str(i)[:80]})
+        dep = departed_findings.get(part_num) or {}
+        unpassed.append({
+            'part': part_num,
+            'residual_p0': residual,
+            'p0_issues': p0_list,
+            'consistency_score': entry.get('consistency_score'),
+            'detector_findings': {'departed': dep} if dep else {},
+            'repair_history': history.get(part_num, []),
+            'suggested_next': _dossier_suggested_next(history.get(part_num, [])),
+        })
+    return {
+        'work_id': getattr(s, 'work_id', ''),
+        'g4_conjuncts': conjuncts,
+        'unpassed_parts': unpassed,
+        'advisory_only': True,  # 本 dossier 纯观测，不进门禁、不改判定
+    }
+
+
 class Phase4Runner:
     """风格优化 + 评审阶段 —— StyleOptimizer + Logic/Emotion/Consistency Review"""
 
@@ -1260,6 +1423,23 @@ class Phase4Runner:
                 logger.info(f'[Phase4Runner] 终审名称审计异常（不影响主流程）: {audit_err}')
             s.data['review_report'] = s._aggregate_review_results(per_part_results)
             s.data['phase'] = 'phase4'
+            # R8-P1-6（S6）: converge dossier（纯观测、零门禁影响）——独立 try/except，
+            # 异常只 logger.info，不得冒泡到外层 except 把 final_draft 重置为 parts
+            try:
+                dossier = _build_converge_dossier(s, per_part_results, part_nums)
+                dossier_path = s.work_path.parent / 'converge_dossier.json'
+                dossier_path.write_text(
+                    json.dumps(dossier, ensure_ascii=False, indent=2),
+                    encoding='utf-8')
+                s.data['converge_dossier_path'] = str(dossier_path)
+                logger.info(f'[Phase4Runner] converge dossier 已产出: {dossier_path}'
+                            f'（四合取: residual={dossier["g4_conjuncts"]["residual"]["value"]}'
+                            f' revision={dossier["g4_conjuncts"]["revision_converged"]["attempted"]}'
+                            f'/{dossier["g4_conjuncts"]["revision_converged"]["passed"]}'
+                            f' cons_fail={dossier["g4_conjuncts"]["cons_pass"]["failing_parts"]}'
+                            f' 未过 Part {[p["part"] for p in dossier["unpassed_parts"]]}）')
+            except Exception as dossier_err:
+                logger.info(f'[Phase4Runner] converge dossier 产出失败（不影响主流程）: {dossier_err}')
             total_words = sum((len(t) for t in s.data['final_draft'].values()))
             _style_msg = ('风格优化已跳过（KML_SKIP_STYLE=1，保留名称终审与聚合）'
                           if skip_style else

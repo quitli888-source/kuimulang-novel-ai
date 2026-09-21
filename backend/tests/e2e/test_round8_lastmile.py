@@ -28,6 +28,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from core.logger import get_logger
 
 logger = get_logger('test_round8_lastmile')
@@ -1397,6 +1399,169 @@ def test_s5_drift_recorded_in_phase4_run():
     logger.info('[test_s5_phase4] PASS: Phase4 链路 drift 落盘 + 干净跑法无条目')
 
 
+# ---------------- S6（R8-6）: converge_dossier.json（纯观测） ----------------
+
+_CONVERGE_WORK = (_BACKEND.parent / 'data' / 'verification'
+                  / 'converge_20260921_214651' / 'work.json')
+
+
+def _dossier_service(data):
+    svc = _Phase4FakeService(data)
+    return svc
+
+
+def test_s6_dossier_real_replay():
+    """S6 验收 1: converge work.json 离线回放 → g4_conjuncts 四项与 report.json
+    实测一致（residual 12/0、revision 11 vs 6、cons_fail [14,17]、budget 21/10），
+    unpassed_parts 含 6/10/12/14/17；departed findings 与 96 处 span 实证一致。"""
+    if not _CONVERGE_WORK.exists():
+        pytest.skip('converge_20260921_214651/work.json 不存在（跳过真实回放）')
+    from services.writing_phase_runners import _build_converge_dossier
+    d = json.loads(_CONVERGE_WORK.read_text(encoding='utf-8'))
+    ppr = [{'part': e['part'], 'logic_result': e.get('logic_result') or {},
+            'emotion_result': {}, 'consistency_result': e.get('consistency_result') or {},
+            **(e.get('repair_note') or {})}
+           for e in (d.get('phase4_review_progress') or [])]
+    service = _dossier_service(d)
+    service.cfg = SimpleNamespace(part_count=20)
+    report_before = json.dumps(d.get('review_report'), ensure_ascii=False, sort_keys=True)
+    fd_before = json.dumps(d.get('final_draft'), ensure_ascii=False, sort_keys=True)
+    dossier = _build_converge_dossier(service, ppr, list(range(1, 21)))
+    # 零门禁影响：dossier 构建不得污染 review_report/final_draft（G4 输入）
+    assert json.dumps(d.get('review_report'), ensure_ascii=False,
+                      sort_keys=True) == report_before
+    assert json.dumps(d.get('final_draft'), ensure_ascii=False,
+                      sort_keys=True) == fd_before
+    c = dossier['g4_conjuncts']
+    # 与 report.json 实测一致（residual_total_p0=12 / attempted=11 passed=6 /
+    # cons_pass=all() 失败 / first_pass=21>10）
+    assert c['residual'] == {'pass': False, 'value': 12, 'threshold': 0}, c['residual']
+    assert c['revision_converged'] == {'pass': False, 'attempted': 11,
+                                       'passed': 6}, c['revision_converged']
+    assert c['cons_pass']['pass'] is False
+    assert c['cons_pass']['failing_parts'] == [14, 17], c['cons_pass']
+    assert c['budget_ok']['pass'] is False
+    assert c['budget_ok']['first_pass'] == 21 and c['budget_ok']['budget'] == 10
+    assert '死常量' in c['budget_ok']['note']
+    parts = [p['part'] for p in dossier['unpassed_parts']]
+    for expected in (6, 10, 12, 14, 17):
+        assert expected in parts, parts
+    # departed findings：Part 6/12/14/17 共 96 处出现（review 实证）
+    dep = {p['part']: p['detector_findings'].get('departed', {})
+           for p in dossier['unpassed_parts'] if p.get('detector_findings')}
+    assert dep[6]['count'] == 36 and dep[12]['count'] == 34, dep
+    assert dep[14]['count'] == 5 and dep[17]['count'] == 21, dep
+    assert dep[6]['illegal_count'] >= 1 and dep[6]['illegal_spans'], dep[6]
+    assert all(len(s) <= 40 for s in dep[6]['illegal_spans'])
+    assert len(dep[17]['illegal_spans']) <= 3, 'span 样本每 Part ≤3 条'
+    # suggested_next 确定性推导（advisory-only）
+    by_part = {p['part']: p for p in dossier['unpassed_parts']}
+    assert by_part[17]['suggested_next'] in ('outline_guard', 'targeted_edit',
+                                             'manual')
+    # dossier 可序列化 + advisory 标记
+    json.dumps(dossier, ensure_ascii=False)
+    assert dossier['advisory_only'] is True
+    logger.info('[test_s6_replay] PASS: 四合取与 report.json 一致 + 未过 Part 全覆盖')
+
+
+def test_s6_dossier_clean_run_all_true():
+    """S6 验收 4: residual=0 的假设数据 → unpassed_parts 为空、四合取全 true
+    （防'永远报失败'的呆逻辑）。"""
+    from services.writing_phase_runners import _build_converge_dossier
+    parts = {str(i): f'Part {i} 干净正文，林尘踏入禁地。' * 60
+             for i in range(1, 21)}
+    service = _dossier_service({
+        'review_report': _clean_report(), 'parts': parts,
+        'final_draft': dict(parts), 'revision_log': [],
+        'established_facts': {}, 'characters': [],
+        'name_registry': {}, 'name_audit_log': [],
+    })
+    service.cfg = SimpleNamespace(part_count=20)
+    dossier = _build_converge_dossier(service, [], list(range(1, 21)))
+    assert dossier['unpassed_parts'] == [], dossier['unpassed_parts']
+    c = dossier['g4_conjuncts']
+    assert c['residual']['pass'] is True and c['residual']['value'] == 0
+    assert c['revision_converged']['pass'] is True
+    assert c['cons_pass']['pass'] is True and c['cons_pass']['failing_parts'] == []
+    assert c['budget_ok']['pass'] is True and c['budget_ok']['budget'] == 10
+    json.dumps(dossier, ensure_ascii=False)
+    logger.info('[test_s6_clean] PASS: 干净数据四合取全 true + unpassed 为空')
+
+
+def test_s6_dossier_suggested_next_deterministic():
+    """S6: suggested_next 由 repair_history 确定性推导（advisory-only）。"""
+    from services.writing_phase_runners import _dossier_suggested_next
+    assert _dossier_suggested_next([]) == 'manual'
+    assert _dossier_suggested_next([{'type': 'name_spotfix'}]) == 'manual'
+    assert _dossier_suggested_next([{'type': 'targeted_edit'}]) == 'targeted_edit'
+    assert _dossier_suggested_next(
+        [{'type': 'rewrite', 'revision_degraded': True}]) == 'outline_guard'
+    assert _dossier_suggested_next(
+        [{'type': 'targeted_edit'}, {'type': 'outline_guard'}]) == 'outline_guard'
+    logger.info('[test_s6_next] PASS: suggested_next 确定性推导')
+
+
+def test_s6_dossier_written_and_isolated(tmp_path):
+    """S6 验收 2/3: Phase4Runner.run() 末尾产出 converge_dossier.json；产出异常
+    （注入故障）不冒泡、主流程与 report.json 不受影响；verify 侧 dossier_path
+    只增字段（detail 既有键逐字节不变）。"""
+    import services.writing_phase_runners as wpr
+    facts = {'version': 1, 'facts': [
+        {'id': 'F1_1', 'part_num': 1, 'category': 'character', 'subject': '林渊',
+         'predicate': '死亡', 'text': '林渊在井边身死', 'quote': '',
+         'superseded_by': None}]}
+    parts = {'1': '林渊巡井三十年，终于坠井。' + '井水无声。' * 100,
+             '2': '碑林呜呜作响，命纹明亮。' + '风停了。' * 100}
+
+    def _svc():
+        svc = _Phase4FakeService({
+            'name_registry': _r8_registry(),
+            'established_facts': facts,
+            'characters': [dict(c) for c in R8_CHARACTERS],
+            'part_outline': [], 'parts': parts, 'phase': 'phase3_part2',
+            'revision_log': [],
+        })
+        svc.work_path = SimpleNamespace(parent=tmp_path)
+        return svc
+
+    # 1) 正常产出
+    service = _svc()
+    la, ea, ca, sa = _scripted_agents()
+    p = _patch_phase4_agents(la, ea, ca, sa)
+    with p[0], p[1], p[2], p[3]:
+        asyncio.run(Phase4Runner(service).run())
+    dossier_file = tmp_path / 'converge_dossier.json'
+    assert dossier_file.exists(), 'dossier 应已产出'
+    dossier = json.loads(dossier_file.read_text(encoding='utf-8'))
+    assert 'g4_conjuncts' in dossier and 'unpassed_parts' in dossier
+    assert service.data['converge_dossier_path'] == str(dossier_file)
+    assert service.data['review_report'], '主流程不受影响'
+    assert service.data['final_draft'] == parts, 'final_draft 不得被重置'
+    # verify 侧 dossier_path 只增（detail 既有键逐字节不变）
+    na = summarize_name_audit(service.data)
+    g4, detail = evaluate_g4(service.data['review_report'], 2, na)
+    detail_before = json.dumps(detail, ensure_ascii=False, sort_keys=True)
+    if dossier_file.exists():
+        detail['dossier_path'] = str(dossier_file)
+    assert set(detail) - {'dossier_path'}, 'detail 应含既有键'
+    assert 'dossier_path' not in detail_before
+    # 2) 注入故障：dossier 产出抛异常 → 不冒泡，主流程照常
+    service2 = _svc()
+    la2, ea2, ca2, sa2 = _scripted_agents()
+    p2 = _patch_phase4_agents(la2, ea2, ca2, sa2)
+
+    def boom(*a, **k):
+        raise RuntimeError('dossier boom')
+
+    with p2[0], p2[1], p2[2], p2[3], \
+            patch.object(wpr, '_build_converge_dossier', boom):
+        asyncio.run(Phase4Runner(service2).run())  # 不得抛异常
+    assert service2.data['review_report'], '异常后主流程照常'
+    assert service2.data['final_draft'] == parts, '异常后 final_draft 不得被重置'
+    assert service2.data.get('phase') == 'phase4'
+    logger.info('[test_s6_isolated] PASS: dossier 产出 + 故障隔离 + dossier_path 只增')
+
+
 # ---------------- S3（R8-3）: advisory 预算优先级重排 ----------------
 
 def _called_parts(service, cons_agent):
@@ -1490,7 +1655,11 @@ if __name__ == '__main__':
     logger.info('=' * 60)
     logger.info('test_round8_lastmile.py —— Round 8 最后一公里轮回归（mock LLM）')
     logger.info('=' * 60)
-    for fn in (test_s5_facts_writeback_on_revision_passed,
+    for fn in (test_s6_dossier_real_replay,
+               test_s6_dossier_clean_run_all_true,
+               test_s6_dossier_suggested_next_deterministic,
+               test_s6_dossier_written_and_isolated,
+               test_s5_facts_writeback_on_revision_passed,
                test_s5_no_writeback_when_not_passed_and_idempotent,
                test_s5_drift_block_dual_injection,
                test_s5_drift_recorded_in_phase4_run,
