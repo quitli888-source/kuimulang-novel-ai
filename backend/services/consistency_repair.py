@@ -35,7 +35,7 @@ import time
 
 from api.sse import EventType
 from core.config import get_json_max_tokens
-from core.established_facts import EstablishedFacts, earliest_departure_parts
+from core.established_facts import EstablishedFacts, Fact, earliest_departure_parts
 from core.llm_client import call_llm
 from core.logger import get_logger
 from core.name_registry import promoted_candidates, render_name_roster
@@ -997,6 +997,12 @@ class ConsistencyRepairer:
             # R5-2: 重审通过的定点修复 → 违禁词典沉淀（applied_verified=True）
             record_name_pairs(s.data, gated, part_num, trigger,
                               applied_verified=True, gates_passed=True)
+            # R8-P1-5（S5）: 修复结论回写事实账本（显式落 s.data；幂等）
+            superseded = self._write_back_facts(
+                part_num, [i for i in _p0_issues(consistency_result)
+                           if is_name_issue(i)], new_text, state_mock)
+            if superseded:
+                spot_meta['facts_superseded'] = superseded
             self._append_revision_log(part_num, p0_before, note, extra=spot_meta,
                                       trigger=trigger)
             await self._emit_log(
@@ -1145,6 +1151,127 @@ class ConsistencyRepairer:
         lines.append('不得删除该角色在剧情中的功能位（对抗关系、情绪功能、事件结果保留），不得改变剧情走向，')
         lines.append('不得引入角色名册之外的任何姓名。')
         return '\n'.join(lines) + '\n'
+
+    # ----------------- R8-P1-5（S5）: 修复后 facts 回写 + 审计 drift 禁令 -----------------
+
+    def _write_back_facts(self, part_num: int, issues: list, new_text: str,
+                          state_mock) -> list:
+        """R8-P1-5（S5）: revision_passed（重审证实）时把修复结论回写事实账本。
+
+        强制修正一（02_review §1.5.1 实现暗礁）：**必须显式落
+        s.data['established_facts']**——TempStoryState.__init__ 对
+        established_facts 是重新反序列化的副本（不同于 parts/name_registry
+        的共享引用），只写 temp_state 不落盘。
+
+        内容：对修复涉及的 subject/dimension 追加 superseding fact
+        （predicate='状态'，text=issue.suggestion/claim 归一的修正结论，
+        quote=修复稿中该角色首次出现处的 ±30 字）；旧 fact 置 superseded_by
+        指向新条目（EstablishedFacts.add 已有能力，只 supersede 同
+        subject+predicate、只追加不删除、链式保留）；按 (part_num, subject,
+        predicate) 去重（幂等——重复触发不产生第二条）。
+        未证实的修复（revision_passed=False）不回写。
+
+        Returns:
+            被 supersede 的旧 fact id 列表（revision_log facts_superseded 观测）
+        """
+        s = self.service
+        registry = s.data.get('name_registry') or {}
+        if not isinstance(registry, dict):
+            registry = {}
+        targets: list = []
+        seen: set = set()
+        for issue in (issues or []):
+            if not isinstance(issue, dict) or issue.get('level') != 'P0':
+                continue
+            subject = (issue.get('character') or '').strip()
+            if not subject or subject not in registry:
+                text = (f"{issue.get('description') or ''} {issue.get('location') or ''}")
+                cands = [n for n in registry if n and n in text]
+                if len(cands) != 1:
+                    continue  # 歧义即放弃（不发明 subject）
+                subject = cands[0]
+            if subject in seen:
+                continue
+            seen.add(subject)
+            conclusion = ((issue.get('suggestion') or '').strip()
+                          or (issue.get('description') or '').strip())[:60]
+            if not conclusion:
+                continue
+            targets.append((subject, conclusion))
+        if not targets:
+            return []
+        ef = EstablishedFacts()
+        raw = s.data.get('established_facts')
+        if isinstance(raw, dict):
+            try:
+                ef.from_dict(raw)
+            except Exception as e:
+                logger.info(f'[ConsistencyRepairer] facts 回写反序列化失败（跳过回写）: {e}')
+                return []
+        existing_keys = {(f.part_num, f.subject, f.predicate) for f in ef.facts}
+        before_ids = {f.id for f in ef.facts if not f.superseded_by}
+        new_facts = []
+        for i, (subject, conclusion) in enumerate(targets, start=1):
+            if (part_num, subject, '状态') in existing_keys:
+                continue  # 幂等：同一 (part, subject, predicate) 不重复追加
+            quote = ''
+            idx = (new_text or '').find(subject)
+            if idx >= 0:
+                quote = (new_text or '')[max(0, idx - 15):idx + len(subject) + 15]
+            new_facts.append(Fact(
+                id=f'FR{part_num}_{i}', part_num=part_num, category='character',
+                subject=subject, predicate='状态',
+                text=f'修复结论（Part {part_num}）: {conclusion}'[:120],
+                quote=quote[:30].replace('\n', ' ')))
+        if not new_facts:
+            return []
+        ef.add_many(new_facts)
+        s.data['established_facts'] = ef.to_dict()
+        # 同步刷新评审 mock 的事实块（同跑内后续 Part 立刻看到新事实；resume 路径
+        # 由 TempStoryState 从 s.data 重新加载覆盖）
+        holder = getattr(state_mock, 'established_facts_holder', None)
+        if isinstance(holder, dict):
+            try:
+                holder['ef'] = ef
+            except Exception:
+                logger.debug('consistency_repair: silent except (P2-19)', exc_info=True)
+        superseded = [f.id for f in ef.facts
+                      if f.id in before_ids and f.superseded_by]
+        logger.info(f'[ConsistencyRepairer] Part {part_num} facts 回写: '
+                    f'{len(new_facts)} 条 superseding fact 落 s.data'
+                    f'（supersede {len(superseded)} 条旧 fact）')
+        return superseded
+
+    def _audit_drift_block(self, part_num: int) -> str:
+        """R8-P1-5（S5）: 审计 drift 禁令块（≤10 行硬顶；KML_AUDIT_DRIFT=0 关停）。
+
+        数据：s.data['audit_drift']（Phase4Runner 维护，按 Part 覆盖该 Part
+        条目）；内容：此前 Part（< part_num）修复后仍须避免的问题形态
+        （dimension + character + claim ≤40 字/条）。residual=0 的 Part 无条目。
+        """
+        if os.environ.get('KML_AUDIT_DRIFT', '1') == '0':
+            return ''
+        entries = [e for e in (self.service.data.get('audit_drift') or [])
+                   if isinstance(e, dict)]
+        lines = []
+        for e in entries:
+            try:
+                if int(e.get('part') or 0) >= part_num:
+                    continue  # 只注入此前 Part 的禁令（本 Part 问题由 brief 明细承载）
+            except (TypeError, ValueError):
+                continue
+            dim = (e.get('dimension') or '').strip() or '一致性'
+            who = (e.get('character') or '').strip() or '全局'
+            claim = (e.get('claim') or '').strip()[:40]
+            if not claim:
+                continue
+            lines.append(f'- Part {e.get("part")}「{dim}」{who}：{claim}')
+            if len(lines) >= 10:
+                break
+        if not lines:
+            return ''
+        return ('\n\n## ⚠ 本卷审计纠偏（此前 Part 评审检出、修复后仍须避免的问题形态；'
+                '续写/重写时必须避免）\n' + '\n'.join(lines) + '\n')
 
     # ----------------- R6-5（S3）: SEARCH/REPLACE 定点编辑修复 -----------------
 
@@ -1311,6 +1438,12 @@ class ConsistencyRepairer:
             part_key = str(part_num)
             state_mock.parts[part_key] = new_text
             state_mock.final_draft[part_key] = new_text
+            # R8-P1-5（S5）: 修复结论回写事实账本（显式落 s.data；幂等）
+            superseded = self._write_back_facts(
+                part_num, _p0_issues(round_logic) + _p0_issues(round_cons),
+                new_text, state_mock)
+            if superseded:
+                edit_meta['facts_superseded'] = superseded
             note = {'revision_attempted': True, 'revision_passed': True,
                     'revision_edited': True,
                     'logic_result': new_logic, 'consistency_result': new_cons}
@@ -1469,6 +1602,10 @@ class ConsistencyRepairer:
                 part_key = str(part_num)
                 state_mock.parts[part_key] = new_text
                 state_mock.final_draft[part_key] = new_text
+                # R8-P1-5（S5）: 修复结论回写事实账本（显式落 s.data；幂等）
+                superseded = self._write_back_facts(
+                    part_num, _p0_issues(round_logic) + _p0_issues(round_cons),
+                    new_text, state_mock)
                 note = {'revision_attempted': True, 'revision_passed': True,
                         'logic_result': new_logic, 'consistency_result': new_cons}
                 if name_fix_pairs:
@@ -1476,7 +1613,9 @@ class ConsistencyRepairer:
                     note['revision_spotfixed'] = True
                     record_name_pairs(s.data, name_fix_pairs, part_num, 're_review',
                                       applied_verified=True, gates_passed=True)
-                self._append_revision_log(part_num, p0_before, note, trigger=trigger)
+                self._append_revision_log(
+                    part_num, p0_before, note, trigger=trigger,
+                    extra={'facts_superseded': superseded} if superseded else None)
                 await self._emit_log(f'✅ Part {part_num} 重写修复完成（重审 P0 归零，{len(new_text)} 字）')
                 return note
 
@@ -1632,6 +1771,9 @@ class ConsistencyRepairer:
         facts_block = self._facts_block(part_num)
         if facts_block:
             brief += '\n\n' + facts_block
+        # R8-P1-5（S5）: 审计 drift 禁令（重写同样必须看到——双注入点之二；
+        # ≤10 行硬顶，只在有修复历史的 Part 有内容）
+        brief += self._audit_drift_block(part_num)
         # R8-P0-2（S2）: 本 Part 大纲已按退场规范改写 → brief 附注（重写自动拿到
         # 改写后大纲：_RevisionStateProxy → TempStoryState.part_outline 同一 list，
         # 零额外接线）；无改写条目的 Part 不附注（逐字节不变）

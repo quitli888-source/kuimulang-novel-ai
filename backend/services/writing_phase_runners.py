@@ -994,6 +994,33 @@ class Phase4Runner:
         except Exception as e:
             logger.info(f'[Phase4Runner] 终审 revision_log 落盘失败（不影响主流程）: {e}')
 
+    @staticmethod
+    def _record_audit_drift(s, part_num: int, logic_result, consistency_result,
+                            repair_note) -> None:
+        """R8-P1-5（S5）: 把本 Part 首检 P0 issue 摘要写入 s.data['audit_drift']。
+
+        按 Part 覆盖该 Part 条目（novelix"无问题即清理"的简化实现）；≤10 条/Part、
+        claim ≤40 字；首检无 P0 的 Part 无条目。kill-switch KML_AUDIT_DRIFT=0。
+        注入点：PartWriterAgent 首片段 prompt 尾部（新写）+ _build_revision_brief
+        尾部（重写），≤10 行硬顶（R8-P1-5 强制修正二）。
+        """
+        if os.environ.get('KML_AUDIT_DRIFT', '1') == '0':
+            return
+        entries: list = []
+        for res in (logic_result, consistency_result):
+            for i in ((res or {}).get('issues') or []):
+                if isinstance(i, dict) and i.get('level') == 'P0':
+                    entries.append({
+                        'part': part_num,
+                        'dimension': (i.get('dimension') or '').strip(),
+                        'character': (i.get('character') or '').strip(),
+                        'claim': (i.get('description') or '').strip()[:40]})
+        drift = [e for e in (s.data.get('audit_drift') or [])
+                 if isinstance(e, dict) and e.get('part') != part_num]
+        if entries:
+            drift.extend(entries[:10])
+        s.data['audit_drift'] = drift
+
     async def run(self) -> None:
         s = self.service
         await s.emitter.emit(EventType.PHASE, {'phase': 'phase4', 'name': '风格优化', 'work_id': s.work_id}, work_id=s.work_id)
@@ -1049,6 +1076,13 @@ class Phase4Runner:
                     'emotion_result': _e.get('emotion_result') or {},
                     'consistency_result': _e.get('consistency_result') or {},
                     **(_e.get('repair_note') or {})})
+                # R8-P1-5（S5）: resume 路径同样重建 drift（progress 存的是首检结果）
+                try:
+                    self._record_audit_drift(s, _p, _e.get('logic_result'),
+                                             _e.get('consistency_result'),
+                                             _e.get('repair_note'))
+                except Exception as drift_err:
+                    logger.info(f'[Phase4Runner] audit_drift 重建失败（Part {_p}，不影响主流程）: {drift_err}')
             done_parts = set(latest_progress)
             remaining = [p for p in part_nums if p not in done_parts]
             if done_parts:
@@ -1114,6 +1148,13 @@ class Phase4Runner:
                                 f'（最近: Part {part_num}），建议人工介入核查 revision_log')
                 else:
                     consec_fail = 0
+                # R8-P1-5（S5）: 审计 drift 记录（本 Part 首检 P0 issue 摘要，按 Part
+                # 覆盖该 Part 条目；首检无 P0 的 Part 无条目）
+                try:
+                    self._record_audit_drift(s, part_num, logic_result,
+                                             consistency_result, repair_note)
+                except Exception as drift_err:
+                    logger.info(f'[Phase4Runner] audit_drift 记录失败（Part {part_num}，不影响主流程）: {drift_err}')
                 # R6-4（S4）: 评审增量落盘 —— per_part_results 此前是纯内存 list，
                 # 崩溃即全损（reval 实证 3 小时三审+修复结果丢失）。needs_rerun 标记
                 # 降级结果（_fallback/429 降级）不计入完成，resume 时重审该 Part

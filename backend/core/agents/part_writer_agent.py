@@ -17,6 +17,7 @@ P0 修复（2026-09-18 反凑字数）：
   批量堆叠的省略号 `……` 和破折号 `——`（r14 数据佐证：后半 Part 破折号密度达 39-49/1k）
 - 移除 endswith('…') 早退信号（之前在 _write_part_chunked 把 `……` 视作合法退出标点）
 """
+import os
 import time
 from typing import Dict, Any
 
@@ -68,6 +69,38 @@ def _early_exit_threshold(target_words: int) -> int:
     目标的 52%（"大纲目标修好后仍漏字数"的暗渠）。MAX_CHUNKS 仍是硬帽。
     """
     return max(PART_WORD_MIN, int(target_words * 0.85))
+
+
+def _render_audit_drift(audit_drift, part_num: int) -> str:
+    """R8-P1-5（S5）: 审计 drift 禁令块（PartWriterAgent 首片段 prompt 尾部注入）。
+
+    数据：state.audit_drift（Phase4Runner 维护，此前 Part 的 P0 issue 摘要）；
+    ≤10 行硬顶（与 consistency_flags 同规格，防挤占）；只注入 part < 当前 Part
+    的条目；residual=0 的 Part 无条目。kill-switch KML_AUDIT_DRIFT=0。
+    """
+    if os.environ.get('KML_AUDIT_DRIFT', '1') == '0':
+        return ''
+    lines: list = []
+    for e in (audit_drift or []):
+        if not isinstance(e, dict):
+            continue
+        try:
+            if int(e.get('part') or 0) >= part_num:
+                continue
+        except (TypeError, ValueError):
+            continue
+        claim = (e.get('claim') or '').strip()[:40]
+        if not claim:
+            continue
+        dim = (e.get('dimension') or '').strip() or '一致性'
+        who = (e.get('character') or '').strip() or '全局'
+        lines.append(f'- Part {e.get("part")}「{dim}」{who}：{claim}')
+        if len(lines) >= 10:
+            break
+    if not lines:
+        return ''
+    return ('\n## ⚠ 本卷审计纠偏（此前 Part 评审检出、修复后仍须避免的问题形态；'
+            '本章写作时必须避免）\n' + '\n'.join(lines) + '\n')
 
 
 class PartWriterAgent(BaseAgent):
@@ -262,7 +295,15 @@ class PartWriterAgent(BaseAgent):
                         prev_part_anchor = f'\n## ⚠ Part {part_num - 1} 结尾最后 600 字（你的开篇必须直接承接以下情境，地点/时间/在场人物/动作状态保持一致）\n{prev_text[-600:]}\n'
                 except Exception:
                     prev_part_anchor = ''
-            return f"""请创作第{part_num}部分（Part {part_num}）的第一个片段。\n\n## Part规划\n阶段：{outline.get('phase', '')}\n核心事件：{outline.get('core_event', '')}\n情绪目标：{outline.get('emotion_target', '')}\n关键对白：{outline.get('key_dialogue', '')}\n结尾钩子：{outline.get('end_hook', '')}\n节奏要求：{outline.get('pacing', '自然流畅')}\n与前面部分的因果关系：{outline.get('causality', '')}\n\n## 字数硬约束\n本章目标：{target_words}字\n本章上限：{hard_max}字（系统会按 {CHUNK_WORDS}字/片段 续写多次）\n本片段目标：约 {chunk_target}字（这是第 1 片段 / 共最多 {MAX_CHUNKS} 片段）\n\n## 伏笔任务\n{foreshadow_info}\n\n## 故事上下文\n{context}\n{facts_paragraph}\n{prev_part_anchor}\n\n## 创作指令（R12 强化）\n1. **【强约束】开篇必须从 Part {(part_num - 1 if part_num > 1 else '0')} 结尾情境直接续接** —— 地点、时辰、在场人物、动作状态保持一致，不允许场景跳跃\n2. 第一句话直接进入情节，不要任何铺垫\n3. 自然承接上一部分结尾的情境\n4. 严格完成本片段的核心事件推进\n5. 结尾实现钩子效果（但本章还有更多片段，不需要在此处完全收尾）\n6. 本片段字数控制在 {max(1000, chunk_target - 200)}-{chunk_target + 200}字之间\n\n## 强制约束（R8 新增）\n\n- 严禁与【前文已确立事实清单】（或第 1 部分时的"无前文"提示）中的任何事实矛盾\n- 严禁使用清单中没有的"已知信息"（如某物品在清单中未出现，不得假设角色持有）\n- 新引入的角色名/地名/物品名不要与前文已有的同名实体混淆（如不要让两个不同角色共享同一个名字）"""
+            # R8-P1-5（S5）: 审计 drift 禁令（新写注入点；try/except 包裹不破坏主流程）
+            drift_block = ''
+            if state is not None:
+                try:
+                    drift_block = _render_audit_drift(
+                        getattr(state, 'audit_drift', None), part_num)
+                except Exception:
+                    drift_block = ''
+            return f"""请创作第{part_num}部分（Part {part_num}）的第一个片段。\n\n## Part规划\n阶段：{outline.get('phase', '')}\n核心事件：{outline.get('core_event', '')}\n情绪目标：{outline.get('emotion_target', '')}\n关键对白：{outline.get('key_dialogue', '')}\n结尾钩子：{outline.get('end_hook', '')}\n节奏要求：{outline.get('pacing', '自然流畅')}\n与前面部分的因果关系：{outline.get('causality', '')}\n\n## 字数硬约束\n本章目标：{target_words}字\n本章上限：{hard_max}字（系统会按 {CHUNK_WORDS}字/片段 续写多次）\n本片段目标：约 {chunk_target}字（这是第 1 片段 / 共最多 {MAX_CHUNKS} 片段）\n\n## 伏笔任务\n{foreshadow_info}\n\n## 故事上下文\n{context}\n{facts_paragraph}\n{prev_part_anchor}\n{drift_block}\n## 创作指令（R12 强化）\n1. **【强约束】开篇必须从 Part {(part_num - 1 if part_num > 1 else '0')} 结尾情境直接续接** —— 地点、时辰、在场人物、动作状态保持一致，不允许场景跳跃\n2. 第一句话直接进入情节，不要任何铺垫\n3. 自然承接上一部分结尾的情境\n4. 严格完成本片段的核心事件推进\n5. 结尾实现钩子效果（但本章还有更多片段，不需要在此处完全收尾）\n6. 本片段字数控制在 {max(1000, chunk_target - 200)}-{chunk_target + 200}字之间\n\n## 强制约束（R8 新增）\n\n- 严禁与【前文已确立事实清单】（或第 1 部分时的"无前文"提示）中的任何事实矛盾\n- 严禁使用清单中没有的"已知信息"（如某物品在清单中未出现，不得假设角色持有）\n- 新引入的角色名/地名/物品名不要与前文已有的同名实体混淆（如不要让两个不同角色共享同一个名字）"""
         return f'请续写 Part {part_num} 的第 {chunk_idx} 片段。\n\n## 本片段上下文（上一片段末尾 {len(prev_tail)}字）\n{prev_tail}\n\n## 本片段计划\n{next_plan}\n\n## 字数约束\n本章目标：{target_words}字（已写 {written_so_far}字, 剩余约 {target_words - written_so_far}字）\n本片段目标：约 {chunk_target}字\n\n## 创作指令\n1. **从【上一片段末尾】最后一句自然续接**，不要重复或复述\n2. 严格遵守番茄快节奏铁律（首句抓人、300字一推进、对白驱动、短段落、感官代替标签）\n3. 角色名称必须与前文一致，言行必须符合档案\n4. 结尾必须是完整段落——不允许在对话中间或动作进行时戛然而止\n5. 本片段字数控制在 {max(1000, chunk_target - 200)}-{chunk_target + 200}字之间\n6. 不要输出任何标注、解释、分隔线——只输出小说正文'
 
     def validate_input(self, state, **kwargs) -> bool:

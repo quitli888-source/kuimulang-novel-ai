@@ -59,6 +59,9 @@ class TempStoryState:
                 logger.info(f'[TempStoryState] established_facts 反序列化失败（不影响主流程）: {ef_err}')
         # R1-G: 剧情状态增量（rolling 触发点生成，叠加层不回写 outline 本体）
         self.story_deltas = data.get('story_deltas', {}) or {}
+        # R8-P1-5（S5）: 审计 drift 禁令（Phase4Runner 维护，PartWriterAgent 首片段
+        # prompt 尾部与 revision brief 双注入，≤10 行硬顶；KML_AUDIT_DRIFT=0 关停）
+        self.audit_drift = data.get('audit_drift', []) or []
         self.memory = memory
         self.window = SlidingWindow(window_size=3)
         self.vector_store = vector_store
@@ -535,9 +538,15 @@ class WritingService:
             except Exception as ef_err:
                 logger.info(f'[_build_review_state_mock] established_facts 反序列化失败（不影响主流程）: {ef_err}')
 
+        # R8-P1-5（S5）: facts 回写同步通道 —— 修复回路把 superseding fact 显式落
+        # s.data 后，同跑内后续 Part 的评审也要立刻拿到新事实（此前闭包冻结在
+        # 加载时的实例上，回写只对 resume 生效）。holder 供 ConsistencyRepairer
+        # 刷新；旧 work JSON / 其他调用方无此属性时行为不变。
+        facts_holder = {'ef': review_facts}
+
         def _build_facts_block(current_part, categories=None):
             try:
-                block = review_facts.render_for_prompt(categories=categories, before_part_num=current_part)
+                block = facts_holder['ef'].render_for_prompt(categories=categories, before_part_num=current_part)
             except Exception:
                 return ''
             if not block:
@@ -545,6 +554,7 @@ class WritingService:
             return '【前文已确立事实清单——只能对照本表评判一致性】\n' + block
 
         mock.build_established_facts_block = _build_facts_block
+        mock.established_facts_holder = facts_holder
         return mock
 
     @staticmethod

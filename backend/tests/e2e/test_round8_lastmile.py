@@ -1168,6 +1168,235 @@ def test_s4_suspect_judge_noise_flag():
     logger.info('[test_s4_noise] PASS: suspect_judge_noise 打标 + 回退行为不变')
 
 
+# ---------------- S5（R8-5）: facts 回写 + 审计 drift 禁令双注入 ----------------
+
+R8_S5_FACTS = {'version': 1, 'facts': [
+    {'id': 'F4_1', 'part_num': 4, 'category': 'event', 'subject': '林渊',
+     'predicate': '死亡', 'text': '林渊被无脸族主红雾切断咽喉杀死',
+     'quote': '', 'superseded_by': None},
+    # 旧"状态"fact（回写后被 supersede 的对象）
+    {'id': 'F8_9', 'part_num': 8, 'category': 'character', 'subject': '林渊',
+     'predicate': '状态', 'text': '旧状态：林渊以碑影实体形式出场',
+     'quote': '', 'superseded_by': None},
+]}
+
+
+def _s5_service():
+    return _FakeService({
+        'name_registry': _r8_registry(),
+        'character_state_track': {'林渊': 'Part8 死亡: 林渊已死，碑林在学他说话'},
+        'established_facts': json.loads(json.dumps(R8_S5_FACTS)),
+        'characters': [dict(c) for c in R8_CHARACTERS],
+        'parts': {'14': R8_EDIT_PART14},
+        'final_draft': {'14': R8_EDIT_PART14},
+        'name_drift_dict': {},
+        'revision_log': [],
+        'name_audit_log': [],
+    })
+
+
+def test_s5_facts_writeback_on_revision_passed():
+    """S5 验收 1/4: revision_passed 的编辑修复 → s.data['established_facts'] 出现
+    superseding fact、旧 fact superseded_by 指向它、revision_log 有 facts_superseded；
+    resume 新建 TempStoryState → facts 块含新 fact（副本暗礁回归）。"""
+    from services.writing_service import TempStoryState
+    service = _s5_service()
+    repairer = ConsistencyRepairer(service, _ScriptedAgent([_clean_logic(0)]),
+                                   _ScriptedAgent([_clean_cons()]))
+    issues = [
+        _p0_issue('角色状态', '林渊已死严禁出场，文中却以实体被拖走'
+                                '（原文：“林渊整个人被拖进碑影胸口”）'
+                                '冲突：前文Part8林渊已死', '林渊'),
+        _p0_issue('状态连续性', '林渊于Part8已死亡且名册标注严禁出场，但在Part 14中'
+                                '却实际睁眼、说话、递出残玉，属于已死角色实体出场', '林渊'),
+    ]
+    cons = _clean_cons(issues)
+    spans = repairer._departed_anchors(R8_EDIT_PART14, 14)['林渊']
+
+    def fake_call_llm(system, user, *a, **k):
+        return '\n'.join(_edit_blocks([(s, s.replace('林渊', '碑林学他', 1))])
+                         for s in spans[:2])
+
+    with patch('services.consistency_repair.call_llm', side_effect=fake_call_llm):
+        note = asyncio.run(repairer.maybe_repair_part(
+            14, R8_EDIT_PART14, _clean_logic(0), cons, state_mock=_mock_state()))
+    assert note.get('revision_passed') is True, note
+    # ① s.data 显式落盘（TempStoryState 副本暗礁——只写副本不落 s.data 会漏）
+    ef_raw = service.data['established_facts']
+    new_facts = [f for f in ef_raw['facts'] if f['id'].startswith('FR14_')]
+    assert new_facts, ef_raw
+    nf = new_facts[0]
+    assert nf['subject'] == '林渊' and nf['predicate'] == '状态'
+    assert nf['part_num'] == 14 and '修复结论' in nf['text']
+    # ② 旧 fact superseded_by 指向新条目
+    old = [f for f in ef_raw['facts'] if f['id'] == 'F8_9'][0]
+    assert old['superseded_by'] == nf['id'], old
+    # ③ revision_log facts_superseded 观测
+    entries = [e for e in service.data['revision_log']
+               if e.get('type') == 'targeted_edit']
+    assert entries and entries[-1].get('facts_superseded') == ['F8_9'], entries[-1]
+    # ④ 副本暗礁回归：resume 新建 TempStoryState → facts 块含新 fact
+    temp = TempStoryState(service.data)
+    block = temp.build_established_facts_block(15)
+    assert '修复结论' in block and 'FR14_' not in block, block
+    assert '碑影实体形式出场' not in block, '旧 fact 应被 supersede 不再渲染'
+    logger.info('[test_s5_writeback] PASS: 落 s.data + supersede + 留痕 + resume 可见')
+
+
+def test_s5_no_writeback_when_not_passed_and_idempotent():
+    """S5 验收 1（反向）/2: revision_passed=False → 零回写；重复触发不产生重复条目。"""
+    service = _s5_service()
+    repairer = ConsistencyRepairer(service, _ScriptedAgent([_clean_logic(0)]),
+                                   _ScriptedAgent([_clean_cons()]))
+    issues = [_p0_issue('角色状态', '林渊已死严禁出场（原文：“林渊整个人被拖进碑影胸口”）'
+                                   '冲突：前文Part8林渊已死', '林渊')]
+    before = json.dumps(service.data['established_facts'], ensure_ascii=False)
+    # 反向：未证实的修复不回写（直接调 _write_back_facts 前的失败路径——
+    # 编辑空返回落重写失败 → note revision_passed=False）
+    with patch('services.consistency_repair.call_llm', side_effect=lambda *a, **k: ''):
+        note = asyncio.run(repairer.maybe_repair_part(
+            14, R8_EDIT_PART14, _clean_logic(0), _clean_cons(issues),
+            state_mock=_mock_state()))
+    assert note.get('revision_passed') is False, note
+    assert json.dumps(service.data['established_facts'],
+                      ensure_ascii=False) == before, '未通过修复不得回写'
+    # 幂等：同一 (part, subject, predicate) 重复触发只产生一条
+    p0 = issues
+    first = repairer._write_back_facts(14, p0, R8_EDIT_PART14, _mock_state())
+    second = repairer._write_back_facts(14, p0, R8_EDIT_PART14, _mock_state())
+    fr = [f for f in service.data['established_facts']['facts']
+          if f['id'].startswith('FR14_')]
+    assert len(fr) == 1, fr
+    assert first and second == [], (first, second)
+    logger.info('[test_s5_nowrite_idem] PASS: 未通过零回写 + 幂等去重')
+
+
+def test_s5_drift_block_dual_injection():
+    """S5 验收 3: Part 10 修复后 → Part 11 首片段 prompt 含禁令行且 ≤10 行；
+    _build_revision_brief 同样注入；无修复历史的 Part 无注入；kill-switch 关停。"""
+    from services.writing_phase_runners import Phase4Runner
+    from core.agents.part_writer_agent import PartWriterAgent
+    service = _s5_service()
+    runner = Phase4Runner(service)
+    logic_p0 = {'score': 3, 'overall_score': 3, 'pass': False, 'p0_count': 1,
+                'issues': [{'level': 'P0', 'dimension': '名称一致性',
+                            'character': '苏晚晴', 'location': 'Part 10',
+                            'description': '苏晚晴被截断为晚晴，不在名册登记写法内',
+                            'suggestion': "将'晚晴'改为'苏晚晴'"}],
+                'verdict': '名称漂移'}
+    runner._record_audit_drift(service, 10, logic_p0, _clean_cons(), None)
+    drift = service.data['audit_drift']
+    assert len(drift) == 1 and drift[0]['part'] == 10
+    assert drift[0]['character'] == '苏晚晴' and '截断' in drift[0]['claim']
+    # 注入点 1（新写）：PartWriterAgent 首片段 prompt
+    agent = PartWriterAgent()
+    state = SimpleNamespace(
+        audit_drift=drift, parts={'10': '井水无声。' * 200},
+        build_established_facts_block=lambda pn: '')
+    prompt = agent._build_chunk_prompt(
+        part_num=11, chunk_idx=1, is_first_chunk=True, prev_tail='',
+        next_plan='本章计划', context='故事上下文', foreshadow_info='无',
+        outline={'phase': '升级', 'core_event': 'e', 'emotion_target': 'x',
+                 'key_dialogue': '', 'end_hook': '', 'pacing': '', 'causality': ''},
+        chunk_target=3000, target_words=5000, hard_max=10200,
+        written_so_far=0, state=state)
+    assert '本卷审计纠偏' in prompt and '苏晚晴' in prompt and '截断' in prompt
+    drift_lines = [ln for ln in prompt.split('\n') if ln.startswith('- Part 10')]
+    assert len(drift_lines) == 1
+    # ≤10 行硬顶
+    big = [{'part': i, 'dimension': 'd', 'character': 'c', 'claim': f'问题{i}'}
+           for i in range(1, 21)]
+    state_big = SimpleNamespace(audit_drift=big, parts={},
+                                build_established_facts_block=lambda pn: '')
+    prompt_big = agent._build_chunk_prompt(
+        part_num=25, chunk_idx=1, is_first_chunk=True, prev_tail='',
+        next_plan='p', context='c', foreshadow_info='无',
+        outline={'core_event': 'e'}, chunk_target=3000, target_words=5000,
+        hard_max=10200, written_so_far=0, state=state_big)
+    assert len([ln for ln in prompt_big.split('\n') if ln.startswith('- Part ')]) == 10
+    # 注入点 2（重写）：_build_revision_brief
+    repairer = ConsistencyRepairer(service, _ScriptedAgent([]), _ScriptedAgent([]))
+    brief = repairer._build_revision_brief(11, _clean_logic(1), _clean_cons(),
+                                           part_text='x')
+    assert '本卷审计纠偏' in brief and '苏晚晴' in brief
+    # 本 Part 自己的条目不进 brief（由明细行承载）
+    brief10 = repairer._build_revision_brief(10, _clean_logic(1), _clean_cons(),
+                                             part_text='x')
+    assert '本卷审计纠偏' not in brief10
+    # 无修复历史 → 无注入
+    service2 = _s5_service()
+    repairer2 = ConsistencyRepairer(service2, _ScriptedAgent([]), _ScriptedAgent([]))
+    assert '本卷审计纠偏' not in repairer2._build_revision_brief(
+        11, _clean_logic(1), _clean_cons(), part_text='x')
+    # kill-switch
+    os.environ['KML_AUDIT_DRIFT'] = '0'
+    try:
+        assert '本卷审计纠偏' not in repairer._build_revision_brief(
+            11, _clean_logic(1), _clean_cons(), part_text='x')
+        state_k = SimpleNamespace(audit_drift=drift, parts={},
+                                  build_established_facts_block=lambda pn: '')
+        prompt_k = agent._build_chunk_prompt(
+            part_num=11, chunk_idx=1, is_first_chunk=True, prev_tail='',
+            next_plan='p', context='c', foreshadow_info='无',
+            outline={'core_event': 'e'}, chunk_target=3000, target_words=5000,
+            hard_max=10200, written_so_far=0, state=state_k)
+        assert '本卷审计纠偏' not in prompt_k
+    finally:
+        os.environ.pop('KML_AUDIT_DRIFT', None)
+    # 覆盖语义：重新记录干净 Part → 条目被清
+    runner._record_audit_drift(service, 10, _clean_logic(0), _clean_cons(), None)
+    assert service.data['audit_drift'] == []
+    logger.info('[test_s5_drift] PASS: 双注入 + ≤10 行 + kill-switch + 覆盖语义')
+
+
+def test_s5_drift_recorded_in_phase4_run():
+    """S5 验收 3（链路）: Phase4Runner.run() 全流程后 audit_drift 落盘且随
+    s._save() 持久化（progress 恢复路径同样重建）。"""
+    import core.llm_client as llm_client
+    from services.writing_phase_runners import Phase4Runner
+    facts = {'version': 1, 'facts': [
+        {'id': 'F1_1', 'part_num': 1, 'category': 'character', 'subject': '林渊',
+         'predicate': '死亡', 'text': '林渊在井边身死', 'quote': '',
+         'superseded_by': None}]}
+    parts = {'1': '林渊巡井三十年，终于坠井。' + '井水无声。' * 100,
+             '2': '碑林呜呜作响，命纹明亮。' + '风停了。' * 100}
+    service = _Phase4FakeService({
+        'name_registry': _r8_registry(),
+        'established_facts': facts,
+        'characters': [dict(c) for c in R8_CHARACTERS],
+        'part_outline': [], 'parts': parts, 'phase': 'phase3_part2',
+        'revision_log': [],
+    })
+    la, ea, ca, sa = _scripted_agents()
+    patches = _patch_phase4_agents(la, ea, ca, sa)
+    with patches[0], patches[1], patches[2], patches[3]:
+        asyncio.run(Phase4Runner(service).run())
+    # 干净跑法（假 agent 无 P0）→ audit_drift 为空（residual=0 的 Part 无条目）
+    assert service.data.get('audit_drift') == [], service.data.get('audit_drift')
+    # 有 P0 首检的 Part → 落条目
+    service2 = _Phase4FakeService({
+        'name_registry': _r8_registry(),
+        'established_facts': facts,
+        'characters': [dict(c) for c in R8_CHARACTERS],
+        'part_outline': [], 'parts': parts, 'phase': 'phase3_part2',
+        'revision_log': [],
+    })
+    logic_p0 = {'score': 3, 'overall_score': 3, 'pass': False, 'p0_count': 1,
+                'issues': [{'level': 'P0', 'dimension': '角色状态',
+                            'character': '林渊', 'location': 'Part 2',
+                            'description': '林渊已死却以碑影实体出场互动',
+                            'suggestion': '改为碑林模仿'}],
+                'verdict': '退场角色复现'}
+    la2, ea2, ca2, sa2 = _scripted_agents()
+    la2._fn = lambda part_num, part_text: (logic_p0 if part_num == 2 else _clean_logic())
+    patches2 = _patch_phase4_agents(la2, ea2, ca2, sa2)
+    with patches2[0], patches2[1], patches2[2], patches2[3]:
+        asyncio.run(Phase4Runner(service2).run())
+    drift = service2.data.get('audit_drift') or []
+    assert any(e['part'] == 2 and e['character'] == '林渊' for e in drift), drift
+    logger.info('[test_s5_phase4] PASS: Phase4 链路 drift 落盘 + 干净跑法无条目')
+
+
 # ---------------- S3（R8-3）: advisory 预算优先级重排 ----------------
 
 def _called_parts(service, cons_agent):
@@ -1261,7 +1490,11 @@ if __name__ == '__main__':
     logger.info('=' * 60)
     logger.info('test_round8_lastmile.py —— Round 8 最后一公里轮回归（mock LLM）')
     logger.info('=' * 60)
-    for fn in (test_s4_expected_min_len_escalation_ladder,
+    for fn in (test_s5_facts_writeback_on_revision_passed,
+               test_s5_no_writeback_when_not_passed_and_idempotent,
+               test_s5_drift_block_dual_injection,
+               test_s5_drift_recorded_in_phase4_run,
+               test_s4_expected_min_len_escalation_ladder,
                test_s4_aider_style_retry_only_failed_blocks,
                test_s4_empty_return_no_retry,
                test_s4_subset_edit_mode,
