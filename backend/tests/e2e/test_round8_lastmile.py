@@ -23,6 +23,7 @@ import json
 import os
 import pathlib
 import sys
+import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -157,7 +158,8 @@ class _FakeService:
         self.saved_chunks = {}
         self.save_count = 0
         self.cfg = SimpleNamespace(part_count=2, target_word_count=10000)
-        self.work_path = SimpleNamespace(parent=pathlib.Path('.'))
+        # dossier 等落点改临时目录（防测试污染仓库目录）
+        self.work_path = SimpleNamespace(parent=pathlib.Path(tempfile.gettempdir()))
 
         class _Emitter:
             async def emit(self, *a, **k):
