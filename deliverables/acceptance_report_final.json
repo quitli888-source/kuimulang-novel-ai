@@ -1,0 +1,459 @@
+{
+  "timestamp": "20260922_053359",
+  "work_id": "e21717650927",
+  "target_parts": [
+    5
+  ],
+  "num_parts_target": 20,
+  "actual_parts": 20,
+  "total_chars": 95117,
+  "elapsed_sec": 260.3,
+  "gates": {
+    "G1_complete": {
+      "pass": true,
+      "expected_parts": 20,
+      "actual_parts": 20,
+      "failed_parts": []
+    },
+    "G2_word_count": {
+      "pass": true,
+      "total_chars": 95117,
+      "range": [
+        90000,
+        114999
+      ]
+    },
+    "G3_density": {
+      "pass": true,
+      "passed": 20,
+      "total": 20,
+      "parts": {
+        "1": {
+          "chars": 5054,
+          "ellipsis_per_1k": 0.79,
+          "emdash_per_1k": 0.0,
+          "ellipsis_runs_3plus": 0,
+          "emdash_runs_2plus": 0,
+          "verdict": "PASS"
+        },
+        "2": {
+          "chars": 5138,
+          "ellipsis_per_1k": 0.78,
+          "emdash_per_1k": 0.0,
+          "ellipsis_runs_3plus": 0,
+          "emdash_runs_2plus": 0,
+          "verdict": "PASS"
+        },
+        "3": {
+          "chars": 4166,
+          "ellipsis_per_1k": 0.96,
+          "emdash_per_1k": 0.0,
+          "ellipsis_runs_3plus": 0,
+          "emdash_runs_2plus": 0,
+          "verdict": "PASS"
+        },
+        "4": {
+          "chars": 5282,
+          "ellipsis_per_1k": 1.14,
+          "emdash_per_1k": 0.0,
+          "ellipsis_runs_3plus": 0,
+          "emdash_runs_2plus": 0,
+          "verdict": "PASS"
+        },
+        "5": {
+          "chars": 4169,
+          "ellipsis_per_1k": 0.0,
+          "emdash_per_1k": 0.0,
+          "ellipsis_runs_3plus": 0,
+          "emdash_runs_2plus": 0,
+          "verdict": "PASS"
+        },
+        "6": {
+          "chars": 4213,
+          "ellipsis_per_1k": 4.75,
+          "emdash_per_1k": 0.0,
+          "ellipsis_runs_3plus": 0,
+          "emdash_runs_2plus": 0,
+          "verdict": "PASS"
+        },
+        "7": {
+          "chars": 4182,
+          "ellipsis_per_1k": 0.96,
+          "emdash_per_1k": 0.0,
+          "ellipsis_runs_3plus": 0,
+          "emdash_runs_2plus": 0,
+          "verdict": "PASS"
+        },
+        "8": {
+          "chars": 5436,
+          "ellipsis_per_1k": 1.84,
+          "emdash_per_1k": 0.0,
+          "ellipsis_runs_3plus": 0,
+          "emdash_runs_2plus": 0,
+          "verdict": "PASS"
+        },
+        "9": {
+          "chars": 4152,
+          "ellipsis_per_1k": 0.48,
+          "emdash_per_1k": 0.0,
+          "ellipsis_runs_3plus": 0,
+          "emdash_runs_2plus": 0,
+          "verdict": "PASS"
+        },
+        "10": {
+          "chars": 4561,
+          "ellipsis_per_1k": 2.63,
+          "emdash_per_1k": 0.44,
+          "ellipsis_runs_3plus": 0,
+          "emdash_runs_2plus": 0,
+          "verdict": "PASS"
+        },
+        "11": {
+          "chars": 5208,
+          "ellipsis_per_1k": 0.0,
+          "emdash_per_1k": 0.0,
+          "ellipsis_runs_3plus": 0,
+          "emdash_runs_2plus": 0,
+          "verdict": "PASS"
+        },
+        "12": {
+          "chars": 4184,
+          "ellipsis_per_1k": 0.0,
+          "emdash_per_1k": 0.0,
+          "ellipsis_runs_3plus": 0,
+          "emdash_runs_2plus": 0,
+          "verdict": "PASS"
+        },
+        "13": {
+          "chars": 4191,
+          "ellipsis_per_1k": 1.91,
+          "emdash_per_1k": 0.0,
+          "ellipsis_runs_3plus": 0,
+          "emdash_runs_2plus": 0,
+          "verdict": "PASS"
+        },
+        "14": {
+          "chars": 4114,
+          "ellipsis_per_1k": 0.49,
+          "emdash_per_1k": 0.0,
+          "ellipsis_runs_3plus": 0,
+          "emdash_runs_2plus": 0,
+          "verdict": "PASS"
+        },
+        "15": {
+          "chars": 5988,
+          "ellipsis_per_1k": 0.0,
+          "emdash_per_1k": 0.0,
+          "ellipsis_runs_3plus": 0,
+          "emdash_runs_2plus": 0,
+          "verdict": "PASS"
+        },
+        "16": {
+          "chars": 4940,
+          "ellipsis_per_1k": 3.85,
+          "emdash_per_1k": 0.0,
+          "ellipsis_runs_3plus": 0,
+          "emdash_runs_2plus": 0,
+          "verdict": "PASS"
+        },
+        "17": {
+          "chars": 5759,
+          "ellipsis_per_1k": 0.0,
+          "emdash_per_1k": 0.0,
+          "ellipsis_runs_3plus": 0,
+          "emdash_runs_2plus": 0,
+          "verdict": "PASS"
+        },
+        "18": {
+          "chars": 5611,
+          "ellipsis_per_1k": 0.71,
+          "emdash_per_1k": 0.0,
+          "ellipsis_runs_3plus": 0,
+          "emdash_runs_2plus": 0,
+          "verdict": "PASS"
+        },
+        "19": {
+          "chars": 4883,
+          "ellipsis_per_1k": 0.0,
+          "emdash_per_1k": 0.0,
+          "ellipsis_runs_3plus": 0,
+          "emdash_runs_2plus": 0,
+          "verdict": "PASS"
+        },
+        "20": {
+          "chars": 3886,
+          "ellipsis_per_1k": 2.06,
+          "emdash_per_1k": 0.0,
+          "ellipsis_runs_3plus": 0,
+          "emdash_runs_2plus": 0,
+          "verdict": "PASS"
+        }
+      }
+    },
+    "G4_coherence": {
+      "pass": true,
+      "reviewed_parts": 20,
+      "total_p0": 0,
+      "total_p1": 14,
+      "avg_logic_score": 8.65,
+      "consistency_pass": true,
+      "first_pass_total_p0": 10,
+      "residual_total_p0": 0,
+      "revision_stats": {
+        "attempted": 8,
+        "passed": 8,
+        "degraded": 0,
+        "spotfixed": 1
+      },
+      "first_pass_p0_budget": 10,
+      "thresholds": {
+        "max_total_p0": 0,
+        "min_avg_logic_score": 6,
+        "min_consistency_pass_rate": 0.8
+      },
+      "per_part": [
+        {
+          "part": 1,
+          "logic_score": 10.0,
+          "consistency_score": 10.0,
+          "p0_issues": [],
+          "p1_issues": [
+            "井底与神秘声音的对话信息量密集，部分台词稍显直白，略微削弱了沉浸感",
+            "林渊最后'心头莫名一悸'的心理描写略显突兀，与其先前冷酷形象存在轻微割裂",
+            "从受刑到投井的过渡中，旁观弟子的反应描写较套路化，可更独特"
+          ]
+        },
+        {
+          "part": 2,
+          "logic_score": 8.0,
+          "consistency_score": 10.0,
+          "p0_issues": [],
+          "p1_issues": [
+            "{'level': 'P1', 'description': '（V5 短协议：p1_count=2，无 issue 明细）'}",
+            "{'level': 'P1', 'description': '（V5 短协议：p1_count=2，无 issue 明细）'}",
+            "三百黑甲围攻段落招式描写重复（横扫、抽飞、刺穿），易产生阅读疲劳",
+            "井底幻觉（另一个林尘）的伏笔与当前“暴爽”主线略有割裂，情绪节奏被打断",
+            "林渊作为反派的恐惧刻画较为表面（“肌肉抽动”“软腿”），削弱了碾压快感的层次"
+          ]
+        },
+        {
+          "part": 3,
+          "logic_score": 8.0,
+          "consistency_score": 10.0,
+          "p0_issues": [],
+          "p1_issues": [
+            "林渊被钉栏杆上诡笑并揭示'祭井提前'略显突兀，缺乏足够铺垫，阴谋感有些生硬",
+            "井台部分信息密度过大，族主无脸、开门、黑甲军惨状等元素堆砌，情感细腻度被情节推进稀释",
+            "林尘身体痛苦的描写有时被快节奏叙事淹没，'开门'的代价缺乏足够具象化的身体感受，削弱了高潮的悲壮感"
+          ]
+        },
+        {
+          "part": 4,
+          "logic_score": 6.0,
+          "consistency_score": 10.0,
+          "p0_issues": [],
+          "p1_issues": [
+            "{'level': 'P1', 'description': '（V5 短协议：p1_count=1，无 issue 明细）'}",
+            "中段信息密度过高，守井人、换锁、钥匙等设定密集抛出，可能稀释部分情感共鸣",
+            "无脸族主的功能性过强，其'紧张'与'愤怒'缺乏层次，略显脸谱化",
+            "林烈从共犯到崩溃的转变稍快，情感铺垫可更充分"
+          ]
+        },
+        {
+          "part": 6,
+          "logic_score": 8.0,
+          "consistency_score": 8.0,
+          "p0_issues": [],
+          "p1_issues": [
+            "{'level': 'P1', 'description': '（V5 短协议：p1_count=2，无 issue 明细）'}",
+            "{'level': 'P1', 'description': '（V5 短协议：p1_count=2，无 issue 明细）'}",
+            "连续多重反转（双生子、替死鬼、祖纹认主、林渊笔迹）信息过载，情绪消化空间不足",
+            "部分台词略显中二（如'换你个头'），稍损严肃悲壮感",
+            "苏晚晴残玉浮现'替'字略显工具化，情感铺垫不足"
+          ]
+        },
+        {
+          "part": 7,
+          "logic_score": 8.0,
+          "consistency_score": 10.0,
+          "p0_issues": [],
+          "p1_issues": [
+            "{'level': 'P1', 'description': '（V5 短协议：p1_count=1，无 issue 明细）'}",
+            "楚寒讲解契约历史的部分信息密度过高，略有说明文倾向，情感张力暂时让位于设定阐述",
+            "追兵桥段（'灾星在那''放箭'）较为套路化，与前后文的高质量心理描写相比略显平淡"
+          ]
+        },
+        {
+          "part": 8,
+          "logic_score": 10.0,
+          "consistency_score": 10.0,
+          "p0_issues": [],
+          "p1_issues": [
+            "楚寒关于'碑立一日，锁紧一分'等设定解说略显密集，稍微打断了血书带来的情感沉浸",
+            "结尾处连续的动作与设定释放（逼血、烧碑、金血现世）密度过高，留给读者回味母亲遗言的情感停顿稍短"
+          ]
+        },
+        {
+          "part": 9,
+          "logic_score": 9.0,
+          "consistency_score": 9.0,
+          "p0_issues": [],
+          "p1_issues": [
+            "林渊揭露当年大火真相的段落，信息密度过高，情感冲击被叙事功能部分稀释",
+            "井中声音连续揭示身世、桃花蛊、母亲幻象，多重信息轰炸导致结尾略显拥挤，喘息空间不足",
+            "部分血腥描写（如三位长老血肉横飞）过于直白，感官刺激强但情感层次相对单一"
+          ]
+        },
+        {
+          "part": 10,
+          "logic_score": 10.0,
+          "consistency_score": 10.0,
+          "p0_issues": [],
+          "p1_issues": [
+            "青衣人与星卫的登场略显功能性，情感铺垫不足，更像剧情推进工具人",
+            "树心尸身与半块玉佩的揭秘过于集中，信息密度过高，削弱了情感冲击的余韵",
+            "井底脱险到古城遇袭的转换稍快，'暂脱危机'的松弛感可更充分"
+          ]
+        },
+        {
+          "part": 11,
+          "logic_score": 10.0,
+          "consistency_score": 10.0,
+          "p0_issues": [],
+          "p1_issues": [
+            "楚寒揭示'神钥'真相的段落解释性文字偏多，情感节奏略有打断，说教感冲淡了震撼",
+            "碑文连续五行浮出的过程稍显冗长，中段情绪密度过高，缺少一次更深的'松弛'让读者喘息",
+            "林尘回忆十岁刑堂的片段插入较突兀，与前文紧迫的碑前对峙形成轻微割裂"
+          ]
+        },
+        {
+          "part": 12,
+          "logic_score": 9.0,
+          "consistency_score": 10.0,
+          "p0_issues": [],
+          "p1_issues": [
+            "林渊存影的部分对话稍显冗长，如“长生门开，林家能出几个仙人”等台词偏反派说教，削弱了真相揭露应有的冷峻与惊悚",
+            "楚寒揭示“各房都吃过”时采用直接陈述，信息抛出略像旁白解说，缺少更具象的情感载体",
+            "中段三帧画面叠加祖训文字，信息密度过高，情感起伏缺少适当的“松弛”空间，读者可能略有应接不暇之感"
+          ]
+        },
+        {
+          "part": 13,
+          "logic_score": 8.0,
+          "consistency_score": 9.0,
+          "p0_issues": [],
+          "p1_issues": [
+            "{'level': 'P1', 'description': '（V5 短协议：p1_count=1，无 issue 明细）'}",
+            "部分台词过于直白，如‘那些孩子，在井底看着你’有说教感，削弱了真实感",
+            "族老群体反应略显脸谱化，集体怒吼‘假的’‘幻术’缺乏个体情感细节，降低了共情精度",
+            "结尾黑雾合拢、碑影搭肩的处理让本Part情绪释放不够彻底，读者畅快感被悬念截断，易生憋闷"
+          ]
+        },
+        {
+          "part": 14,
+          "logic_score": 8.0,
+          "consistency_score": 9.0,
+          "p0_issues": [],
+          "p1_issues": [
+            "{'level': 'P1', 'description': '（V5 短协议：p1_count=1，无 issue 明细）'}",
+            "碑影接连抛出‘第一千次轮回’‘第一千个钥血’等宏大设定，信息密度过高，略微挤占了情感沉淀空间",
+            "‘门’与‘走出去’的转折偏意象化，逻辑跳跃稍快，情感释放更多依赖象征而非实感"
+          ]
+        },
+        {
+          "part": 15,
+          "logic_score": 8.0,
+          "consistency_score": 10.0,
+          "p0_issues": [],
+          "p1_issues": [
+            "{'level': 'P1', 'description': '（V5 短协议：p1_count=1，无 issue 明细）'}",
+            "三千世界、轮回、门、钥、源等高概念在短时间内密集倾泻，部分读者可能出现认知过载，从而稀释切身痛感",
+            "‘会疼的，才是被夺走的命’等台词稍带哲理说教感，虽有力但略微削弱了纯粹的情感流动",
+            "结尾老十岁‘另一个他’的揭示过于突兀，缺乏半拍呼吸，导致情感从悲壮直接切换到惊悚，中间缺少过渡"
+          ]
+        },
+        {
+          "part": 16,
+          "logic_score": 9.0,
+          "consistency_score": 10.0,
+          "p0_issues": [],
+          "p1_issues": [
+            "信息密度过高，从揭秘、封印到战斗、再反转连续推进，缺乏情感沉淀空间，悲壮感被后续快节奏战斗稀释",
+            "井口大战中‘咬人脸’‘撕万魂幡’等偏热血暴烈的描写，与前半段深沉压抑的母爱基调存在风格割裂",
+            "结尾连续叠加‘门开’与‘援兵围剿’双重危机，反转略显刻意，导致高潮释放后的情绪被强行再次拔高，读者易产生疲劳"
+          ]
+        },
+        {
+          "part": 17,
+          "logic_score": 10.0,
+          "consistency_score": 9.0,
+          "p0_issues": [],
+          "p1_issues": [
+            "信息密度过高，门外三人组与门内林尘的多线战斗切换极快，导致部分情感节点来不及沉淀",
+            "渊字碑影台词功能性强，'林家建族八百年'等揭露性台词说教感略重，削弱了反派溃灭时的情感快感",
+            "结尾'祂醒了'与Part 16结尾重复，虽为续章铺垫，但削弱了本Part作为终极高潮的收束力度"
+          ]
+        },
+        {
+          "part": 18,
+          "logic_score": 8.0,
+          "consistency_score": 10.0,
+          "p0_issues": [],
+          "p1_issues": [
+            "{'level': 'P1', 'description': '（V5 短协议：p1_count=2，无 issue 明细）'}",
+            "{'level': 'P1', 'description': '（V5 短协议：p1_count=2，无 issue 明细）'}",
+            "烛冥部分台词稍长，功能性略强，略微稀释了情感浓度",
+            "苏晚晴从'死都不松手'到被迫松手的转变稍快，可增加一寸寸剥离的细节以强化撕心裂肺感",
+            "三千世界裂痕的宏观描写与井口个人情感的特写之间切换略频繁，情感沉浸有轻微断裂"
+          ]
+        },
+        {
+          "part": 19,
+          "logic_score": 8.0,
+          "consistency_score": 10.0,
+          "p0_issues": [],
+          "p1_issues": [
+            "{'level': 'P1', 'description': '（V5 短协议：p1_count=1，无 issue 明细）'}",
+            "结尾在终极高潮后再度抛出“更深的黑暗”与“睁开的眼”，虽为续作留白，但一定程度上冲淡了本Part“恢宏悲怆的释然”这一情绪目标的余韵。",
+            "林尘人形消散后迅速切入大段三千世界壁膜愈合的宏观描写，私人离别的情感锚点被史诗叙事短暂覆盖，少了一拍缠绵。",
+            "楚寒与林烈的台词功能性强，情感层次相对单薄，作为旁观者的共鸣抓手略弱。"
+          ]
+        },
+        {
+          "part": 20,
+          "logic_score": 8.0,
+          "consistency_score": 10.0,
+          "p0_issues": [],
+          "p1_issues": [
+            "{'level': 'P1', 'description': '（V5 短协议：p1_count=2，无 issue 明细）'}",
+            "{'level': 'P1', 'description': '（V5 短协议：p1_count=2，无 issue 明细）'}",
+            "灰鼠裘老妇携蚀神咒登场略显突兀，作为最后阻力缺乏更早的铺垫，其转变也稍快，一定程度上削弱了高潮的对抗层次",
+            "林尘滴血破咒时，'用我的血，烧了它'的台词稍显直白，与前文部分台词相比，少了些许留白"
+          ]
+        },
+        {
+          "part": 5,
+          "logic_score": 10.0,
+          "consistency_score": 10.0,
+          "p0_issues": [],
+          "p1_issues": [
+            "母亲红绳与师父残页的揭示信息略密，情感沉淀时间被战斗节奏挤压",
+            "部分族老台词功能性强，'赎罪'与'天意'的重复稍显脸谱化，削弱了群攻的压迫层次"
+          ]
+        }
+      ],
+      "name_audit": {
+        "gate_enabled": true,
+        "residual_blocking": 0,
+        "residual_advisory": 25,
+        "scanned": 20,
+        "findings": 482,
+        "fixed": 65,
+        "canonical_absent": 110
+      },
+      "final_draft_parts": 20,
+      "final_draft_chars": 95114
+    }
+  },
+  "overall_pass": true
+}
