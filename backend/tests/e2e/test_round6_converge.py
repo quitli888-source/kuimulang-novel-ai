@@ -577,6 +577,221 @@ def test_reval_script_clears_progress_keys():
     logger.info('[test_reval_clears] PASS: reval 同步清 progress 键并透传 SKIP 状态')
 
 
+# ---------------- S1（R6-1）: logic 审查明细补取（计数守恒 + anchor 逐字校验） ----------------
+
+class _LogicState:
+    """LogicReviewAgent.execute 所需的最小 state 面（离线）。"""
+
+    def __init__(self, part_text='', parts=None, summaries=None):
+        self.part_outline = [{'core_event': f'核心事件{i}', 'emotion_target': '情绪目标',
+                              'causality': '因果关系'} for i in range(1, 6)]
+        self.characters = [{'name': '林尘', 'role': '主角', 'core_trait': '隐忍',
+                            'motivation': '查明身世', 'secret': '天煞孤星'},
+                           {'name': '林万重', 'role': '核心配角', 'core_trait': '阴沉',
+                            'motivation': '夺权', 'secret': '私通外敌'}]
+        self.world_setting = '世界观设定'
+        self.part_summaries = summaries if summaries is not None else {'1': '前文摘要'}
+        self.parts = parts if parts is not None else {'1': '前文正文'}
+        self.character_state_track = {}
+        self.name_registry = build_name_registry(R6_CHARACTERS)
+        self.work_id = None
+
+    def build_established_facts_block(self, part_num):
+        return '【前文已确立事实清单】\n- 残玉在 Part 2 被苏晚晴收起'
+
+
+def _logic_main_result(p0=2, verdict='残玉被苏晚晴收起后林尘却从怀中取出，物品位置矛盾'):
+    return {'score': 3, 'pass': False, 'p0_count': p0, 'p1_count': 0,
+            'p2_count': 0, 'verdict': verdict}
+
+
+def _detail_issues(items):
+    return {'issues': items, 'returned': len(items), 'total': len(items)}
+
+
+def _run_logic_agent(part_text, main, detail, part_num=3):
+    """脚本化 call_llm_json（首发主协议、次发明细协议）跑 LogicReviewAgent。"""
+    from core.agents.logic_review_agent import LogicReviewAgent
+    calls: list = []
+
+    def fake_call(system_prompt, user_prompt, **kw):
+        calls.append(system_prompt)
+        if len(calls) == 1:
+            return main
+        if isinstance(detail, Exception):
+            raise detail
+        return detail
+
+    with patch('core.agents.logic_review_agent.call_llm_json',
+               side_effect=fake_call):
+        result = LogicReviewAgent().execute(_LogicState(part_text=part_text),
+                                            part_num, part_text)
+    return result, calls
+
+
+R6_LOGIC_PART_TEXT = (
+    '林尘跌入古井，残玉被苏晚晴收起。后来林尘却从怀中取出残玉，径直走向井口。'
+    '他突言母亲当年亲手换过神纹，径直推开了祠堂大门。'
+)
+
+
+def test_logic_detail_count_conservation_with_aggregator():
+    """S1 验收 1: p0_count=2 + detail 回 2 条（anchor 均在正文）→ 2 条真实明细；
+    聚合 total_p0/residual 与灌入前（数值兜底）完全一致（计数守恒）。"""
+    detail = _detail_issues([
+        {'idx': 1, 'dimension': '物品状态', 'anchor': '林尘却从怀中取出残玉',
+         'claim': '残玉位置矛盾', 'conflict': '残玉在 Part 2 被苏晚晴收起'},
+        {'idx': 2, 'dimension': '信息越界', 'anchor': '他突言母亲当年亲手换过神纹',
+         'claim': '林尘突言母亲换神纹', 'conflict': '前文未揭示此信息'},
+    ])
+    result, calls = _run_logic_agent(R6_LOGIC_PART_TEXT,
+                                     _logic_main_result(2), detail)
+    assert len(calls) == 2, 'p0>0 应触发第二次明细调用'
+    assert len(result['issues']) == 2
+    assert result['_detail_returned'] == 2 and result['_detail_total'] == 2
+    assert all(not i.get('_detail_placeholder') for i in result['issues'])
+    assert result['_detail_protocol'] == 'V5+detail'
+    # 计数守恒：灌入前后聚合口径一致（灌入前 issues=[] → 数值兜底 p0_count=2）
+    base = dict(_logic_main_result(2), issues=[], overall_score=3)
+    rep_before = aggregate_review_results(
+        [{'part': 3, 'logic_result': base, 'emotion_result': {},
+          'consistency_result': {}}])
+    rep_after = aggregate_review_results(
+        [{'part': 3, 'logic_result': result, 'emotion_result': {},
+          'consistency_result': {}}])
+    assert rep_before['logic']['p0_count'] == rep_after['logic']['p0_count'] == 2
+    assert (rep_before['first_pass_total_p0'] == rep_after['first_pass_total_p0'] == 2)
+    assert (rep_before['residual_total_p0'] == rep_after['residual_total_p0'] == 2)
+    logger.info('[test_detail_conservation] PASS: 明细灌入聚合计数不变（计数守恒）')
+
+
+def test_logic_detail_pad_and_truncate():
+    """S1 验收 2: p0_count=3 + detail 回 1 条 → 3（1 真 + 2 占位）；
+    detail 回 5 条 → 截断为 3；聚合计数均为 3。"""
+    one = _detail_issues([
+        {'idx': 1, 'dimension': '物品状态', 'anchor': '林尘却从怀中取出残玉',
+         'claim': '残玉位置矛盾', 'conflict': 'Part 2 被苏晚晴收起'}])
+    result1, _ = _run_logic_agent(R6_LOGIC_PART_TEXT, _logic_main_result(3), one)
+    assert len(result1['issues']) == 3, result1['issues']
+    assert sum(1 for i in result1['issues'] if i.get('_detail_placeholder')) == 2
+    assert result1['_detail_returned'] == 1 and result1['_detail_total'] == 3
+    rep = aggregate_review_results(
+        [{'part': 3, 'logic_result': result1, 'emotion_result': {},
+          'consistency_result': {}}])
+    assert rep['logic']['p0_count'] == 3
+    five = _detail_issues([
+        {'idx': i, 'dimension': '物品状态', 'anchor': f'林尘跌入古井{i}',
+         'claim': f'问题{i}', 'conflict': '冲突'} for i in range(1, 6)])
+    result5, _ = _run_logic_agent(R6_LOGIC_PART_TEXT, _logic_main_result(3), five)
+    assert len(result5['issues']) == 3, 'detail 回 5 条必须截断为 3'
+    assert all(not i.get('_detail_placeholder') for i in result5['issues'])
+    logger.info('[test_detail_pad_truncate] PASS: 少补占位、多截断，计数守恒')
+
+
+def test_logic_detail_failure_degrades_to_v5():
+    """S1 验收 3: detail 抛异常 / 返回非 dict → issues=[]，unified 与 V5 一致
+    （除新增观测字段）；主路径结果不受影响。"""
+    result_exc, calls_exc = _run_logic_agent(
+        R6_LOGIC_PART_TEXT, _logic_main_result(2),
+        RuntimeError('429 - concurrency reached'))
+    assert result_exc['issues'] == []
+    assert result_exc['score'] == 3 and result_exc['p0_count'] == 2
+    assert result_exc['_detail_protocol'] == 'V5+detail'
+    assert result_exc['_detail_returned'] == 0 and result_exc['_detail_total'] == 2
+    assert len(calls_exc) == 2
+    # 非 dict（list）→ 同样退化为 V5
+    result_list, _ = _run_logic_agent(R6_LOGIC_PART_TEXT,
+                                      _logic_main_result(2), ['not', 'a', 'dict'])
+    assert result_list['issues'] == [] and result_list['_detail_returned'] == 0
+    # 聚合计数回落数值兜底（2），与无明细一致
+    rep = aggregate_review_results(
+        [{'part': 3, 'logic_result': result_list, 'emotion_result': {},
+          'consistency_result': {}}])
+    assert rep['logic']['p0_count'] == 2
+    logger.info('[test_detail_failure] PASS: 异常/非 dict 退化 V5，零回归')
+
+
+def test_logic_detail_hallucinated_anchor_cleared():
+    """S1 验收 4: anchor 不在正文（幻觉引文）→ anchor 清空、issue 保留、
+    计数守恒成立（location 无锚点、description 无引文段）。"""
+    detail = _detail_issues([
+        {'idx': 1, 'dimension': '物品状态', 'anchor': '林尘从袖中抖出一枚玉佩',
+         'claim': '物品位置矛盾', 'conflict': '前文在匣中'},
+        {'idx': 2, 'dimension': '时间线', 'anchor': '林尘却从怀中取出残玉',
+         'claim': '时间线不连续', 'conflict': '白天突然入夜'},
+    ])
+    result, _ = _run_logic_agent(R6_LOGIC_PART_TEXT, _logic_main_result(2), detail)
+    assert len(result['issues']) == 2
+    fake, real = result['issues'][0], result['issues'][1]
+    assert 'anchor' not in fake['location'] and '原文：' not in fake['description']
+    assert fake['location'] == 'Part 3'
+    assert '（锚点：' in real['location'] and '原文：“' in real['description']
+    rep = aggregate_review_results(
+        [{'part': 3, 'logic_result': result, 'emotion_result': {},
+          'consistency_result': {}}])
+    assert rep['logic']['p0_count'] == 2
+    logger.info('[test_detail_anchor] PASS: 幻觉引文清空、issue 保留、计数守恒')
+
+
+def test_build_revision_brief_includes_logic_detail():
+    """S1 验收 5: logic issues 非空时 brief 含明细行（[Part N（锚点：…）] …
+    冲突：…）且不再出现 generic 分支文案。"""
+    detail = _detail_issues([
+        {'idx': 1, 'dimension': '物品状态', 'anchor': '林尘却从怀中取出残玉',
+         'claim': '残玉位置矛盾', 'conflict': '残玉在 Part 2 被苏晚晴收起'}])
+    logic_result, _ = _run_logic_agent(R6_LOGIC_PART_TEXT,
+                                       _logic_main_result(2), detail)
+    repairer = ConsistencyRepairer(_FakeService({}), _ScriptedAgent([]),
+                                   _ScriptedAgent([]))
+    brief = repairer._build_revision_brief(3, logic_result, _clean_cons())
+    assert '[Part 3（锚点：' in brief, brief
+    assert '冲突：残玉在 Part 2 被苏晚晴收起' in brief, brief
+    assert '逻辑审查未给出问题明细' not in brief, '有明细时不得走 generic 分支'
+    # 反向：无明细（issues 空）时 generic 分支仍在（V5 行为不变）
+    brief_v5 = repairer._build_revision_brief(
+        3, dict(_logic_main_result(2), issues=[]), _clean_cons())
+    assert '逻辑审查未给出问题明细' in brief_v5
+    logger.info('[test_detail_brief] PASS: 明细行进 brief，generic 分支让位')
+
+
+def test_logic_detail_kill_switch_and_part1():
+    """S1 验收 6: KML_LOGIC_DETAIL=0 → 零补取调用；Part 1 不补取。"""
+    prev = os.environ.get('KML_LOGIC_DETAIL')
+    os.environ['KML_LOGIC_DETAIL'] = '0'
+    try:
+        _, calls = _run_logic_agent(R6_LOGIC_PART_TEXT, _logic_main_result(2),
+                                    _detail_issues([
+                                        {'idx': 1, 'dimension': '物品状态',
+                                         'anchor': '林尘却从怀中取出残玉',
+                                         'claim': 'x', 'conflict': 'y'}]))
+        assert len(calls) == 1, 'KML_LOGIC_DETAIL=0 必须零补取调用'
+    finally:
+        if prev is None:
+            os.environ.pop('KML_LOGIC_DETAIL', None)
+        else:
+            os.environ['KML_LOGIC_DETAIL'] = prev
+    # Part 1：强制 p0=0 → 不补取（主调用 1 次）
+    result1, calls1 = _run_logic_agent(R6_LOGIC_PART_TEXT,
+                                       {'score': 10, 'pass': True, 'p0_count': 0,
+                                        'p1_count': 0, 'p2_count': 0,
+                                        'verdict': '首部无前文基线'},
+                                       _detail_issues([]), part_num=1)
+    assert len(calls1) == 1 and result1['issues'] == []
+    assert '_detail_protocol' not in result1, 'Part 1 不得进补取分支'
+    logger.info('[test_detail_killswitch] PASS: kill-switch 与 Part 1 零补取')
+
+
+def test_logic_detail_prompt_file_and_fallback_synced():
+    """S1: detail prompt 文件与内嵌 fallback 同含三句硬约束（R5-4 纪律）。"""
+    from core.agents.logic_review_agent import DETAIL_SYSTEM_PROMPT
+    prompt_file = (_HERE.parent.parent.parent / 'prompts'
+                   / 'logic_review_detail.txt').read_text(encoding='utf-8')
+    for constraint in ('最多列出 3 条', '逐字复制', '不超过 30 字', '不得翻页'):
+        assert constraint in DETAIL_SYSTEM_PROMPT, constraint
+        assert constraint in prompt_file, constraint
+    logger.info('[test_detail_prompt_sync] PASS: 文件与 fallback 同步含硬约束')
+
+
 if __name__ == '__main__':
     logger.info('=' * 60)
     logger.info('test_round6_converge.py —— Round 6 收敛轮回归（mock LLM）')
@@ -594,7 +809,14 @@ if __name__ == '__main__':
                test_phase4_progress_last_entry_wins,
                test_phase4_style_checkpoint_skip_and_staleness,
                test_phase4_skip_style_env,
-               test_reval_script_clears_progress_keys):
+               test_reval_script_clears_progress_keys,
+               test_logic_detail_count_conservation_with_aggregator,
+               test_logic_detail_pad_and_truncate,
+               test_logic_detail_failure_degrades_to_v5,
+               test_logic_detail_hallucinated_anchor_cleared,
+               test_build_revision_brief_includes_logic_detail,
+               test_logic_detail_kill_switch_and_part1,
+               test_logic_detail_prompt_file_and_fallback_synced):
         fn()
         print(f'PASS {fn.__name__}')
     logger.info('\nALL PASS')

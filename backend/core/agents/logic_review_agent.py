@@ -8,13 +8,22 @@ V5 改动（R8 合并 P0-1 + P0-2 + P1-2）：
 - Part 1 无前文 → 直接 pass=true, score=10
 - 异常处理不再静默吞 error，记录 _error + _fallback 字段，tester 可观测
 - 兼容旧字段 overall_score（向后兼容） + 新字段 score
+
+R6-1（S1）改动：两段式明细补取 —— V5 短协议主路径逐字节不变；主解析成功且
+p0_count>0 且 Part>1 时第二次小调用取有界明细（≤3 条/次、anchor 逐字校验、
+计数守恒），写回 unified['issues'] 喂既有消费链（_build_revision_brief 的
+l_p0 分支）。p0_count 始终是全场唯一计数权威（聚合器/劣化判据/G4 只认它）。
 """
+import os
 import re
 from core.agents.base_agent import BaseAgent
 from core.agents._helpers import sorted_part_nums  # P2-65: 取代 _sorted_part_nums 薄包装
 from core.llm_client import call_llm_json
 from core.config import get_json_max_tokens  # R1-C: JSON 调用显式 max_tokens 统一来源
+from core.logger import get_logger
 from core.prompt_loader import load_prompt
+
+logger = get_logger('logic_review_agent')
 
 SYSTEM_PROMPT = load_prompt("logic_review", """你是顶级小说逻辑审查专家，评分严格但公平。
 
@@ -66,6 +75,48 @@ SYSTEM_PROMPT = load_prompt("logic_review", """你是顶级小说逻辑审查专
 """)
 
 
+# R6-1（S1）: 明细补取 prompt —— prompts/logic_review_detail.txt 文件优先，
+# 内嵌 fallback 同款（R5-4 纪律：防缺文件部署行为分裂）。协议硬约束：
+# ≤3 条/次（不做分页）+ anchor 必须逐字出自正文 + 字段长度上限。
+DETAIL_SYSTEM_PROMPT = load_prompt("logic_review_detail", """你是顶级小说逻辑审查专家。主审查已判定本 Part 存在 P0 级逻辑矛盾，现在需要你列出问题明细。
+
+## 输出协议（必须严格遵守）
+
+仅输出一个 JSON 对象：
+
+```json
+{
+  "issues": [
+    {
+      "idx": 1,
+      "dimension": "<问题维度，如：物品状态/角色状态/时间线/信息越界/世界观规则/姓名地名>",
+      "anchor": "<原文引文，不超过 30 字，必须逐字出自正文（从正文原样复制，不得改写）>",
+      "claim": "<问题描述，不超过 50 字>",
+      "conflict": "<与前文何处冲突，不超过 30 字>"
+    }
+  ],
+  "returned": <本次实际列出的条数>,
+  "total": <主审查判定的 P0 总数>
+}
+```
+
+## 强约束
+
+1. **最多列出 3 条**（P0 总数超过 3 时只列最严重的前 3 条，不得翻页、不得输出更多）
+2. **anchor 必须从正文逐字复制**（客户端会做逐字校验，改写或幻觉的引文会被清空）
+3. 输出必须以 `{` 开始，以 `}` 结束；不要任何额外解释、markdown 标题
+4. dimension/anchor/claim/conflict 均不得超出上述长度上限
+5. 只描述主审查已判定的 P0 矛盾，不得新增主审查未提及的问题；不得给出修正建议
+""")
+
+# R6-1（S1）: 明细协议字段上限（≈400 字符/3 条，12000 max_tokens 无截断风险）
+_DETAIL_MAX_ITEMS = 3        # 最多 3 条/次（不做分页 —— 02_review §6.1）
+_DETAIL_ANCHOR_MAX = 30      # anchor 原文引文上限
+_DETAIL_CLAIM_MAX = 50       # claim 问题描述上限
+_DETAIL_CONFLICT_MAX = 30    # conflict 冲突说明上限
+_DETAIL_DIMENSION_MAX = 20   # dimension 维度名上限
+
+
 # 用于从已被截断的 raw text 中抢救 score / p0_count 等关键字段
 _FIRST_JSON_RE = re.compile(r"\{[^{}]*?(?:\{[^{}]*\}[^{}]*?)*\}", re.DOTALL)
 
@@ -83,6 +134,79 @@ def _coerce_score(value, default: int = 3) -> int:
         return n
     except Exception:
         return default
+
+
+def _normalize_detail_issues(raw_issues, part_text: str, p0_count: int,
+                             part_num: int) -> list:
+    """R6-1（S1）: detail 响应清洗 + 归一化 + 计数守恒（纯函数，零 LLM，可单测）。
+
+    - 非 dict 条目丢弃；缺字段补空串；anchor/claim/conflict 超长截断；
+      **anchor 必须逐字出自 part_text**（模型幻觉引文是本协议最大风险，
+      确定性兜底：不满足则清空 anchor 但保留 issue）；最多 3 条/次；
+    - 归一化到 consistency issue 形态（让既有消费链零改动生效：l_p0 非空后
+      _build_revision_brief 自动把明细写进 brief）；
+    - **计数守恒**（02_review §1.1 强制修正）：明细 issues 灌入后会走
+      review_aggregator._count_by_level 的 "issues 优先" 路径，补取不足会
+      人为压低聚合 residual P0（G4 soundness 漏洞）。归一化后 issues 数量
+      恰等于 p0_count —— 少则补占位 issue（_detail_placeholder 标记，任何
+      后续基于 issue 明细的比较必须跳过占位项），多则截断到 p0_count；
+      清洗后为空 → issues=[]（聚合器数值兜底，行为退化为 V5，零回归）。
+
+    Returns:
+        [issue, ...]（level=='P0' 的 consistency 形态 issue）
+    """
+    text = part_text or ''
+    cleaned: list = []
+    for item in (raw_issues or []):
+        if not isinstance(item, dict):
+            continue
+        anchor = str(item.get('anchor') or '').strip()[:_DETAIL_ANCHOR_MAX]
+        if anchor and anchor not in text:
+            anchor = ''  # 幻觉引文 → 清空 anchor 但保留 issue
+        cleaned.append({
+            'dimension': (str(item.get('dimension') or '').strip()[:_DETAIL_DIMENSION_MAX]
+                          or '逻辑审查'),
+            'character': str(item.get('character') or '').strip()[:_DETAIL_DIMENSION_MAX],
+            'anchor': anchor,
+            'claim': str(item.get('claim') or '').strip()[:_DETAIL_CLAIM_MAX],
+            'conflict': str(item.get('conflict') or '').strip()[:_DETAIL_CONFLICT_MAX],
+        })
+        if len(cleaned) >= _DETAIL_MAX_ITEMS:
+            break  # 协议上限：最多 3 条/次（不做分页）
+    if not cleaned:
+        return []  # 清洗后为空 → 行为退化为 V5（聚合器数值兜底计数）
+    try:
+        target = int(p0_count or 0)
+    except (TypeError, ValueError):
+        target = 0
+    if target <= 0:
+        return []
+    normalized: list = []
+    for d in cleaned[:target]:  # 多则截断到 p0_count
+        anchor = d['anchor']
+        claim, conflict = d['claim'], d['conflict']
+        desc = (f"{claim}（原文：“{anchor}”）冲突：{conflict}" if anchor
+                else f"{claim}冲突：{conflict}")
+        normalized.append({
+            'level': 'P0',
+            'dimension': d['dimension'],
+            'character': d['character'],
+            'location': (f'Part {part_num}（锚点：{anchor[:20]}）' if anchor
+                         else f'Part {part_num}'),
+            'description': desc,
+            'suggestion': '',
+        })
+    # 少则补占位 issue（带 _detail_placeholder 标记，下游差集/签名比较跳过）
+    real_count = len(normalized)
+    while len(normalized) < target:
+        normalized.append({
+            'level': 'P0', 'dimension': '逻辑审查', 'character': '',
+            'location': f'Part {part_num}',
+            'description': f'（明细补取未覆盖：p0_count={target}，'
+                           f'returned={real_count}）',
+            'suggestion': '', '_detail_placeholder': True,
+        })
+    return normalized
 
 
 def _extract_summary_from_raw(raw_text: str) -> dict:
@@ -265,6 +389,39 @@ class LogicReviewAgent(BaseAgent):
                 "strengths": result.get("strengths", []),
                 "_protocol": "V5",
             }
+
+            # R6-1（S1）: 两段式明细补取 —— 条件全部满足才发起第二次小调用：
+            # 主 JSON 解析成功（本路径）、p0_count>0、part_num>1（Part 1 强制
+            # p0=0）、KML_LOGIC_DETAIL != '0'（env kill-switch，缺省开）。
+            # 条件不满足时上方 V5 主路径逐字节不变；detail 失败（异常/非 dict）
+            # 只落 issues=[] + 观测字段，行为退化为今天的 V5（零回归）。
+            if p0 > 0 and part_num > 1 and os.environ.get('KML_LOGIC_DETAIL', '') != '0':
+                detail = None
+                try:
+                    detail = call_llm_json(
+                        system_prompt=DETAIL_SYSTEM_PROMPT,
+                        user_prompt=user_prompt + '\n\n请列出上述 Part 的 P0 问题明细'
+                                               '（最多 3 条；anchor 必须逐字出自正文）。',
+                        temperature=0.2,
+                        max_tokens=get_json_max_tokens(),
+                        agent=self.name,
+                        work_id=getattr(state, 'work_id', None),  # P1-87: per-work 计费路由
+                    )
+                except Exception as detail_err:
+                    logger.info(f'[LogicReviewAgent] Part {part_num} 明细补取失败'
+                                f'（不影响主路径）: {detail_err}')
+                normalized = []
+                if isinstance(detail, dict):
+                    normalized = _normalize_detail_issues(
+                        detail.get('issues'), part_text, p0, part_num)
+                unified['issues'] = normalized
+                unified['_detail_protocol'] = 'V5+detail'
+                unified['_detail_returned'] = len([i for i in normalized
+                                                   if not i.get('_detail_placeholder')])
+                unified['_detail_total'] = p0
+                logger.info(f'[LogicReviewAgent] Part {part_num} 明细补取: '
+                            f'{unified["_detail_returned"]}/{p0} 条真实明细'
+                            f'（issues 总数 {len(normalized)}，计数守恒）')
 
             self.log_done(
                 f"Part {part_num} 逻辑评分(V5): {score}/10 "
