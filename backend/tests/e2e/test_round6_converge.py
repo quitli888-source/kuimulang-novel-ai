@@ -1301,18 +1301,36 @@ def test_final_audit_departed_rereview_budget():
 
 
 def test_final_audit_departed_coexists_with_canonical_absent():
-    """S6 验收 3b: 与 canonical_absent 共存时排序确定（tier, part 升序）。"""
-    # Part 3 缺林轻眉（B finding，tier 1）+ Part 17 退场复现（tier 1）→ Part 3 先
+    """S6 验收 3b: 与 canonical_absent 共存时排序确定。
+
+    R8-P0-3（S3）起默认排序改为 kind 优先（departed > canonical_absent）：
+    Part 17 departed 先进预算；env KML_DEPARTED_PRIORITY=0 回退 R6-6 旧排序
+    (tier, part)（Part 3 canonical_absent 先）——既有行为由 kill-switch 保留。
+    """
+    # Part 3 缺林轻眉（B finding，tier 1）+ Part 17 退场复现（tier 1）→ 默认 departed 先
     draft = dict(R6_DEPARTED_DRAFT, **{'3': '林渊在家中设宴，无人提及轻眉。'})
     service = _audit_service_r6(draft)
     cons_agent = _ScriptedAgent([_clean_cons(), _clean_cons()])
     asyncio.run(Phase4Runner(service)._final_name_audit(
         service, [3, 17], cons_agent, SimpleNamespace(final_draft={})))
-    assert cons_agent.calls == [draft['3'], draft['17']], cons_agent.calls
+    assert cons_agent.calls == [draft['17'], draft['3']], cons_agent.calls
     kinds = [e['pair_source'] for e in service.data[AUDIT_LOG_KEY]
              if e['action'] == 'rereviewed']
-    assert kinds == ['canonical_absent', 'departed_reappearance'], kinds
-    logger.info('[test_departed_coexist] PASS: 与 B 共存排序确定（tier, part 升序）')
+    assert kinds == ['departed_reappearance', 'canonical_absent'], kinds
+    # kill-switch：回退 R6-6 旧排序 (tier, part)（Part 3 先）
+    os.environ['KML_DEPARTED_PRIORITY'] = '0'
+    try:
+        service2 = _audit_service_r6(draft)
+        cons_agent2 = _ScriptedAgent([_clean_cons(), _clean_cons()])
+        asyncio.run(Phase4Runner(service2)._final_name_audit(
+            service2, [3, 17], cons_agent2, SimpleNamespace(final_draft={})))
+        assert cons_agent2.calls == [draft['3'], draft['17']], cons_agent2.calls
+        kinds2 = [e['pair_source'] for e in service2.data[AUDIT_LOG_KEY]
+                  if e['action'] == 'rereviewed']
+        assert kinds2 == ['canonical_absent', 'departed_reappearance'], kinds2
+    finally:
+        os.environ.pop('KML_DEPARTED_PRIORITY', None)
+    logger.info('[test_departed_coexist] PASS: 默认 departed 优先；kill-switch 回退旧排序')
 
 
 def test_scan_departed_dirty_data_fail_open():

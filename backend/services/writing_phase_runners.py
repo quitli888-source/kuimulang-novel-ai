@@ -34,6 +34,39 @@ FORESHADOW_KEYWORD_LEN = 10
 # R4-6: content 短于该长度视为无有效关键词（2 字泛词子串误报率高），跳过不复检
 FORESHADOW_MIN_CONTENT_LEN = 4
 
+# R8-P0-3（S3）: advisory 预算优先级重排 —— departed 类优先 + residual_p0 join。
+# 只改排序键与 join 数据源：预算公式 max(2, PARTS//4) 与每 Part 1 次限流
+# 一字不动（R6 裁定延续）；env KML_DEPARTED_PRIORITY=0 回退 R6-6 旧排序
+# (tier, part)。join 数据源为 per_part_results（终审时点 review_report 尚未
+# 生成，_final_name_audit 在 _aggregate_review_results 之前）。
+_KIND_PRIORITY = {'departed_reappearance': 0, 'canonical_absent': 1, 'advisory': 2}
+
+
+def _residual_map_from_results(per_part_results) -> dict:
+    """R8-P0-3（S3）: 从 per_part_results 现场计算 {part: residual_p0}（确定性 join）。
+
+    repair_note.residual_p0 优先（修复回路结论：passed=0 / failed=重审残留），
+    否则用首检 count_p0（logic p0_count + consistency P0 issue 数；降级结果
+    不计入——count_p0 既有语义）。让每跑 max(2, PARTS//4) 次重审优先注入
+    "确定有残留 P0"的 Part，把弹药送上前线（Part 12/14/17 不再被饿死）。
+    """
+    from services.consistency_repair import count_p0
+    out: dict = {}
+    for e in (per_part_results or []):
+        if not isinstance(e, dict):
+            continue
+        try:
+            part = int(e.get('part'))
+        except (TypeError, ValueError):
+            continue
+        note_residual = e.get('residual_p0')
+        if isinstance(note_residual, int) and note_residual >= 0:
+            out[part] = note_residual
+        else:
+            out[part] = count_p0(e.get('logic_result') or {},
+                                 e.get('consistency_result') or {})
+    return out
+
 
 def check_foreshadow_reveal(foreshadowing: list, part_num: int, part_text: str) -> list:
     """R4-6: 伏笔回收确定性复检（纯函数，零 LLM）。
@@ -450,7 +483,7 @@ class Phase4Runner:
         self.service = service
 
     async def _final_name_audit(self, s, part_nums: list, consistency_agent,
-                                state_mock) -> dict:
+                                state_mock, residual_map: dict = None) -> dict:
         """R5-1: final_draft 确定性终审（双探测器 + 有界动作，零 LLM 扫描）。
 
         探测器 A（违禁对扫描，vale Terms 模式）+ 探测器 B（facts 主语 oracle）。
@@ -468,6 +501,10 @@ class Phase4Runner:
           max(2, PARTS//4) 次；env KML_NAME_AUDIT_REREVIEW_BUDGET 可覆盖，
           显式 0 = 关闭重审只告警）；**B 永不自动改文本、永不进 G4**；
         - 全部 finding 落 s.data['name_audit_log']，词典沉淀随 s._save() 落盘。
+
+        R8-P0-3（S3）: residual_map（{part: residual_p0}，由 per_part_results
+        现场计算）作预算分配二级键 —— kind 优先 → residual>0 优先 → Part 升序；
+        默认 None = 不 join（排序退化为 (kind, part)），既有调用零改。
         """
         from services.consistency_repair import (apply_name_spotfix,
                                                  apply_safety_gates,
@@ -616,7 +653,18 @@ class Phase4Runner:
                             f'例：{f["samples"][0][:40] if f["samples"] else ""}）')
         except Exception as dep_err:
             logger.info(f'[Phase4Runner] 退场复现扫描异常（不影响主流程）: {dep_err}')
-        candidates.sort(key=lambda c: (c['tier'], c['part']))
+        # R8-P0-3（S3）: 预算优先级重排 —— kind 优先（departed_reappearance >
+        # canonical_absent > advisory）→ residual>0 的 Part 优先 → Part 升序。
+        # 公式 max(2, PARTS//4) 与每 Part 1 次限流不动；residual_map=None
+        # （默认）时 residual 分项恒 1，排序退化为 (kind, part)；env
+        # KML_DEPARTED_PRIORITY=0 回退 R6-6 旧排序 (tier, part)
+        if os.environ.get('KML_DEPARTED_PRIORITY', '1') == '0':
+            candidates.sort(key=lambda c: (c['tier'], c['part']))
+        else:
+            rmap = residual_map if isinstance(residual_map, dict) else {}
+            candidates.sort(key=lambda c: (_KIND_PRIORITY.get(c['kind'], 3),
+                                           0 if (rmap.get(c['part']) or 0) > 0 else 1,
+                                           c['part']))
         rereviewed_parts: set = set()
         used = 0
         for c in candidates:
@@ -883,8 +931,12 @@ class Phase4Runner:
             # 必须在 final_draft 建成之后（扫得到交付文本）、聚合之前
             # （name_audit 进得了 G4 detail）；独立 try/except —— 异常只告警，
             # 不得冒泡到外层 except（那会把 final_draft 重置为 parts、丢掉修复）。
+            # R8-P0-3（S3）: residual_map 由 per_part_results 现场计算传入
+            # （review_report 尚未生成，内存 per_part_results 是唯一数据源）。
             try:
-                await self._final_name_audit(s, part_nums, consistency_agent, state_mock)
+                residual_map = _residual_map_from_results(per_part_results)
+                await self._final_name_audit(s, part_nums, consistency_agent,
+                                             state_mock, residual_map=residual_map)
             except Exception as audit_err:
                 logger.info(f'[Phase4Runner] 终审名称审计异常（不影响主流程）: {audit_err}')
             s.data['review_report'] = s._aggregate_review_results(per_part_results)
